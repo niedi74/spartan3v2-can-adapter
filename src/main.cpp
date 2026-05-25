@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <driver/twai.h>
+#include <cstring>
 
 #ifndef ENABLE_WEB_GUI
 #define ENABLE_WEB_GUI 0
@@ -135,9 +136,11 @@ constexpr char kBleStatusUuid[] = "7f510002-5a6b-4d2a-9f20-14a7f3e20000";
 constexpr char kBleCommandUuid[] = "7f510003-5a6b-4d2a-9f20-14a7f3e20000";
 constexpr char kTuneTargetAddress[] = "ef:a8:b2:de:e0:9e";
 constexpr char kTuneNusServiceUuid[] = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
+constexpr char kTuneNusRxUuid[] = "6e400002-b5a3-f393-e0a9-e50e24dcca9e";
 constexpr char kTuneNusTxUuid[] = "6e400003-b5a3-f393-e0a9-e50e24dcca9e";
 constexpr uint32_t kTuneScanWindowMs = 10000;
 constexpr uint32_t kTuneReconnectDelayMs = 5000;
+constexpr uint32_t kTunePingIntervalMs = 1650;
 #endif
 
 struct SpartanReading {
@@ -160,6 +163,7 @@ float tuneVoltage = 0.0f;
 float tuneCoilCurrent = 0.0f;
 uint32_t tuneRxCount = 0;
 uint32_t tuneLastRxMs = 0;
+uint32_t lastTuneDebugMs = 0;
 uint32_t lastDisplayMs = 0;
 uint32_t lastBleNotifyMs = 0;
 String uartLine;
@@ -170,10 +174,14 @@ NimBLECharacteristic *bleStatusCharacteristic = nullptr;
 uint8_t bleClientCount = 0;
 String bleAddress = "";
 NimBLEClient *tuneClient = nullptr;
+NimBLERemoteCharacteristic *tuneNusRx = nullptr;
 NimBLEAddress tuneTargetAddress;
 bool tuneDoConnect = false;
 bool tuneConnected = false;
 uint32_t tuneNextScanMs = 0;
+uint32_t tuneLastPingMs = 0;
+uint32_t tuneScanSeen = 0;
+uint32_t tuneScanCandidates = 0;
 #endif
 #if ENABLE_WEB_GUI
 WebServer server(80);
@@ -344,6 +352,10 @@ String statusJson()
   json += tuneConnected ? "true" : "false";
   json += ",\"tune_rx\":";
   json += String(tuneRxCount);
+  json += ",\"tune_scan_seen\":";
+  json += String(tuneScanSeen);
+  json += ",\"tune_scan_candidates\":";
+  json += String(tuneScanCandidates);
   json += ",\"rpm\":";
   json += String(static_cast<int>(tuneRpm));
   json += ",\"advance\":";
@@ -434,6 +446,7 @@ class TuneClientCallbacks : public NimBLEClientCallbacks {
   void onDisconnect(NimBLEClient *, int reason) override
   {
     tuneConnected = false;
+    tuneNusRx = nullptr;
     Serial.printf("123TUNE BLE: disconnected reason=%d\n", reason);
     scheduleTuneScan();
   }
@@ -441,6 +454,11 @@ class TuneClientCallbacks : public NimBLEClientCallbacks {
 
 void onTuneNotify(NimBLERemoteCharacteristic *, uint8_t *data, size_t length, bool)
 {
+  Serial.printf("123TUNE BLE: notify len=%u :", static_cast<unsigned>(length));
+  for (size_t i = 0; i < length && i < 20; i++) {
+    Serial.printf(" %02X", data[i]);
+  }
+  Serial.println();
   decodeTuneFrame(data, length);
 }
 
@@ -448,21 +466,37 @@ class TuneScanCallbacks : public NimBLEScanCallbacks {
  public:
   void onResult(const NimBLEAdvertisedDevice *device) override
   {
+    tuneScanSeen++;
     String address = device->getAddress().toString().c_str();
     address.toLowerCase();
-    if (address != kTuneTargetAddress) return;
+    String name = device->getName().c_str();
+    name.toLowerCase();
+    const bool addressMatches = address == kTuneTargetAddress;
+    const bool advertisesNus = device->isAdvertisingService(NimBLEUUID(kTuneNusServiceUuid));
+    const bool nameLooksLikeTune = name.indexOf("123") >= 0 || name.indexOf("tune") >= 0 || name.indexOf("raytac") >= 0;
+    if (!addressMatches && !(advertisesNus && nameLooksLikeTune)) {
+      return;
+    }
 
     tuneTargetAddress = device->getAddress();
     tuneDoConnect = true;
     tuneNextScanMs = 0;
+    tuneScanCandidates++;
     NimBLEDevice::getScan()->stop();
-    Serial.printf("123TUNE BLE: found %s\n", address.c_str());
+    Serial.printf("123TUNE BLE: found %s name='%s' nus=%d addrMatch=%d\n",
+                  address.c_str(),
+                  name.c_str(),
+                  advertisesNus ? 1 : 0,
+                  addressMatches ? 1 : 0);
   }
 
   void onScanEnd(const NimBLEScanResults &, int reason) override
   {
     if (!tuneConnected && !tuneDoConnect) {
-      Serial.printf("123TUNE BLE: scan end reason=%d\n", reason);
+      Serial.printf("123TUNE BLE: scan end reason=%d seen=%lu candidates=%lu\n",
+                    reason,
+                    static_cast<unsigned long>(tuneScanSeen),
+                    static_cast<unsigned long>(tuneScanCandidates));
       scheduleTuneScan();
     }
   }
@@ -479,6 +513,8 @@ void startTuneScan()
   scan->setActiveScan(true);
   scan->setInterval(100);
   scan->setWindow(99);
+  tuneScanSeen = 0;
+  tuneScanCandidates = 0;
   Serial.println("123TUNE BLE: scan 10s...");
   if (!scan->start(kTuneScanWindowMs, false)) {
     Serial.println("123TUNE BLE: scan start failed");
@@ -501,6 +537,7 @@ void connectTune()
     scheduleTuneScan();
     return;
   }
+  delay(750);
 
   NimBLERemoteService *service = tuneClient->getService(kTuneNusServiceUuid);
   if (service == nullptr) {
@@ -510,11 +547,34 @@ void connectTune()
     return;
   }
   NimBLERemoteCharacteristic *tx = service->getCharacteristic(kTuneNusTxUuid);
+  tuneNusRx = service->getCharacteristic(kTuneNusRxUuid);
   if (tx == nullptr || !tx->canNotify()) {
     Serial.println("123TUNE BLE: NUS TX notify missing");
     tuneClient->disconnect();
     scheduleTuneScan();
     return;
+  }
+  if (tuneNusRx == nullptr) {
+    Serial.println("123TUNE BLE: NUS RX missing");
+  } else {
+    Serial.printf("123TUNE BLE: RX h=%u W=%d WNR=%d\n",
+                  tuneNusRx->getHandle(),
+                  tuneNusRx->canWrite(),
+                  tuneNusRx->canWriteNoResponse());
+  }
+  Serial.printf("123TUNE BLE: TX h=%u N=%d I=%d\n",
+                tx->getHandle(),
+                tx->canNotify(),
+                tx->canIndicate());
+
+  NimBLERemoteDescriptor *cccd = tx->getDescriptor(NimBLEUUID(static_cast<uint16_t>(0x2902)));
+  if (cccd != nullptr) {
+    uint16_t off = 0x0000;
+    bool offOk = cccd->writeValue(reinterpret_cast<uint8_t *>(&off), 2, true);
+    Serial.printf("123TUNE BLE: CCCD off %s\n", offOk ? "OK" : "FAIL");
+    delay(150);
+  } else {
+    Serial.println("123TUNE BLE: CCCD missing");
   }
 
   const bool ok = tx->subscribe(true, onTuneNotify, true);
@@ -523,7 +583,41 @@ void connectTune()
   if (!ok) {
     tuneClient->disconnect();
     scheduleTuneScan();
+    return;
   }
+
+  if (cccd != nullptr) {
+    NimBLEAttValue value = cccd->readValue();
+    Serial.printf("123TUNE BLE: CCCD read len=%u :", static_cast<unsigned>(value.length()));
+    for (size_t i = 0; i < value.length(); i++) {
+      Serial.printf(" %02X", value.data()[i]);
+    }
+    Serial.println();
+  }
+
+  if (tuneNusRx != nullptr) {
+    const uint8_t ping = '$';
+    const uint8_t enter = '\r';
+    const bool pingOk = tuneNusRx->writeValue(&ping, 1, true);
+    delay(120);
+    const bool enterOk = tuneNusRx->writeValue(&enter, 1, true);
+    tuneLastPingMs = millis();
+    Serial.printf("123TUNE BLE: wake '$' %s, CR %s\n",
+                  pingOk ? "OK" : "FAIL",
+                  enterOk ? "OK" : "FAIL");
+  }
+}
+
+void sendTunePing()
+{
+  if (!tuneConnected || tuneClient == nullptr || !tuneClient->isConnected() || tuneNusRx == nullptr) return;
+  const uint32_t now = millis();
+  if (now - tuneLastPingMs < kTunePingIntervalMs) return;
+  tuneLastPingMs = now;
+
+  const uint8_t ping = '$';
+  const bool ok = tuneNusRx->writeValue(&ping, 1, true);
+  Serial.printf("123TUNE BLE: ping -> %s\n", ok ? "OK" : "FAIL");
 }
 
 void updateTuneBle()
@@ -532,17 +626,32 @@ void updateTuneBle()
     connectTune();
     return;
   }
+  sendTunePing();
   if (!tuneConnected && tuneNextScanMs != 0 && static_cast<int32_t>(millis() - tuneNextScanMs) >= 0) {
     tuneNextScanMs = 0;
     startTuneScan();
   }
 }
 
+void updateTuneDebug()
+{
+  const uint32_t now = millis();
+  if (now - lastTuneDebugMs < 2000) return;
+  lastTuneDebugMs = now;
+  Serial.printf("123TUNE BLE: conn=%d rx=%lu rpm=%d adv=%.1f map=%d age=%lu\n",
+                tuneConnected ? 1 : 0,
+                static_cast<unsigned long>(tuneRxCount),
+                static_cast<int>(tuneRpm),
+                tuneAdvance,
+                static_cast<int>(tuneMap),
+                tuneLastRxMs == 0 ? 0UL : static_cast<unsigned long>(now - tuneLastRxMs));
+}
+
 void setupBleHub()
 {
   NimBLEDevice::init(BLE_HUB_NAME);
   NimBLEDevice::setPower(ESP_PWR_LVL_P9);
-  NimBLEDevice::setMTU(64);
+  NimBLEDevice::setMTU(23);
   bleAddress = NimBLEDevice::getAddress().toString().c_str();
 
   NimBLEServer *bleServer = NimBLEDevice::createServer();
@@ -574,6 +683,7 @@ void setupBleHub()
 void updateBleHub()
 {
   updateTuneBle();
+  updateTuneDebug();
   const uint32_t now = millis();
   if (bleStatusCharacteristic == nullptr || now - lastBleNotifyMs < kBleNotifyIntervalMs) {
     return;
