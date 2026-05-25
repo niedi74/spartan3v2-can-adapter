@@ -409,7 +409,11 @@ void setupWebGui()
   haveSavedWifi = savedSsid.length() > 0;
 
   WiFi.mode(WIFI_AP_STA);
+#if ENABLE_BLE_HUB
+  WiFi.setSleep(true);
+#else
   WiFi.setSleep(false);
+#endif
   WiFi.softAPConfig(
       IPAddress(192, 168, 4, 1),
       IPAddress(192, 168, 4, 1),
@@ -463,6 +467,17 @@ button.danger { background: #8b3c2e; color: #ffe8dc; }
 <div class="row"><span>Status</span><strong id="status">warte</strong></div>
 <div class="row"><span>Sensortemperatur</span><strong id="temp">- C</strong></div>
 <div class="row"><span>CAN</span><strong id="can">-</strong></div>
+</div>
+<div class="setup">
+<strong>BLE Hub / Gateway</strong>
+<p class="hint">Fuer M5/Waveshare Gateway-Modus. Der M5 soll per Name plus Service UUID scannen; die Adresse ist nur Debug/Fast-Reconnect.</p>
+<div class="row"><span>Status</span><strong id="bleenabled">-</strong></div>
+<div class="row"><span>Name</span><strong id="blename" class="mono">-</strong></div>
+<div class="row"><span>Adresse</span><strong id="bleaddr" class="mono">-</strong></div>
+<div class="row"><span>Clients</span><strong id="bleclients">0</strong></div>
+<div class="row"><span>Service</span><strong class="mono">7f510001-5a6b-4d2a-9f20-14a7f3e20000</strong></div>
+<div class="row"><span>Status Notify</span><strong class="mono">7f510002-5a6b-4d2a-9f20-14a7f3e20000</strong></div>
+<div class="row"><span>Command Write</span><strong class="mono">7f510003-5a6b-4d2a-9f20-14a7f3e20000</strong></div>
 </div>
 <div class="setup">
 <strong>Heim-WLAN</strong>
@@ -520,6 +535,10 @@ async function refresh() {
     document.getElementById('status').textContent = d.status;
     document.getElementById('temp').textContent = d.valid ? d.temperature + ' C' : '- C';
     document.getElementById('can').textContent = d.can_ready ? 'aktiv' : 'Fehler';
+    document.getElementById('bleenabled').textContent = d.ble_name ? 'aktiv' : 'nicht im Build';
+    document.getElementById('blename').textContent = d.ble_name || '-';
+    document.getElementById('bleaddr').textContent = d.ble_address || '-';
+    document.getElementById('bleclients').textContent = d.ble_clients ?? '0';
     document.getElementById('wifi').textContent = d.wifi_connected ? d.wifi_ssid : (d.wifi_saved ? 'verbindet...' : 'nicht eingerichtet');
     document.getElementById('lanip').textContent = d.wifi_connected ? d.wifi_ip : '-';
     document.getElementById('ucmd').textContent = d.uart_command || '-';
@@ -828,8 +847,8 @@ void setup()
 
   setupDisplay();
   printBootDetails();
-  setupWebGui();
   setupBleHub();
+  setupWebGui();
   setupCan();
   setupUart();
 #if ENABLE_SPARTAN_ANALOG
