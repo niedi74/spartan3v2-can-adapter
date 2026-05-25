@@ -5,11 +5,19 @@
 #define ENABLE_WEB_GUI 0
 #endif
 
+#ifndef ENABLE_BLE_HUB
+#define ENABLE_BLE_HUB 0
+#endif
+
 #if ENABLE_WEB_GUI
 #include <DNSServer.h>
 #include <Preferences.h>
 #include <WebServer.h>
 #include <WiFi.h>
+#endif
+
+#if ENABLE_BLE_HUB
+#include <NimBLEDevice.h>
 #endif
 
 #ifdef USE_M5_DISPLAY
@@ -104,6 +112,10 @@
 #define SPARTAN_UART_TX_PIN 27
 #endif
 
+#ifndef BLE_HUB_NAME
+#define BLE_HUB_NAME "Spartan3-Hub"
+#endif
+
 namespace {
 #ifdef USE_M5_DISPLAY
 constexpr uint8_t kDisplayRows = 2;
@@ -112,9 +124,15 @@ LiquidCrystal_I2C lcd(LCD_I2C_ADDR, LCD_COLS, LCD_ROWS);
 #endif
 
 constexpr uint32_t kDisplayIntervalMs = 200;
+constexpr uint32_t kBleNotifyIntervalMs = 250;
 constexpr uint32_t kCanStaleMs = 500;
 constexpr float kLambdaAtZeroVolt = 0.68f;
 constexpr float kLambdaAtFiveVolt = 1.36f;
+#if ENABLE_BLE_HUB
+constexpr char kBleServiceUuid[] = "7f510001-5a6b-4d2a-9f20-14a7f3e20000";
+constexpr char kBleStatusUuid[] = "7f510002-5a6b-4d2a-9f20-14a7f3e20000";
+constexpr char kBleCommandUuid[] = "7f510003-5a6b-4d2a-9f20-14a7f3e20000";
+#endif
 
 struct SpartanReading {
   float lambda = 0.0f;
@@ -129,9 +147,15 @@ struct SpartanReading {
 SpartanReading reading;
 bool canReady = false;
 uint32_t lastDisplayMs = 0;
+uint32_t lastBleNotifyMs = 0;
 String uartLine;
 String lastUartCommand = "";
 String lastUartResponse = "";
+#if ENABLE_BLE_HUB
+NimBLECharacteristic *bleStatusCharacteristic = nullptr;
+uint8_t bleClientCount = 0;
+String bleAddress = "";
+#endif
 #if ENABLE_WEB_GUI
 WebServer server(80);
 DNSServer dns;
@@ -251,6 +275,130 @@ void sendSpartanUartCommand(const String &command)
   (void)command;
 #endif
 }
+
+String statusJson()
+{
+  String json = "{\"valid\":";
+  json += reading.valid ? "true" : "false";
+  json += ",\"lambda\":";
+  json += String(reading.lambda, 3);
+  json += ",\"temperature\":";
+  json += String(reading.temperatureC);
+  json += ",\"status\":\"";
+  json += statusText(reading.status);
+  json += "\",\"status_code\":";
+  json += String(reading.status);
+  json += ",\"source\":\"";
+  json += sourceText();
+  json += "\",\"can_ready\":";
+  json += canReady ? "true" : "false";
+  json += ",\"age_ms\":";
+  json += reading.valid ? String(millis() - reading.receivedMs) : "0";
+#if ENABLE_BLE_HUB
+  json += ",\"ble_clients\":";
+  json += String(bleClientCount);
+  json += ",\"ble_name\":\"";
+  json += BLE_HUB_NAME;
+  json += "\",\"ble_address\":\"";
+  json += bleAddress;
+  json += "\"";
+#endif
+#if ENABLE_WEB_GUI
+  json += ",\"wifi_saved\":";
+  json += haveSavedWifi ? "true" : "false";
+  json += ",\"wifi_connected\":";
+  json += WiFi.status() == WL_CONNECTED ? "true" : "false";
+  json += ",\"wifi_ssid\":\"";
+  json += WiFi.status() == WL_CONNECTED ? WiFi.SSID() : "";
+  json += "\",\"wifi_ip\":\"";
+  json += WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : "";
+  json += "\"";
+#endif
+  json += ",\"uart_command\":\"";
+  json += lastUartCommand;
+  json += "\",\"uart_response\":\"";
+  json += lastUartResponse;
+  json += "\"";
+  json += "}";
+  return json;
+}
+
+#if ENABLE_BLE_HUB
+class BleServerCallbacks : public NimBLEServerCallbacks {
+ public:
+  void onConnect(NimBLEServer *, NimBLEConnInfo &) override
+  {
+    bleClientCount++;
+    Serial.printf("BLE hub:     client connected, count=%u\n", bleClientCount);
+  }
+
+  void onDisconnect(NimBLEServer *, NimBLEConnInfo &, int) override
+  {
+    if (bleClientCount > 0) {
+      bleClientCount--;
+    }
+    Serial.printf("BLE hub:     client disconnected, count=%u\n", bleClientCount);
+    NimBLEDevice::startAdvertising();
+  }
+};
+
+class BleCommandCallbacks : public NimBLECharacteristicCallbacks {
+ public:
+  void onWrite(NimBLECharacteristic *characteristic, NimBLEConnInfo &) override
+  {
+    sendSpartanUartCommand(characteristic->getValue().c_str());
+  }
+};
+
+void setupBleHub()
+{
+  NimBLEDevice::init(BLE_HUB_NAME);
+  NimBLEDevice::setPower(ESP_PWR_LVL_P9);
+  bleAddress = NimBLEDevice::getAddress().toString().c_str();
+
+  NimBLEServer *bleServer = NimBLEDevice::createServer();
+  bleServer->setCallbacks(new BleServerCallbacks());
+
+  NimBLEService *service = bleServer->createService(kBleServiceUuid);
+  bleStatusCharacteristic = service->createCharacteristic(
+      kBleStatusUuid,
+      NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY);
+  NimBLECharacteristic *commandCharacteristic = service->createCharacteristic(
+      kBleCommandUuid,
+      NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);
+  commandCharacteristic->setCallbacks(new BleCommandCallbacks());
+
+  bleServer->start();
+
+  NimBLEAdvertising *advertising = NimBLEDevice::getAdvertising();
+  advertising->addServiceUUID(kBleServiceUuid);
+  advertising->setName(BLE_HUB_NAME);
+  advertising->start();
+
+  Serial.printf("BLE hub:     '%s' addr=%s service=%s\n",
+                BLE_HUB_NAME,
+                bleAddress.c_str(),
+                kBleServiceUuid);
+}
+
+void updateBleHub()
+{
+  const uint32_t now = millis();
+  if (bleStatusCharacteristic == nullptr || now - lastBleNotifyMs < kBleNotifyIntervalMs) {
+    return;
+  }
+  lastBleNotifyMs = now;
+
+  const String payload = statusJson();
+  bleStatusCharacteristic->setValue(payload.c_str());
+  if (bleClientCount > 0) {
+    bleStatusCharacteristic->notify();
+  }
+}
+#else
+void setupBleHub() {}
+void updateBleHub() {}
+#endif
 
 void setupWebGui()
 {
@@ -384,33 +532,7 @@ setInterval(refresh, 350);
   });
 
   const auto sendStatus = []() {
-    String json = "{\"valid\":";
-    json += reading.valid ? "true" : "false";
-    json += ",\"lambda\":";
-    json += String(reading.lambda, 3);
-    json += ",\"temperature\":";
-    json += String(reading.temperatureC);
-    json += ",\"status\":\"";
-    json += statusText(reading.status);
-    json += "\",\"source\":\"";
-    json += sourceText();
-    json += "\",\"can_ready\":";
-    json += canReady ? "true" : "false";
-    json += ",\"wifi_saved\":";
-    json += haveSavedWifi ? "true" : "false";
-    json += ",\"wifi_connected\":";
-    json += WiFi.status() == WL_CONNECTED ? "true" : "false";
-    json += ",\"wifi_ssid\":\"";
-    json += WiFi.status() == WL_CONNECTED ? WiFi.SSID() : "";
-    json += "\",\"wifi_ip\":\"";
-    json += WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : "";
-    json += "\",\"uart_command\":\"";
-    json += lastUartCommand;
-    json += "\",\"uart_response\":\"";
-    json += lastUartResponse;
-    json += "\"";
-    json += "}";
-    server.send(200, "application/json", json);
+    server.send(200, "application/json", statusJson());
   };
   server.on("/state", sendStatus);
   server.on("/api/status", sendStatus);
@@ -688,6 +810,11 @@ void printBootDetails()
 #else
   Serial.println("Web GUI:     disabled");
 #endif
+#if ENABLE_BLE_HUB
+  Serial.println("BLE hub:     enabled as GATT peripheral");
+#else
+  Serial.println("BLE hub:     disabled");
+#endif
 }
 }
 
@@ -702,6 +829,7 @@ void setup()
   setupDisplay();
   printBootDetails();
   setupWebGui();
+  setupBleHub();
   setupCan();
   setupUart();
 #if ENABLE_SPARTAN_ANALOG
@@ -719,6 +847,7 @@ void loop()
   updateAnalog();
   updateUart();
   updateWebGui();
+  updateBleHub();
   updateDisplay();
   delay(5);
 }

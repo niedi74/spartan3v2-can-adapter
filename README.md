@@ -15,6 +15,7 @@ Display firmware for a dedicated ESP32 Dev adapter board connected to a 14Point7
 - Optional interfaces: protected UART and scaled analog input
 - Current bring-up mode: simulated Spartan readings until the CAN module arrives
 - Setup Web GUI: ESP32 access point `Spartan3-Setup`, password `lambda123`
+- BLE gateway prototype: advertises `Spartan3-Hub` for M5/Waveshare cockpit clients
 
 ### M5
 
@@ -88,6 +89,22 @@ This means the adapter needs only the ESP32 USB connection for setup from a lapt
 | UART GND | GND | Common ground |
 
 Do not use ESP32 `GPIO 1/3` for Spartan UART on this board; those are normally tied to the ESP32 USB serial/programming port. `Serial2` on `GPIO 26/27` keeps programming/debug USB and Spartan configuration separate.
+
+## BLE gateway mode
+
+The `motorraum` build also starts a NimBLE GATT peripheral named `Spartan3-Hub`. This is the first step toward using the Spartan ESP as the central engine-bay gateway:
+
+```text
+123TUNE+ -> Spartan ESP -> M5 Dial / Waveshare display
+Spartan 3 v2 -> Spartan ESP -> M5 Dial / Waveshare display
+Reed speed contact -> Spartan ESP -> M5 Dial / Waveshare display
+```
+
+The current firmware publishes the Spartan status JSON by BLE Notify every 250 ms. The M5 should keep its existing direct 123TUNE+ connection mode and add a second menu mode named `Spartan Gateway`; in that mode it connects to `Spartan3-Hub` instead of the 123TUNE+ and reads combined cockpit data from there.
+
+The Spartan ESP prints its BLE address during boot and exposes it in `/state` as `ble_address`. For the first M5 implementation, scan by advertised name plus service UUID; store the address only as an optional fast reconnect/debug hint.
+
+See [docs/ble-gateway-architecture.md](docs/ble-gateway-architecture.md) for the target architecture, BLE UUIDs, M5 mode split, M5 project notes and 123TUNE+ intake plan.
 
 ## Optional analog fallback
 
