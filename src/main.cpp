@@ -324,6 +324,17 @@ String statusJson()
 }
 
 #if ENABLE_BLE_HUB
+String bleStatusPayload()
+{
+  String payload = "L";
+  payload += reading.valid ? String(reading.lambda, 3) : "0.000";
+  payload += ",T";
+  payload += String(reading.temperatureC);
+  payload += ",S";
+  payload += String(reading.status);
+  return payload;
+}
+
 class BleServerCallbacks : public NimBLEServerCallbacks {
  public:
   void onConnect(NimBLEServer *, NimBLEConnInfo &) override
@@ -389,7 +400,7 @@ void updateBleHub()
   }
   lastBleNotifyMs = now;
 
-  const String payload = statusJson();
+  const String payload = bleStatusPayload();
   bleStatusCharacteristic->setValue(payload.c_str());
   if (bleClientCount > 0) {
     bleStatusCharacteristic->notify();
