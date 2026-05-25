@@ -642,6 +642,35 @@ void sendTunePing()
   Serial.printf("123TUNE BLE: ping -> %s\n", ok ? "OK" : "FAIL");
 }
 
+bool sendTuneCommand(const char *command)
+{
+  if (!tuneConnected || tuneClient == nullptr || !tuneClient->isConnected() || tuneNusRx == nullptr) {
+    Serial.println("123TUNE BLE: command blocked, not connected");
+    return false;
+  }
+
+  char buffer[24];
+  snprintf(buffer, sizeof(buffer), "%s\r$", command);
+  const bool ok = tuneNusRx->writeValue(reinterpret_cast<uint8_t *>(buffer), strlen(buffer), true);
+  Serial.printf("123TUNE BLE: cmd '%s\\r$' -> %s\n", command, ok ? "OK" : "FAIL");
+  tuneLastPingMs = millis();
+  return ok;
+}
+
+void runTuneReadDump()
+{
+  Serial.println("123TUNE BLE: read dump v@ 10@ 11@ 12@ 13@");
+  sendTuneCommand("v@");
+  delay(500);
+  sendTuneCommand("10@");
+  delay(500);
+  sendTuneCommand("11@");
+  delay(500);
+  sendTuneCommand("12@");
+  delay(500);
+  sendTuneCommand("13@");
+}
+
 void updateTuneBle()
 {
   if (tuneDoConnect) {
@@ -1105,6 +1134,7 @@ void setupUart()
       SPARTAN_UART_RX_PIN,
       SPARTAN_UART_TX_PIN);
   Serial.println("UART bridge: type >GETFW or >GETCANID in USB serial monitor");
+  Serial.println("123TUNE BLE: type !read for v@/10@/11@/12@/13@ dump or !v@ for one command");
 #endif
 }
 
@@ -1126,6 +1156,14 @@ void updateUart()
     if (c == '\r' || c == '\n') {
       if (uartLine.startsWith(">") && uartLine.length() > 1) {
         sendSpartanUartCommand(uartLine.substring(1));
+      } else if (uartLine == "!read") {
+        runTuneReadDump();
+      } else if (uartLine.startsWith("!") && uartLine.length() > 1) {
+        String command = uartLine.substring(1);
+        command.trim();
+        if (command.length() > 0 && command.length() < 16) {
+          sendTuneCommand(command.c_str());
+        }
       }
       uartLine = "";
     } else {
