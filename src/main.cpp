@@ -141,6 +141,7 @@ constexpr char kTuneNusTxUuid[] = "6e400003-b5a3-f393-e0a9-e50e24dcca9e";
 constexpr uint32_t kTuneScanWindowMs = 10000;
 constexpr uint32_t kTuneReconnectDelayMs = 5000;
 constexpr uint32_t kTunePingIntervalMs = 1650;
+constexpr uint32_t kBleHubAdvertiseFallbackMs = 30000;
 #endif
 
 struct SpartanReading {
@@ -173,6 +174,8 @@ String lastUartResponse = "";
 NimBLECharacteristic *bleStatusCharacteristic = nullptr;
 uint8_t bleClientCount = 0;
 String bleAddress = "";
+bool bleAdvertisingStarted = false;
+uint32_t bleHubSetupMs = 0;
 NimBLEClient *tuneClient = nullptr;
 NimBLERemoteCharacteristic *tuneNusRx = nullptr;
 NimBLEAddress tuneTargetAddress;
@@ -424,7 +427,9 @@ class BleServerCallbacks : public NimBLEServerCallbacks {
       bleClientCount--;
     }
     Serial.printf("BLE hub:     client disconnected, count=%u\n", bleClientCount);
-    NimBLEDevice::startAdvertising();
+    if (bleAdvertisingStarted) {
+      NimBLEDevice::startAdvertising();
+    }
   }
 };
 
@@ -439,6 +444,19 @@ class BleCommandCallbacks : public NimBLECharacteristicCallbacks {
 void scheduleTuneScan()
 {
   tuneNextScanMs = millis() + kTuneReconnectDelayMs;
+}
+
+void resetTuneClient()
+{
+  if (tuneClient == nullptr) return;
+  if (tuneClient->isConnected()) {
+    tuneClient->disconnect();
+  }
+  NimBLEDevice::deleteClient(tuneClient);
+  tuneClient = nullptr;
+  tuneNusRx = nullptr;
+  tuneConnected = false;
+  tuneLastPingMs = 0;
 }
 
 class TuneClientCallbacks : public NimBLEClientCallbacks {
@@ -526,6 +544,9 @@ void connectTune()
 {
   tuneDoConnect = false;
   if (tuneConnected) return;
+  if (tuneClient != nullptr && !tuneClient->isConnected()) {
+    resetTuneClient();
+  }
   if (tuneClient == nullptr) {
     tuneClient = NimBLEDevice::createClient();
     tuneClient->setClientCallbacks(&tuneClientCallbacks, false);
@@ -534,6 +555,7 @@ void connectTune()
   Serial.println("123TUNE BLE: connecting...");
   if (!tuneClient->connect(tuneTargetAddress, true, false, false)) {
     Serial.println("123TUNE BLE: connect failed");
+    resetTuneClient();
     scheduleTuneScan();
     return;
   }
@@ -647,12 +669,21 @@ void updateTuneDebug()
                 tuneLastRxMs == 0 ? 0UL : static_cast<unsigned long>(now - tuneLastRxMs));
 }
 
+void startBleHubAdvertising()
+{
+  if (bleAdvertisingStarted) return;
+  NimBLEDevice::startAdvertising();
+  bleAdvertisingStarted = true;
+  Serial.println("BLE hub:     advertising started");
+}
+
 void setupBleHub()
 {
   NimBLEDevice::init(BLE_HUB_NAME);
   NimBLEDevice::setPower(ESP_PWR_LVL_P9);
   NimBLEDevice::setMTU(23);
   bleAddress = NimBLEDevice::getAddress().toString().c_str();
+  bleHubSetupMs = millis();
 
   NimBLEServer *bleServer = NimBLEDevice::createServer();
   bleServer->setCallbacks(new BleServerCallbacks());
@@ -671,12 +702,12 @@ void setupBleHub()
   NimBLEAdvertising *advertising = NimBLEDevice::getAdvertising();
   advertising->addServiceUUID(kBleServiceUuid);
   advertising->setName(BLE_HUB_NAME);
-  advertising->start();
 
   Serial.printf("BLE hub:     '%s' addr=%s service=%s\n",
                 BLE_HUB_NAME,
                 bleAddress.c_str(),
                 kBleServiceUuid);
+  Serial.println("BLE hub:     advertising waits for 123TUNE or 30s fallback");
   startTuneScan();
 }
 
@@ -685,6 +716,10 @@ void updateBleHub()
   updateTuneBle();
   updateTuneDebug();
   const uint32_t now = millis();
+  if (!bleAdvertisingStarted &&
+      (tuneConnected || static_cast<int32_t>(now - bleHubSetupMs - kBleHubAdvertiseFallbackMs) >= 0)) {
+    startBleHubAdvertising();
+  }
   if (bleStatusCharacteristic == nullptr || now - lastBleNotifyMs < kBleNotifyIntervalMs) {
     return;
   }
