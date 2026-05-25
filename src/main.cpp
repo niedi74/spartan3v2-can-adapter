@@ -133,6 +133,11 @@ constexpr float kLambdaAtFiveVolt = 1.36f;
 constexpr char kBleServiceUuid[] = "7f510001-5a6b-4d2a-9f20-14a7f3e20000";
 constexpr char kBleStatusUuid[] = "7f510002-5a6b-4d2a-9f20-14a7f3e20000";
 constexpr char kBleCommandUuid[] = "7f510003-5a6b-4d2a-9f20-14a7f3e20000";
+constexpr char kTuneTargetAddress[] = "ef:a8:b2:de:e0:9e";
+constexpr char kTuneNusServiceUuid[] = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
+constexpr char kTuneNusTxUuid[] = "6e400003-b5a3-f393-e0a9-e50e24dcca9e";
+constexpr uint32_t kTuneScanWindowMs = 10000;
+constexpr uint32_t kTuneReconnectDelayMs = 5000;
 #endif
 
 struct SpartanReading {
@@ -147,6 +152,14 @@ struct SpartanReading {
 
 SpartanReading reading;
 bool canReady = false;
+float tuneRpm = 0.0f;
+float tuneAdvance = 0.0f;
+float tuneMap = 0.0f;
+float tuneTemperature = 0.0f;
+float tuneVoltage = 0.0f;
+float tuneCoilCurrent = 0.0f;
+uint32_t tuneRxCount = 0;
+uint32_t tuneLastRxMs = 0;
 uint32_t lastDisplayMs = 0;
 uint32_t lastBleNotifyMs = 0;
 String uartLine;
@@ -156,6 +169,11 @@ String lastUartResponse = "";
 NimBLECharacteristic *bleStatusCharacteristic = nullptr;
 uint8_t bleClientCount = 0;
 String bleAddress = "";
+NimBLEClient *tuneClient = nullptr;
+NimBLEAddress tuneTargetAddress;
+bool tuneDoConnect = false;
+bool tuneConnected = false;
+uint32_t tuneNextScanMs = 0;
 #endif
 #if ENABLE_WEB_GUI
 WebServer server(80);
@@ -322,20 +340,62 @@ String statusJson()
   json += "\",\"uart_response\":\"";
   json += lastUartResponse;
   json += "\"";
+  json += ",\"tune_connected\":";
+  json += tuneConnected ? "true" : "false";
+  json += ",\"tune_rx\":";
+  json += String(tuneRxCount);
+  json += ",\"rpm\":";
+  json += String(static_cast<int>(tuneRpm));
+  json += ",\"advance\":";
+  json += String(tuneAdvance, 1);
+  json += ",\"map\":";
+  json += String(static_cast<int>(tuneMap));
+  json += ",\"tune_temp\":";
+  json += String(static_cast<int>(tuneTemperature));
+  json += ",\"volt\":";
+  json += String(tuneVoltage, 1);
   json += "}";
   return json;
 }
 
 #if ENABLE_BLE_HUB
+int hexNibble(uint8_t c)
+{
+  if (c >= '0' && c <= '9') return c - '0';
+  if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+  if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+  return 0;
+}
+
+void decodeTuneFrame(const uint8_t *data, size_t length)
+{
+  if (length < 3) return;
+  const int hi = hexNibble(data[1]);
+  const int lo = hexNibble(data[2]);
+  const int raw = (hi << 4) | lo;
+
+  switch (data[0]) {
+    case 0x30: tuneRpm = hi * 800.0f + lo * 50.0f; break;
+    case 0x31: tuneAdvance = hi * 3.2f + lo * 0.2f; break;
+    case 0x32: tuneMap = static_cast<float>(raw); break;
+    case 0x33: tuneTemperature = static_cast<float>(raw - 30); break;
+    case 0x35: tuneCoilCurrent = raw / 8.65f; break;
+    case 0x41: tuneVoltage = raw / 4.54f; break;
+    default: break;
+  }
+  tuneRxCount++;
+  tuneLastRxMs = millis();
+}
+
 String bleStatusPayload()
 {
-  String payload = "L";
-  payload += reading.valid ? String(reading.lambda, 3) : "0.000";
-  payload += ",T";
-  payload += String(reading.temperatureC);
-  payload += ",S";
-  payload += String(reading.status);
-  return payload;
+  char payload[24];
+  snprintf(payload, sizeof(payload), "L%.2fR%dA%dM%d",
+           reading.valid ? reading.lambda : 0.0f,
+           static_cast<int>(tuneRpm),
+           static_cast<int>(tuneAdvance),
+           static_cast<int>(tuneMap));
+  return String(payload);
 }
 
 class BleServerCallbacks : public NimBLEServerCallbacks {
@@ -364,10 +424,125 @@ class BleCommandCallbacks : public NimBLECharacteristicCallbacks {
   }
 };
 
+void scheduleTuneScan()
+{
+  tuneNextScanMs = millis() + kTuneReconnectDelayMs;
+}
+
+class TuneClientCallbacks : public NimBLEClientCallbacks {
+ public:
+  void onDisconnect(NimBLEClient *, int reason) override
+  {
+    tuneConnected = false;
+    Serial.printf("123TUNE BLE: disconnected reason=%d\n", reason);
+    scheduleTuneScan();
+  }
+};
+
+void onTuneNotify(NimBLERemoteCharacteristic *, uint8_t *data, size_t length, bool)
+{
+  decodeTuneFrame(data, length);
+}
+
+class TuneScanCallbacks : public NimBLEScanCallbacks {
+ public:
+  void onResult(const NimBLEAdvertisedDevice *device) override
+  {
+    String address = device->getAddress().toString().c_str();
+    address.toLowerCase();
+    if (address != kTuneTargetAddress) return;
+
+    tuneTargetAddress = device->getAddress();
+    tuneDoConnect = true;
+    tuneNextScanMs = 0;
+    NimBLEDevice::getScan()->stop();
+    Serial.printf("123TUNE BLE: found %s\n", address.c_str());
+  }
+
+  void onScanEnd(const NimBLEScanResults &, int reason) override
+  {
+    if (!tuneConnected && !tuneDoConnect) {
+      Serial.printf("123TUNE BLE: scan end reason=%d\n", reason);
+      scheduleTuneScan();
+    }
+  }
+};
+
+TuneClientCallbacks tuneClientCallbacks;
+TuneScanCallbacks tuneScanCallbacks;
+
+void startTuneScan()
+{
+  if (tuneConnected || tuneDoConnect) return;
+  NimBLEScan *scan = NimBLEDevice::getScan();
+  scan->setScanCallbacks(&tuneScanCallbacks, false);
+  scan->setActiveScan(true);
+  scan->setInterval(100);
+  scan->setWindow(99);
+  Serial.println("123TUNE BLE: scan 10s...");
+  if (!scan->start(kTuneScanWindowMs, false)) {
+    Serial.println("123TUNE BLE: scan start failed");
+    scheduleTuneScan();
+  }
+}
+
+void connectTune()
+{
+  tuneDoConnect = false;
+  if (tuneConnected) return;
+  if (tuneClient == nullptr) {
+    tuneClient = NimBLEDevice::createClient();
+    tuneClient->setClientCallbacks(&tuneClientCallbacks, false);
+  }
+  tuneClient->setConnectionParams(16, 32, 0, 400);
+  Serial.println("123TUNE BLE: connecting...");
+  if (!tuneClient->connect(tuneTargetAddress, true, false, false)) {
+    Serial.println("123TUNE BLE: connect failed");
+    scheduleTuneScan();
+    return;
+  }
+
+  NimBLERemoteService *service = tuneClient->getService(kTuneNusServiceUuid);
+  if (service == nullptr) {
+    Serial.println("123TUNE BLE: NUS service missing");
+    tuneClient->disconnect();
+    scheduleTuneScan();
+    return;
+  }
+  NimBLERemoteCharacteristic *tx = service->getCharacteristic(kTuneNusTxUuid);
+  if (tx == nullptr || !tx->canNotify()) {
+    Serial.println("123TUNE BLE: NUS TX notify missing");
+    tuneClient->disconnect();
+    scheduleTuneScan();
+    return;
+  }
+
+  const bool ok = tx->subscribe(true, onTuneNotify, true);
+  tuneConnected = ok;
+  Serial.printf("123TUNE BLE: subscribe %s\n", ok ? "OK" : "FAIL");
+  if (!ok) {
+    tuneClient->disconnect();
+    scheduleTuneScan();
+  }
+}
+
+void updateTuneBle()
+{
+  if (tuneDoConnect) {
+    connectTune();
+    return;
+  }
+  if (!tuneConnected && tuneNextScanMs != 0 && static_cast<int32_t>(millis() - tuneNextScanMs) >= 0) {
+    tuneNextScanMs = 0;
+    startTuneScan();
+  }
+}
+
 void setupBleHub()
 {
   NimBLEDevice::init(BLE_HUB_NAME);
   NimBLEDevice::setPower(ESP_PWR_LVL_P9);
+  NimBLEDevice::setMTU(64);
   bleAddress = NimBLEDevice::getAddress().toString().c_str();
 
   NimBLEServer *bleServer = NimBLEDevice::createServer();
@@ -393,10 +568,12 @@ void setupBleHub()
                 BLE_HUB_NAME,
                 bleAddress.c_str(),
                 kBleServiceUuid);
+  startTuneScan();
 }
 
 void updateBleHub()
 {
+  updateTuneBle();
   const uint32_t now = millis();
   if (bleStatusCharacteristic == nullptr || now - lastBleNotifyMs < kBleNotifyIntervalMs) {
     return;
