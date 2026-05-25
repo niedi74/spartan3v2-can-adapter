@@ -482,6 +482,7 @@ button.danger { background: #8b3c2e; color: #ffe8dc; }
 <div class="setup">
 <strong>BLE Hub / Gateway</strong>
 <p class="hint">Fuer M5/Waveshare Gateway-Modus. Der M5 soll per Name plus Service UUID scannen; die Adresse ist nur Debug/Fast-Reconnect.</p>
+<p class="hint">Road-AP: Handy mit <span class="mono">Spartan3-Setup</span> verbinden. Spartan ist <a class="mono" href="http://192.168.4.1/">192.168.4.1</a>, M5 Dial ist <a class="mono" href="http://192.168.4.2/">192.168.4.2</a>, wenn dort der Spartan-AP-Preset aktiv ist.</p>
 <div class="row"><span>Status</span><strong id="bleenabled">-</strong></div>
 <div class="row"><span>Name</span><strong id="blename" class="mono">-</strong></div>
 <div class="row"><span>Adresse</span><strong id="bleaddr" class="mono">-</strong></div>
