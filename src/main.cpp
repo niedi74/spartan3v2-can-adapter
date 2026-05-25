@@ -126,6 +126,7 @@ LiquidCrystal_I2C lcd(LCD_I2C_ADDR, LCD_COLS, LCD_ROWS);
 constexpr uint32_t kDisplayIntervalMs = 200;
 constexpr uint32_t kBleNotifyIntervalMs = 250;
 constexpr uint32_t kCanStaleMs = 500;
+constexpr uint32_t kHomeWifiConnectWindowMs = 15000;
 constexpr float kLambdaAtZeroVolt = 0.68f;
 constexpr float kLambdaAtFiveVolt = 1.36f;
 #if ENABLE_BLE_HUB
@@ -161,6 +162,8 @@ WebServer server(80);
 DNSServer dns;
 Preferences networkPreferences;
 bool haveSavedWifi = false;
+uint32_t homeWifiConnectStartedMs = 0;
+bool homeWifiDisabledForRoadAp = false;
 #endif
 
 String fitLine(const String &text)
@@ -429,13 +432,14 @@ void setupWebGui()
       IPAddress(192, 168, 4, 1),
       IPAddress(192, 168, 4, 1),
       IPAddress(255, 255, 255, 0));
-  if (!WiFi.softAP(WEB_AP_SSID, WEB_AP_PASSWORD)) {
+  if (!WiFi.softAP(WEB_AP_SSID, WEB_AP_PASSWORD, 6, 0, 4)) {
     Serial.println("Web GUI:     access point start failed");
     return;
   }
 
   if (haveSavedWifi) {
     WiFi.begin(savedSsid.c_str(), savedPassword.c_str());
+    homeWifiConnectStartedMs = millis();
     Serial.printf("Home WiFi:   connecting to '%s'\n", savedSsid.c_str());
   } else {
     Serial.println("Home WiFi:   not configured");
@@ -567,6 +571,11 @@ setInterval(refresh, 350);
   };
   server.on("/state", sendStatus);
   server.on("/api/status", sendStatus);
+  server.on("/generate_204", []() { server.send(204, "text/plain", ""); });
+  server.on("/gen_204", []() { server.send(204, "text/plain", ""); });
+  server.on("/hotspot-detect.html", []() { server.send(200, "text/html", "<html><body>Success</body></html>"); });
+  server.on("/ncsi.txt", []() { server.send(200, "text/plain", "Microsoft NCSI"); });
+  server.on("/connecttest.txt", []() { server.send(200, "text/plain", "Microsoft Connect Test"); });
   server.on("/wifi", HTTP_POST, []() {
     String ssid = server.arg("ssid");
     const String password = server.arg("pass");
@@ -646,8 +655,25 @@ void updateWebGui()
   if (wifiStatus != lastWifiStatus) {
     lastWifiStatus = wifiStatus;
     if (wifiStatus == WL_CONNECTED) {
+      homeWifiDisabledForRoadAp = false;
+      homeWifiConnectStartedMs = 0;
       Serial.printf("Home WiFi:   connected to '%s', http://%s/\n", WiFi.SSID().c_str(), WiFi.localIP().toString().c_str());
     }
+  }
+  if (haveSavedWifi && !homeWifiDisabledForRoadAp && wifiStatus != WL_CONNECTED &&
+      homeWifiConnectStartedMs != 0 && millis() - homeWifiConnectStartedMs >= kHomeWifiConnectWindowMs) {
+    WiFi.disconnect(false, false);
+    WiFi.mode(WIFI_AP);
+    WiFi.setSleep(true);
+    WiFi.softAPConfig(
+        IPAddress(192, 168, 4, 1),
+        IPAddress(192, 168, 4, 1),
+        IPAddress(255, 255, 255, 0));
+    WiFi.softAP(WEB_AP_SSID, WEB_AP_PASSWORD, 6, 0, 4);
+    homeWifiDisabledForRoadAp = true;
+    Serial.printf("Home WiFi:   unavailable, road AP only '%s' http://%s/\n",
+                  WEB_AP_SSID,
+                  WiFi.softAPIP().toString().c_str());
   }
   dns.processNextRequest();
   server.handleClient();
@@ -847,7 +873,8 @@ void printBootDetails()
   Serial.println("BLE hub:     disabled");
 #endif
 }
-}
+
+}  // namespace
 
 void setup()
 {
@@ -880,5 +907,5 @@ void loop()
   updateWebGui();
   updateBleHub();
   updateDisplay();
-  delay(5);
+  delay(10);
 }
