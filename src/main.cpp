@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <driver/twai.h>
+#include <esp_heap_caps.h>
 #include <cstring>
 
 #ifndef ENABLE_WEB_GUI
@@ -154,8 +155,25 @@ struct SpartanReading {
   bool fromDemo = false;
 };
 
+struct TuneSnapshot {
+  float rpm = 0.0f;
+  float advance = 0.0f;
+  float map = 0.0f;
+  float temperature = 0.0f;
+  float voltage = 0.0f;
+  float coilCurrent = 0.0f;
+  uint32_t rxCount = 0;
+  uint32_t lastRxMs = 0;
+  uint32_t badLengthCount = 0;
+  uint32_t unknownOpcodeCount = 0;
+};
+
 SpartanReading reading;
 bool canReady = false;
+twai_status_info_t canStatus = {};
+uint32_t lastCanStatusMs = 0;
+uint32_t canStatusErrors = 0;
+portMUX_TYPE stateMux = portMUX_INITIALIZER_UNLOCKED;
 float tuneRpm = 0.0f;
 float tuneAdvance = 0.0f;
 float tuneMap = 0.0f;
@@ -164,6 +182,8 @@ float tuneVoltage = 0.0f;
 float tuneCoilCurrent = 0.0f;
 uint32_t tuneRxCount = 0;
 uint32_t tuneLastRxMs = 0;
+uint32_t tuneBadLengthCount = 0;
+uint32_t tuneUnknownOpcodeCount = 0;
 uint32_t lastTuneDebugMs = 0;
 uint32_t lastDisplayMs = 0;
 uint32_t lastBleNotifyMs = 0;
@@ -172,7 +192,7 @@ String lastUartCommand = "";
 String lastUartResponse = "";
 #if ENABLE_BLE_HUB
 NimBLECharacteristic *bleStatusCharacteristic = nullptr;
-uint8_t bleClientCount = 0;
+volatile uint8_t bleClientCount = 0;
 String bleAddress = "";
 bool bleAdvertisingStarted = false;
 uint32_t bleHubSetupMs = 0;
@@ -185,15 +205,29 @@ uint32_t tuneNextScanMs = 0;
 uint32_t tuneLastPingMs = 0;
 uint32_t tuneScanSeen = 0;
 uint32_t tuneScanCandidates = 0;
+String tuneSavedAddress = "";
 #endif
 #if ENABLE_WEB_GUI
 WebServer server(80);
 DNSServer dns;
 Preferences networkPreferences;
+bool networkPreferencesReady = false;
 bool haveSavedWifi = false;
 uint32_t homeWifiConnectStartedMs = 0;
 bool homeWifiDisabledForRoadAp = false;
+uint32_t lastApRetryMs = 0;
+uint32_t apRetryCount = 0;
 #endif
+
+void ensurePreferences()
+{
+#if ENABLE_WEB_GUI
+  if (!networkPreferencesReady) {
+    networkPreferences.begin("net", false);
+    networkPreferencesReady = true;
+  }
+#endif
+}
 
 String fitLine(const String &text)
 {
@@ -268,19 +302,84 @@ String statusText(uint8_t status)
   }
 }
 
-String sourceText()
+const char *statusTextC(uint8_t status)
 {
-  if (reading.fromCan) {
+  switch (status) {
+    case 1:
+      return "WAIT";
+    case 2:
+      return "HEAT";
+    case 3:
+      return "OK";
+    default:
+      return "ERR";
+  }
+}
+
+const char *sourceTextC(const SpartanReading &snapshot)
+{
+  if (snapshot.fromCan) {
     return "CAN";
   }
-  if (reading.fromDemo) {
+  if (snapshot.fromDemo) {
     return "DEMO";
   }
-  if (reading.valid) {
+  if (snapshot.valid) {
     return "ADC";
   }
   return "NONE";
 }
+
+String sourceText()
+{
+  portENTER_CRITICAL(&stateMux);
+  const SpartanReading snapshot = reading;
+  portEXIT_CRITICAL(&stateMux);
+  return sourceTextC(snapshot);
+}
+
+SpartanReading readingSnapshot()
+{
+  portENTER_CRITICAL(&stateMux);
+  const SpartanReading snapshot = reading;
+  portEXIT_CRITICAL(&stateMux);
+  return snapshot;
+}
+
+void storeReading(const SpartanReading &fresh)
+{
+  portENTER_CRITICAL(&stateMux);
+  reading = fresh;
+  portEXIT_CRITICAL(&stateMux);
+}
+
+#if ENABLE_BLE_HUB
+TuneSnapshot tuneSnapshot()
+{
+  TuneSnapshot snapshot;
+  portENTER_CRITICAL(&stateMux);
+  snapshot.rpm = tuneRpm;
+  snapshot.advance = tuneAdvance;
+  snapshot.map = tuneMap;
+  snapshot.temperature = tuneTemperature;
+  snapshot.voltage = tuneVoltage;
+  snapshot.coilCurrent = tuneCoilCurrent;
+  snapshot.rxCount = tuneRxCount;
+  snapshot.lastRxMs = tuneLastRxMs;
+  snapshot.badLengthCount = tuneBadLengthCount;
+  snapshot.unknownOpcodeCount = tuneUnknownOpcodeCount;
+  portEXIT_CRITICAL(&stateMux);
+  return snapshot;
+}
+
+uint8_t getBleClientCount()
+{
+  portENTER_CRITICAL(&stateMux);
+  const uint8_t count = bleClientCount;
+  portEXIT_CRITICAL(&stateMux);
+  return count;
+}
+#endif
 
 void sendSpartanUartCommand(const String &command)
 {
@@ -310,25 +409,41 @@ void sendSpartanUartCommand(const String &command)
 
 String statusJson()
 {
+  const SpartanReading snapshot = readingSnapshot();
+#if ENABLE_BLE_HUB
+  const TuneSnapshot tune = tuneSnapshot();
+  const uint8_t clients = getBleClientCount();
+#endif
+  const uint32_t now = millis();
   String json = "{\"valid\":";
-  json += reading.valid ? "true" : "false";
+  json += snapshot.valid ? "true" : "false";
   json += ",\"lambda\":";
-  json += String(reading.lambda, 3);
+  json += String(snapshot.lambda, 3);
   json += ",\"temperature\":";
-  json += String(reading.temperatureC);
+  json += String(snapshot.temperatureC);
   json += ",\"status\":\"";
-  json += statusText(reading.status);
+  json += statusTextC(snapshot.status);
   json += "\",\"status_code\":";
-  json += String(reading.status);
+  json += String(snapshot.status);
   json += ",\"source\":\"";
-  json += sourceText();
+  json += sourceTextC(snapshot);
   json += "\",\"can_ready\":";
   json += canReady ? "true" : "false";
   json += ",\"age_ms\":";
-  json += reading.valid ? String(millis() - reading.receivedMs) : "0";
+  json += snapshot.valid ? String(now - snapshot.receivedMs) : "0";
+  json += ",\"can_state\":";
+  json += String(static_cast<int>(canStatus.state));
+  json += ",\"can_tx_errors\":";
+  json += String(canStatus.tx_error_counter);
+  json += ",\"can_rx_errors\":";
+  json += String(canStatus.rx_error_counter);
+  json += ",\"can_status_errors\":";
+  json += String(canStatusErrors);
+  json += ",\"heap_free\":";
+  json += String(heap_caps_get_free_size(MALLOC_CAP_8BIT));
 #if ENABLE_BLE_HUB
   json += ",\"ble_clients\":";
-  json += String(bleClientCount);
+  json += String(clients);
   json += ",\"ble_name\":\"";
   json += BLE_HUB_NAME;
   json += "\",\"ble_address\":\"";
@@ -344,31 +459,45 @@ String statusJson()
   json += WiFi.status() == WL_CONNECTED ? WiFi.SSID() : "";
   json += "\",\"wifi_ip\":\"";
   json += WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : "";
-  json += "\"";
+  json += "\",\"ap_ip\":\"";
+  json += WiFi.softAPIP().toString();
+  json += "\",\"ap_retry_count\":";
+  json += String(apRetryCount);
 #endif
   json += ",\"uart_command\":\"";
   json += lastUartCommand;
   json += "\",\"uart_response\":\"";
   json += lastUartResponse;
   json += "\"";
+#if ENABLE_BLE_HUB
   json += ",\"tune_connected\":";
   json += tuneConnected ? "true" : "false";
   json += ",\"tune_rx\":";
-  json += String(tuneRxCount);
+  json += String(tune.rxCount);
+  json += ",\"tune_age_ms\":";
+  json += tune.lastRxMs == 0 ? "0" : String(now - tune.lastRxMs);
   json += ",\"tune_scan_seen\":";
   json += String(tuneScanSeen);
   json += ",\"tune_scan_candidates\":";
   json += String(tuneScanCandidates);
+  json += ",\"tune_bad_length\":";
+  json += String(tune.badLengthCount);
+  json += ",\"tune_unknown_opcode\":";
+  json += String(tune.unknownOpcodeCount);
+  json += ",\"tune_saved_address\":\"";
+  json += tuneSavedAddress;
+  json += "\"";
   json += ",\"rpm\":";
-  json += String(static_cast<int>(tuneRpm));
+  json += String(static_cast<int>(tune.rpm));
   json += ",\"advance\":";
-  json += String(tuneAdvance, 1);
+  json += String(tune.advance, 1);
   json += ",\"map\":";
-  json += String(static_cast<int>(tuneMap));
+  json += String(static_cast<int>(tune.map));
   json += ",\"tune_temp\":";
-  json += String(static_cast<int>(tuneTemperature));
+  json += String(static_cast<int>(tune.temperature));
   json += ",\"volt\":";
-  json += String(tuneVoltage, 1);
+  json += String(tune.voltage, 1);
+#endif
   json += "}";
   return json;
 }
@@ -384,11 +513,23 @@ int hexNibble(uint8_t c)
 
 void decodeTuneFrame(const uint8_t *data, size_t length)
 {
-  if (length < 3) return;
+  if (length == 1 && data[0] == 0x0D) {
+    return;
+  }
+  if (length < 3 || length > 20) {
+    portENTER_CRITICAL(&stateMux);
+    if (tuneBadLengthCount < UINT32_MAX) {
+      tuneBadLengthCount++;
+    }
+    portEXIT_CRITICAL(&stateMux);
+    return;
+  }
   const int hi = hexNibble(data[1]);
   const int lo = hexNibble(data[2]);
   const int raw = (hi << 4) | lo;
 
+  bool knownOpcode = true;
+  portENTER_CRITICAL(&stateMux);
   switch (data[0]) {
     case 0x30: tuneRpm = hi * 800.0f + lo * 50.0f; break;
     case 0x31: tuneAdvance = hi * 3.2f + lo * 0.2f; break;
@@ -396,20 +537,31 @@ void decodeTuneFrame(const uint8_t *data, size_t length)
     case 0x33: tuneTemperature = static_cast<float>(raw - 30); break;
     case 0x35: tuneCoilCurrent = raw / 8.65f; break;
     case 0x41: tuneVoltage = raw / 4.54f; break;
-    default: break;
+    case 0x42: break;
+    default:
+      knownOpcode = false;
+      if (tuneUnknownOpcodeCount < UINT32_MAX) {
+        tuneUnknownOpcodeCount++;
+      }
+      break;
   }
-  tuneRxCount++;
+  if (knownOpcode && tuneRxCount < UINT32_MAX) {
+    tuneRxCount++;
+  }
   tuneLastRxMs = millis();
+  portEXIT_CRITICAL(&stateMux);
 }
 
 String bleStatusPayload()
 {
+  const SpartanReading snapshot = readingSnapshot();
+  const TuneSnapshot tune = tuneSnapshot();
   char payload[24];
   snprintf(payload, sizeof(payload), "L%.2fR%dA%dM%d",
-           reading.valid ? reading.lambda : 0.0f,
-           static_cast<int>(tuneRpm),
-           static_cast<int>(tuneAdvance),
-           static_cast<int>(tuneMap));
+           snapshot.valid ? snapshot.lambda : 0.0f,
+           static_cast<int>(tune.rpm),
+           static_cast<int>(tune.advance),
+           static_cast<int>(tune.map));
   return String(payload);
 }
 
@@ -417,16 +569,24 @@ class BleServerCallbacks : public NimBLEServerCallbacks {
  public:
   void onConnect(NimBLEServer *, NimBLEConnInfo &) override
   {
-    bleClientCount++;
-    Serial.printf("BLE hub:     client connected, count=%u\n", bleClientCount);
+    portENTER_CRITICAL(&stateMux);
+    if (bleClientCount < UINT8_MAX) {
+      bleClientCount++;
+    }
+    const uint8_t clients = bleClientCount;
+    portEXIT_CRITICAL(&stateMux);
+    Serial.printf("BLE hub:     client connected, count=%u\n", clients);
   }
 
   void onDisconnect(NimBLEServer *, NimBLEConnInfo &, int) override
   {
+    portENTER_CRITICAL(&stateMux);
     if (bleClientCount > 0) {
       bleClientCount--;
     }
-    Serial.printf("BLE hub:     client disconnected, count=%u\n", bleClientCount);
+    const uint8_t clients = bleClientCount;
+    portEXIT_CRITICAL(&stateMux);
+    Serial.printf("BLE hub:     client disconnected, count=%u\n", clients);
     if (bleAdvertisingStarted) {
       NimBLEDevice::startAdvertising();
     }
@@ -490,13 +650,22 @@ class TuneScanCallbacks : public NimBLEScanCallbacks {
     String name = device->getName().c_str();
     name.toLowerCase();
     const bool addressMatches = address == kTuneTargetAddress;
+    const bool savedAddressMatches = tuneSavedAddress.length() > 0 && address == tuneSavedAddress;
     const bool advertisesNus = device->isAdvertisingService(NimBLEUUID(kTuneNusServiceUuid));
     const bool nameLooksLikeTune = name.indexOf("123") >= 0 || name.indexOf("tune") >= 0 || name.indexOf("raytac") >= 0;
-    if (!addressMatches && !(advertisesNus && nameLooksLikeTune)) {
+    if (!addressMatches && !savedAddressMatches && !(advertisesNus && nameLooksLikeTune)) {
       return;
     }
 
     tuneTargetAddress = device->getAddress();
+    if (tuneSavedAddress != address) {
+      tuneSavedAddress = address;
+#if ENABLE_WEB_GUI
+      ensurePreferences();
+      networkPreferences.putString("tune_mac", tuneSavedAddress);
+#endif
+      Serial.printf("123TUNE BLE: saved address %s\n", tuneSavedAddress.c_str());
+    }
     tuneDoConnect = true;
     tuneNextScanMs = 0;
     tuneScanCandidates++;
@@ -505,7 +674,7 @@ class TuneScanCallbacks : public NimBLEScanCallbacks {
                   address.c_str(),
                   name.c_str(),
                   advertisesNus ? 1 : 0,
-                  addressMatches ? 1 : 0);
+                  (addressMatches || savedAddressMatches) ? 1 : 0);
   }
 
   void onScanEnd(const NimBLEScanResults &, int reason) override
@@ -689,13 +858,14 @@ void updateTuneDebug()
   const uint32_t now = millis();
   if (now - lastTuneDebugMs < 2000) return;
   lastTuneDebugMs = now;
+  const TuneSnapshot tune = tuneSnapshot();
   Serial.printf("123TUNE BLE: conn=%d rx=%lu rpm=%d adv=%.1f map=%d age=%lu\n",
                 tuneConnected ? 1 : 0,
-                static_cast<unsigned long>(tuneRxCount),
-                static_cast<int>(tuneRpm),
-                tuneAdvance,
-                static_cast<int>(tuneMap),
-                tuneLastRxMs == 0 ? 0UL : static_cast<unsigned long>(now - tuneLastRxMs));
+                static_cast<unsigned long>(tune.rxCount),
+                static_cast<int>(tune.rpm),
+                tune.advance,
+                static_cast<int>(tune.map),
+                tune.lastRxMs == 0 ? 0UL : static_cast<unsigned long>(now - tune.lastRxMs));
 }
 
 void startBleHubAdvertising()
@@ -713,6 +883,15 @@ void setupBleHub()
   NimBLEDevice::setMTU(23);
   bleAddress = NimBLEDevice::getAddress().toString().c_str();
   bleHubSetupMs = millis();
+#if ENABLE_WEB_GUI
+  ensurePreferences();
+  tuneSavedAddress = networkPreferences.isKey("tune_mac")
+      ? networkPreferences.getString("tune_mac", kTuneTargetAddress)
+      : String(kTuneTargetAddress);
+  tuneSavedAddress.toLowerCase();
+#else
+  tuneSavedAddress = kTuneTargetAddress;
+#endif
 
   NimBLEServer *bleServer = NimBLEDevice::createServer();
   bleServer->setCallbacks(new BleServerCallbacks());
@@ -736,6 +915,7 @@ void setupBleHub()
                 BLE_HUB_NAME,
                 bleAddress.c_str(),
                 kBleServiceUuid);
+  Serial.printf("123TUNE BLE: target %s\n", tuneSavedAddress.c_str());
   Serial.println("BLE hub:     advertising waits for 123TUNE or 30s fallback");
   startTuneScan();
 }
@@ -756,7 +936,7 @@ void updateBleHub()
 
   const String payload = bleStatusPayload();
   bleStatusCharacteristic->setValue(payload.c_str());
-  if (bleClientCount > 0) {
+  if (getBleClientCount() > 0) {
     bleStatusCharacteristic->notify();
   }
 }
@@ -768,7 +948,7 @@ void updateBleHub() {}
 void setupWebGui()
 {
 #if ENABLE_WEB_GUI
-  networkPreferences.begin("net", false);
+  ensurePreferences();
   const String savedSsid = networkPreferences.isKey("ssid") ? networkPreferences.getString("ssid", "") : "";
   const String savedPassword = networkPreferences.isKey("pass") ? networkPreferences.getString("pass", "") : "";
   haveSavedWifi = savedSsid.length() > 0;
@@ -807,12 +987,13 @@ void setupWebGui()
 <style>
 :root { color-scheme: dark; font-family: Arial, sans-serif; }
 body { margin: 0; background: #0b1210; color: #e6ede8; }
-main { max-width: 460px; margin: auto; padding: 28px 18px; }
+main { max-width: 760px; margin: auto; padding: 28px 18px; }
 h1 { font-size: 1.35rem; color: #9ed85b; margin: 0 0 22px; }
 .card { padding: 20px; border: 1px solid #26372e; border-radius: 16px; background: #101a15; }
 .lambda { font-size: 3.4rem; font-weight: 700; color: #9ed85b; margin: 4px 0 18px; }
 .tag { display: inline-block; padding: 5px 10px; border-radius: 20px; background: #26372e; color: #bde87a; }
 .row { display: flex; justify-content: space-between; border-top: 1px solid #26372e; padding: 13px 0; }
+.row strong { text-align: right; }
 .setup { margin-top: 18px; padding: 20px; border: 1px solid #26372e; border-radius: 16px; background: #101a15; }
 input { display: block; box-sizing: border-box; width: 100%; margin: 8px 0 13px; padding: 12px; border: 1px solid #35453c; border-radius: 8px; background: #0b1210; color: #e6ede8; }
 select { display: block; box-sizing: border-box; width: 100%; margin: 8px 0 13px; padding: 12px; border: 1px solid #35453c; border-radius: 8px; background: #0b1210; color: #e6ede8; }
@@ -823,6 +1004,14 @@ button.danger { background: #8b3c2e; color: #ffe8dc; }
 .grid button { width: 100%; margin: 0; }
 .hint { color: #9ca99f; font-size: .92rem; margin-top: 18px; line-height: 1.45; }
 .mono { font-family: Consolas, monospace; color: #cbeaa7; overflow-wrap: anywhere; }
+.ok { color: #9ed85b; }
+.warn { color: #ffd166; }
+.bad { color: #ff6b6b; }
+.cards { display: grid; grid-template-columns: repeat(auto-fit,minmax(220px,1fr)); gap: 14px; margin-top: 18px; }
+.mini { padding: 14px; border: 1px solid #26372e; border-radius: 14px; background: #0d1712; }
+.mini h3 { margin: 0 0 8px; font-size: 1rem; color: #bde87a; }
+canvas { width: 100%; height: 78px; background: #08100c; border-radius: 10px; }
+pre { white-space: pre-wrap; max-height: 220px; overflow: auto; padding: 12px; background: #08100c; border-radius: 10px; }
 </style>
 </head>
 <body><main>
@@ -833,6 +1022,30 @@ button.danger { background: #8b3c2e; color: #ffe8dc; }
 <div class="row"><span>Status</span><strong id="status">warte</strong></div>
 <div class="row"><span>Sensortemperatur</span><strong id="temp">- C</strong></div>
 <div class="row"><span>CAN</span><strong id="can">-</strong></div>
+</div>
+<div class="cards">
+<div class="mini"><h3>Lambda 60s</h3><canvas id="chartLambda" width="320" height="78"></canvas></div>
+<div class="mini"><h3>RPM 60s</h3><canvas id="chartRpm" width="320" height="78"></canvas></div>
+<div class="mini"><h3>Temp 60s</h3><canvas id="chartTemp" width="320" height="78"></canvas></div>
+</div>
+<div class="setup">
+<strong>123Tune BLE Diagnose</strong>
+<div class="row"><span>Verbindung</span><strong id="tconn">-</strong></div>
+<div class="row"><span>RX Frames</span><strong id="trx">0</strong></div>
+<div class="row"><span>RX Alter</span><strong id="tage">0 ms</strong></div>
+<div class="row"><span>Scan gesehen / Kandidaten</span><strong id="tscan">0 / 0</strong></div>
+<div class="row"><span>Frame Fehler</span><strong id="terr">0 / 0</strong></div>
+<div class="row"><span>RPM / ADV / MAP</span><strong id="tvals">0 / 0.0 / 0</strong></div>
+<div class="row"><span>123 Adresse</span><strong id="taddr" class="mono">-</strong></div>
+</div>
+<div class="setup">
+<strong>System Diagnose</strong>
+<div class="row"><span>CAN State / TX / RX</span><strong id="candiag">-</strong></div>
+<div class="row"><span>CAN Statusfehler</span><strong id="canerr">0</strong></div>
+<div class="row"><span>Heap frei</span><strong id="heap">-</strong></div>
+<div class="row"><span>AP IP / Retry</span><strong id="apdiag">-</strong></div>
+<button class="secondary" type="button" onclick="copyJson()">JSON kopieren</button>
+<pre id="jsondump">{}</pre>
 </div>
 <div class="setup">
 <strong>BLE Hub / Gateway</strong>
@@ -893,15 +1106,46 @@ button.danger { background: #8b3c2e; color: #ffe8dc; }
 </div>
 <p class="hint">Aktuell ist der Bring-up-Modus aktiv. DEMO-Werte pruefen Display und Web-GUI, bis der CAN-Transceiver angeschlossen ist.</p>
 <script>
+const hist = {lambda:[], rpm:[], temp:[]};
+let lastJson = {};
+function cls(el, state) { el.className = state; }
+function pushHist(name, value) {
+  const a = hist[name];
+  a.push(Number(value) || 0);
+  while (a.length > 170) a.shift();
+}
+function draw(id, data, color) {
+  const c = document.getElementById(id), x = c.getContext('2d'), w = c.width, h = c.height;
+  x.clearRect(0,0,w,h);
+  x.strokeStyle = '#26372e'; x.lineWidth = 1;
+  for (let i=1;i<4;i++) { x.beginPath(); x.moveTo(0,i*h/4); x.lineTo(w,i*h/4); x.stroke(); }
+  if (!data.length) return;
+  let min = Math.min(...data), max = Math.max(...data);
+  if (max - min < 0.01) { max += 0.01; min -= 0.01; }
+  x.strokeStyle = color; x.lineWidth = 2; x.beginPath();
+  data.forEach((v,i) => {
+    const px = data.length === 1 ? w : i * w / (data.length - 1);
+    const py = h - ((v - min) / (max - min)) * (h - 8) - 4;
+    if (i === 0) x.moveTo(px, py); else x.lineTo(px, py);
+  });
+  x.stroke();
+}
+async function copyJson() {
+  try { await navigator.clipboard.writeText(JSON.stringify(lastJson, null, 2)); } catch(e) {}
+}
 async function refresh() {
   try {
     const r = await fetch('/state', {cache:'no-store'});
     const d = await r.json();
+    lastJson = d;
     document.getElementById('source').textContent = d.source;
     document.getElementById('lambda').textContent = d.valid ? d.lambda.toFixed(3) : '-.---';
     document.getElementById('status').textContent = d.status;
     document.getElementById('temp').textContent = d.valid ? d.temperature + ' C' : '- C';
     document.getElementById('can').textContent = d.can_ready ? 'aktiv' : 'Fehler';
+    cls(document.getElementById('source'), d.source === 'CAN' ? 'tag ok' : (d.source === 'DEMO' ? 'tag warn' : 'tag bad'));
+    cls(document.getElementById('status'), d.status === 'OK' ? 'ok' : (d.status === 'HEAT' || d.source === 'DEMO' ? 'warn' : 'bad'));
+    cls(document.getElementById('can'), d.can_ready && d.can_state === 1 ? 'ok' : 'bad');
     document.getElementById('bleenabled').textContent = d.ble_name ? 'aktiv' : 'nicht im Build';
     document.getElementById('blename').textContent = d.ble_name || '-';
     document.getElementById('bleaddr').textContent = d.ble_address || '-';
@@ -910,10 +1154,29 @@ async function refresh() {
     document.getElementById('lanip').textContent = d.wifi_connected ? d.wifi_ip : '-';
     document.getElementById('ucmd').textContent = d.uart_command || '-';
     document.getElementById('uresp').textContent = d.uart_response || '-';
+    document.getElementById('tconn').textContent = d.tune_connected ? 'verbunden' : 'scan/retry';
+    cls(document.getElementById('tconn'), d.tune_connected ? 'ok' : 'warn');
+    document.getElementById('trx').textContent = d.tune_rx ?? 0;
+    document.getElementById('tage').textContent = (d.tune_age_ms ?? 0) + ' ms';
+    document.getElementById('tscan').textContent = (d.tune_scan_seen ?? 0) + ' / ' + (d.tune_scan_candidates ?? 0);
+    document.getElementById('terr').textContent = (d.tune_bad_length ?? 0) + ' / ' + (d.tune_unknown_opcode ?? 0);
+    document.getElementById('tvals').textContent = (d.rpm ?? 0) + ' / ' + Number(d.advance ?? 0).toFixed(1) + ' / ' + (d.map ?? 0);
+    document.getElementById('taddr').textContent = d.tune_saved_address || '-';
+    document.getElementById('candiag').textContent = (d.can_state ?? '-') + ' / ' + (d.can_tx_errors ?? 0) + ' / ' + (d.can_rx_errors ?? 0);
+    document.getElementById('canerr').textContent = d.can_status_errors ?? 0;
+    document.getElementById('heap').textContent = d.heap_free ? Math.round(d.heap_free / 1024) + ' KB' : '-';
+    document.getElementById('apdiag').textContent = (d.ap_ip || '-') + ' / ' + (d.ap_retry_count ?? 0);
+    document.getElementById('jsondump').textContent = JSON.stringify(d, null, 2);
+    pushHist('lambda', d.lambda);
+    pushHist('rpm', d.rpm);
+    pushHist('temp', d.temperature);
+    draw('chartLambda', hist.lambda, '#9ed85b');
+    draw('chartRpm', hist.rpm, '#4cc9f0');
+    draw('chartTemp', hist.temp, '#ffd166');
   } catch (e) {}
 }
 refresh();
-setInterval(refresh, 350);
+setInterval(() => { if (!document.hidden) refresh(); }, 350);
 </script></main></body></html>)HTML");
   });
 
@@ -1001,8 +1264,22 @@ setInterval(refresh, 350);
 void updateWebGui()
 {
 #if ENABLE_WEB_GUI
+  const uint32_t now = millis();
   static wl_status_t lastWifiStatus = WL_IDLE_STATUS;
   const wl_status_t wifiStatus = WiFi.status();
+  if (WiFi.softAPIP() == IPAddress(0, 0, 0, 0) && now - lastApRetryMs >= 10000) {
+    lastApRetryMs = now;
+    WiFi.softAPConfig(
+        IPAddress(192, 168, 4, 1),
+        IPAddress(192, 168, 4, 1),
+        IPAddress(255, 255, 255, 0));
+    if (WiFi.softAP(WEB_AP_SSID, WEB_AP_PASSWORD, 6, 0, 4)) {
+      Serial.printf("Web GUI:     access point retry OK, http://%s/\n", WiFi.softAPIP().toString().c_str());
+    } else {
+      apRetryCount++;
+      Serial.printf("Web GUI:     access point retry failed (%lu)\n", static_cast<unsigned long>(apRetryCount));
+    }
+  }
   if (wifiStatus != lastWifiStatus) {
     lastWifiStatus = wifiStatus;
     if (wifiStatus == WL_CONNECTED) {
@@ -1012,7 +1289,7 @@ void updateWebGui()
     }
   }
   if (haveSavedWifi && !homeWifiDisabledForRoadAp && wifiStatus != WL_CONNECTED &&
-      homeWifiConnectStartedMs != 0 && millis() - homeWifiConnectStartedMs >= kHomeWifiConnectWindowMs) {
+      homeWifiConnectStartedMs != 0 && now - homeWifiConnectStartedMs >= kHomeWifiConnectWindowMs) {
     WiFi.disconnect(false, false);
     WiFi.mode(WIFI_AP);
     WiFi.setSleep(true);
@@ -1058,6 +1335,20 @@ void updateCan()
     return;
   }
 
+  const uint32_t now = millis();
+  if (now - lastCanStatusMs >= 1000) {
+    lastCanStatusMs = now;
+    if (twai_get_status_info(&canStatus) == ESP_OK) {
+      if (canStatus.state != TWAI_STATE_RUNNING ||
+          canStatus.tx_error_counter > 127 ||
+          canStatus.rx_error_counter > 127) {
+        if (canStatusErrors < UINT32_MAX) {
+          canStatusErrors++;
+        }
+      }
+    }
+  }
+
   twai_message_t message;
   while (twai_receive(&message, 0) == ESP_OK) {
     if (message.extd || message.identifier != SPARTAN_CAN_ID || message.data_length_code < 4) {
@@ -1065,14 +1356,16 @@ void updateCan()
     }
 
     const uint16_t rawLambda = (static_cast<uint16_t>(message.data[0]) << 8) | message.data[1];
-    reading.lambda = rawLambda / 1000.0f;
-    reading.temperatureC = static_cast<uint16_t>(message.data[2]) * 10;
-    reading.status = message.data[3];
-    reading.receivedMs = millis();
-    reading.valid = true;
-    reading.fromCan = true;
-    reading.fromDemo = false;
-    digitalWrite(STATUS_LED_PIN, reading.status == 3 ? HIGH : LOW);
+    SpartanReading fresh;
+    fresh.lambda = rawLambda / 1000.0f;
+    fresh.temperatureC = static_cast<uint16_t>(message.data[2]) * 10;
+    fresh.status = message.data[3];
+    fresh.receivedMs = millis();
+    fresh.valid = true;
+    fresh.fromCan = true;
+    fresh.fromDemo = false;
+    storeReading(fresh);
+    digitalWrite(STATUS_LED_PIN, fresh.status == 3 ? HIGH : LOW);
   }
 #endif
 }
@@ -1081,47 +1374,53 @@ void updateDemo()
 {
 #if ENABLE_SPARTAN_DEMO
   const uint32_t now = millis();
-  if (reading.fromCan && now - reading.receivedMs <= kCanStaleMs) {
+  SpartanReading snapshot = readingSnapshot();
+  if (snapshot.fromCan && now - snapshot.receivedMs <= kCanStaleMs) {
     return;
   }
 
+  SpartanReading fresh;
   if (now < 8000) {
-    reading.lambda = 1.000f;
-    reading.temperatureC = static_cast<uint16_t>(now / 12);
-    reading.status = 2;
+    fresh.lambda = 1.000f;
+    fresh.temperatureC = static_cast<uint16_t>(now / 12);
+    fresh.status = 2;
   } else {
     const int32_t sweep = static_cast<int32_t>((now / 80) % 200) - 100;
-    reading.lambda = 1.000f + sweep / 1000.0f;
-    reading.temperatureC = 780;
-    reading.status = 3;
+    fresh.lambda = 1.000f + sweep / 1000.0f;
+    fresh.temperatureC = 780;
+    fresh.status = 3;
   }
 
-  reading.receivedMs = now;
-  reading.valid = true;
-  reading.fromCan = false;
-  reading.fromDemo = true;
-  digitalWrite(STATUS_LED_PIN, reading.status == 3 ? HIGH : LOW);
+  fresh.receivedMs = now;
+  fresh.valid = true;
+  fresh.fromCan = false;
+  fresh.fromDemo = true;
+  storeReading(fresh);
+  digitalWrite(STATUS_LED_PIN, fresh.status == 3 ? HIGH : LOW);
 #endif
 }
 
 void updateAnalog()
 {
 #if ENABLE_SPARTAN_ANALOG
-  if ((reading.fromCan || reading.fromDemo) && millis() - reading.receivedMs <= kCanStaleMs) {
+  const SpartanReading snapshot = readingSnapshot();
+  if ((snapshot.fromCan || snapshot.fromDemo) && millis() - snapshot.receivedMs <= kCanStaleMs) {
     return;
   }
 
   const uint32_t adcMilliVolts = analogReadMilliVolts(SPARTAN_ANALOG_PIN);
   const float inputVolts = (adcMilliVolts / 1000.0f) * ANALOG_DIVIDER_NUM / ANALOG_DIVIDER_DEN;
   const float constrainedVolts = constrain(inputVolts, 0.0f, 5.0f);
-  reading.lambda = kLambdaAtZeroVolt
+  SpartanReading fresh;
+  fresh.lambda = kLambdaAtZeroVolt
       + (kLambdaAtFiveVolt - kLambdaAtZeroVolt) * constrainedVolts / 5.0f;
-  reading.temperatureC = 0;
-  reading.status = 3;
-  reading.receivedMs = millis();
-  reading.valid = true;
-  reading.fromCan = false;
-  reading.fromDemo = false;
+  fresh.temperatureC = 0;
+  fresh.status = 3;
+  fresh.receivedMs = millis();
+  fresh.valid = true;
+  fresh.fromCan = false;
+  fresh.fromDemo = false;
+  storeReading(fresh);
 #endif
 }
 
@@ -1181,7 +1480,8 @@ void updateDisplay()
   }
   lastDisplayMs = now;
 
-  const bool stale = !reading.valid || (reading.fromCan && now - reading.receivedMs > kCanStaleMs);
+  const SpartanReading snapshot = readingSnapshot();
+  const bool stale = !snapshot.valid || (snapshot.fromCan && now - snapshot.receivedMs > kCanStaleMs);
   if (stale) {
     displayLine(0, "SPARTAN CAN");
     displayLine(1, canReady ? "warte Daten..." : "CAN FEHLER");
@@ -1189,12 +1489,12 @@ void updateDisplay()
   }
 
   char lambdaLine[24];
-  snprintf(lambdaLine, sizeof(lambdaLine), "LAM %.3f %s", reading.lambda, sourceText().c_str());
+  snprintf(lambdaLine, sizeof(lambdaLine), "LAM %.3f %s", snapshot.lambda, sourceTextC(snapshot));
   displayLine(0, lambdaLine);
 
-  if (reading.fromCan || reading.fromDemo) {
+  if (snapshot.fromCan || snapshot.fromDemo) {
     char stateLine[24];
-    snprintf(stateLine, sizeof(stateLine), "%uC %s", reading.temperatureC, statusText(reading.status).c_str());
+    snprintf(stateLine, sizeof(stateLine), "%uC %s", snapshot.temperatureC, statusTextC(snapshot.status));
     displayLine(1, stateLine);
   } else {
     displayLine(1, "Analog fallback");
