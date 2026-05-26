@@ -20,6 +20,7 @@
 
 #if ENABLE_BLE_HUB
 #include <NimBLEDevice.h>
+#include <mbedtls/aes.h>
 #endif
 
 #ifdef USE_M5_DISPLAY
@@ -143,6 +144,28 @@ constexpr uint32_t kTuneScanWindowMs = 10000;
 constexpr uint32_t kTuneReconnectDelayMs = 5000;
 constexpr uint32_t kTunePingIntervalMs = 1650;
 constexpr uint32_t kBleHubAdvertiseFallbackMs = 30000;
+
+// BM6 V2.0 Batteriemonitor (Leagend)
+// Reference: github.com/NorbertRoller/leagend-BM6-battery-monitor-BLE-ESP32
+//            github.com/JeffWDH/bm6-battery-monitor
+#ifndef ENABLE_BM6
+#define ENABLE_BM6 1
+#endif
+constexpr char kBm6TargetAddress[] = "3c:ab:72:80:06:6a";
+constexpr char kBm6ServiceUuid[]   = "0000fff0-0000-1000-8000-00805f9b34fb";
+constexpr char kBm6WriteUuid[]     = "0000fff3-0000-1000-8000-00805f9b34fb";
+constexpr char kBm6NotifyUuid[]    = "0000fff4-0000-1000-8000-00805f9b34fb";
+constexpr uint32_t kBm6ScanWindowMs       = 10000;
+constexpr uint32_t kBm6ReconnectDelayMs   = 8000;
+constexpr uint32_t kBm6TriggerIntervalMs  = 2000;  // re-trigger nur falls keine notifies kommen
+// AES-CBC Key (16 Byte): "leagend" + 0xFF 0xFE + "010000" + 0x39
+const uint8_t kBm6AesKey[16] = {
+    0x6C, 0x65, 0x61, 0x67, 0x65, 0x6E, 0x64, 0xFF,
+    0xFE, 0x30, 0x31, 0x30, 0x30, 0x30, 0x30, 0x39};
+// Plaintext trigger command, AES-CBC verschluesselt vor dem Write
+const uint8_t kBm6TriggerPlain[16] = {
+    0xD1, 0x55, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
 #endif
 
 struct SpartanReading {
@@ -212,6 +235,22 @@ uint32_t tuneLastPingMs = 0;
 uint32_t tuneScanSeen = 0;
 uint32_t tuneScanCandidates = 0;
 String tuneSavedAddress = "";
+
+#if ENABLE_BM6
+// BM6 BLE-Client State
+NimBLEClient *bm6Client = nullptr;
+NimBLERemoteCharacteristic *bm6WriteChar = nullptr;
+NimBLEAddress bm6TargetAddress;
+bool bm6DoConnect = false;
+bool bm6Connected = false;
+uint32_t bm6NextScanMs = 0;
+uint32_t bm6LastTriggerMs = 0;
+uint32_t bm6LastRxMs = 0;
+uint32_t bm6RxCount = 0;
+uint32_t bm6DecodeFailCount = 0;
+float    bm6Voltage = 0.0f;     // Bordnetz-Spannung [V]
+int8_t   bm6Temperature = 0;    // Batterie-Umgebungstemperatur [degC]
+#endif
 #endif
 #if ENABLE_WEB_GUI
 WebServer server(80);
@@ -503,6 +542,21 @@ String statusJson()
   json += String(static_cast<int>(tune.temperature));
   json += ",\"volt\":";
   json += String(tune.voltage, 1);
+#if ENABLE_BM6
+  json += ",\"bm6_connected\":";
+  json += bm6Connected ? "true" : "false";
+  json += ",\"bm6_voltage\":";
+  json += String(bm6Voltage, 2);
+  json += ",\"bm6_temperature\":";
+  json += String(static_cast<int>(bm6Temperature));
+  json += ",\"bm6_rx_count\":";
+  json += String(static_cast<unsigned long>(bm6RxCount));
+  json += ",\"bm6_decode_fail\":";
+  json += String(static_cast<unsigned long>(bm6DecodeFailCount));
+  json += ",\"bm6_age_ms\":";
+  json += String(bm6LastRxMs == 0 ? 0UL :
+                 static_cast<unsigned long>(millis() - bm6LastRxMs));
+#endif
 #endif
   json += "}";
   return json;
@@ -562,12 +616,22 @@ String bleStatusPayload()
 {
   const SpartanReading snapshot = readingSnapshot();
   const TuneSnapshot tune = tuneSnapshot();
-  char payload[24];
+  char payload[40];
+#if ENABLE_BM6
+  // Format: L<lambda>R<rpm>A<adv>M<map>V<volt>
+  snprintf(payload, sizeof(payload), "L%.2fR%dA%dM%dV%.2f",
+           snapshot.valid ? snapshot.lambda : 0.0f,
+           static_cast<int>(tune.rpm),
+           static_cast<int>(tune.advance),
+           static_cast<int>(tune.map),
+           bm6Voltage);
+#else
   snprintf(payload, sizeof(payload), "L%.2fR%dA%dM%d",
            snapshot.valid ? snapshot.lambda : 0.0f,
            static_cast<int>(tune.rpm),
            static_cast<int>(tune.advance),
            static_cast<int>(tune.map));
+#endif
   return String(payload);
 }
 
@@ -854,6 +918,239 @@ void runTuneReadDump()
   sendTuneCommand("13@");
 }
 
+#if ENABLE_BM6
+// ----------------------------------------------------------------------
+// BM6 BLE Client (Leagend 12V Batteriemonitor, AES-CBC verschluesselt)
+// ----------------------------------------------------------------------
+
+bool bm6AesEncrypt(const uint8_t in[16], uint8_t out[16])
+{
+  mbedtls_aes_context ctx;
+  mbedtls_aes_init(&ctx);
+  if (mbedtls_aes_setkey_enc(&ctx, kBm6AesKey, 128) != 0) {
+    mbedtls_aes_free(&ctx);
+    return false;
+  }
+  uint8_t iv[16] = {0};
+  int rc = mbedtls_aes_crypt_cbc(&ctx, MBEDTLS_AES_ENCRYPT, 16, iv, in, out);
+  mbedtls_aes_free(&ctx);
+  return rc == 0;
+}
+
+bool bm6AesDecrypt(const uint8_t in[16], uint8_t out[16])
+{
+  mbedtls_aes_context ctx;
+  mbedtls_aes_init(&ctx);
+  if (mbedtls_aes_setkey_dec(&ctx, kBm6AesKey, 128) != 0) {
+    mbedtls_aes_free(&ctx);
+    return false;
+  }
+  uint8_t iv[16] = {0};
+  int rc = mbedtls_aes_crypt_cbc(&ctx, MBEDTLS_AES_DECRYPT, 16, iv, in, out);
+  mbedtls_aes_free(&ctx);
+  return rc == 0;
+}
+
+void scheduleBm6Scan()
+{
+  bm6NextScanMs = millis() + kBm6ReconnectDelayMs;
+}
+
+void resetBm6Client()
+{
+  if (bm6Client == nullptr) return;
+  if (bm6Client->isConnected()) {
+    bm6Client->disconnect();
+  }
+  NimBLEDevice::deleteClient(bm6Client);
+  bm6Client = nullptr;
+  bm6WriteChar = nullptr;
+  bm6Connected = false;
+  bm6LastTriggerMs = 0;
+}
+
+class Bm6ClientCallbacks : public NimBLEClientCallbacks {
+ public:
+  void onDisconnect(NimBLEClient *, int reason) override
+  {
+    bm6Connected = false;
+    bm6WriteChar = nullptr;
+    Serial.printf("BM6 BLE:     disconnected reason=%d\n", reason);
+    scheduleBm6Scan();
+  }
+};
+
+Bm6ClientCallbacks bm6ClientCallbacks;
+
+void decodeBm6Notify(const uint8_t *data, size_t length)
+{
+  if (length != 16) {
+    bm6DecodeFailCount++;
+    Serial.printf("BM6 BLE:     notify wrong len=%u\n", static_cast<unsigned>(length));
+    return;
+  }
+  uint8_t plain[16] = {0};
+  if (!bm6AesDecrypt(data, plain)) {
+    bm6DecodeFailCount++;
+    Serial.println("BM6 BLE:     AES decrypt fail");
+    return;
+  }
+  Serial.printf("BM6 BLE:     plain :");
+  for (size_t i = 0; i < 16; i++) Serial.printf(" %02X", plain[i]);
+  Serial.println();
+
+  // Voltage/Temp Frame beginnt mit D1 55 07
+  if (plain[0] == 0xD1 && plain[1] == 0x55 && plain[2] == 0x07) {
+    const bool tempNeg = plain[3] != 0;
+    const int8_t tempVal = static_cast<int8_t>(plain[4]);
+    const uint16_t voltRaw = (static_cast<uint16_t>(plain[7]) << 8) | plain[8];
+    const float volt = static_cast<float>(voltRaw) / 100.0f;
+    bm6Voltage = volt;
+    bm6Temperature = tempNeg ? -tempVal : tempVal;
+    bm6LastRxMs = millis();
+    bm6RxCount++;
+    Serial.printf("BM6 BLE:     V=%.2fV T=%d C (rx=%lu)\n",
+                  bm6Voltage,
+                  static_cast<int>(bm6Temperature),
+                  static_cast<unsigned long>(bm6RxCount));
+  } else {
+    Serial.println("BM6 BLE:     unknown frame opcode");
+  }
+}
+
+void onBm6Notify(NimBLERemoteCharacteristic *, uint8_t *data, size_t length, bool)
+{
+  decodeBm6Notify(data, length);
+}
+
+bool bm6SendTrigger()
+{
+  if (!bm6Connected || bm6WriteChar == nullptr) return false;
+  uint8_t cipher[16] = {0};
+  if (!bm6AesEncrypt(kBm6TriggerPlain, cipher)) {
+    Serial.println("BM6 BLE:     trigger encrypt fail");
+    return false;
+  }
+  bool ok = bm6WriteChar->writeValue(cipher, 16, true);
+  bm6LastTriggerMs = millis();
+  Serial.printf("BM6 BLE:     trigger -> %s\n", ok ? "OK" : "FAIL");
+  return ok;
+}
+
+class Bm6ScanCallbacks : public NimBLEScanCallbacks {
+ public:
+  void onResult(const NimBLEAdvertisedDevice *device) override
+  {
+    String addr = device->getAddress().toString().c_str();
+    addr.toLowerCase();
+    if (addr != kBm6TargetAddress) return;
+    bm6TargetAddress = device->getAddress();
+    bm6DoConnect = true;
+    bm6NextScanMs = 0;
+    NimBLEDevice::getScan()->stop();
+    Serial.printf("BM6 BLE:     found %s\n", addr.c_str());
+  }
+  void onScanEnd(const NimBLEScanResults &, int reason) override
+  {
+    if (!bm6Connected && !bm6DoConnect) {
+      Serial.printf("BM6 BLE:     scan end reason=%d\n", reason);
+      scheduleBm6Scan();
+    }
+  }
+};
+
+Bm6ScanCallbacks bm6ScanCallbacks;
+
+void startBm6Scan()
+{
+  if (bm6Connected || bm6DoConnect) return;
+  NimBLEScan *scan = NimBLEDevice::getScan();
+  scan->setScanCallbacks(&bm6ScanCallbacks, false);
+  scan->setActiveScan(true);
+  scan->setInterval(100);
+  scan->setWindow(99);
+  Serial.println("BM6 BLE:     scan 10s...");
+  if (!scan->start(kBm6ScanWindowMs, false)) {
+    Serial.println("BM6 BLE:     scan start failed");
+    scheduleBm6Scan();
+  }
+}
+
+void connectBm6()
+{
+  bm6DoConnect = false;
+  if (bm6Connected) return;
+  if (bm6Client != nullptr && !bm6Client->isConnected()) {
+    resetBm6Client();
+  }
+  if (bm6Client == nullptr) {
+    bm6Client = NimBLEDevice::createClient();
+    bm6Client->setClientCallbacks(&bm6ClientCallbacks, false);
+  }
+  // BM6-typische Verbindungsparameter (Norbert Roller): 7.5..15 ms, 1.5s sup
+  bm6Client->setConnectionParams(6, 12, 0, 150);
+  Serial.println("BM6 BLE:     connecting...");
+  if (!bm6Client->connect(bm6TargetAddress, true, false, false)) {
+    Serial.println("BM6 BLE:     connect failed");
+    resetBm6Client();
+    scheduleBm6Scan();
+    return;
+  }
+  delay(500);
+
+  NimBLERemoteService *svc = bm6Client->getService(kBm6ServiceUuid);
+  if (svc == nullptr) {
+    Serial.println("BM6 BLE:     FFF0 service missing");
+    bm6Client->disconnect();
+    scheduleBm6Scan();
+    return;
+  }
+  bm6WriteChar = svc->getCharacteristic(kBm6WriteUuid);
+  NimBLERemoteCharacteristic *notifyChar = svc->getCharacteristic(kBm6NotifyUuid);
+  if (bm6WriteChar == nullptr || notifyChar == nullptr) {
+    Serial.println("BM6 BLE:     FFF3/FFF4 char missing");
+    bm6Client->disconnect();
+    scheduleBm6Scan();
+    return;
+  }
+  if (!notifyChar->canNotify()) {
+    Serial.println("BM6 BLE:     FFF4 not notify-capable");
+    bm6Client->disconnect();
+    scheduleBm6Scan();
+    return;
+  }
+  bool subOk = notifyChar->subscribe(true, onBm6Notify, true);
+  Serial.printf("BM6 BLE:     subscribe %s\n", subOk ? "OK" : "FAIL");
+  if (!subOk) {
+    bm6Client->disconnect();
+    scheduleBm6Scan();
+    return;
+  }
+  bm6Connected = true;
+  bm6SendTrigger();
+}
+
+void updateBm6Ble()
+{
+  if (bm6DoConnect) {
+    connectBm6();
+    return;
+  }
+  if (bm6Connected) {
+    // Re-Trigger nur falls laenger keine Notifies kommen.
+    const uint32_t now = millis();
+    if (now - bm6LastRxMs > 5000 && now - bm6LastTriggerMs > kBm6TriggerIntervalMs) {
+      bm6SendTrigger();
+    }
+    return;
+  }
+  if (bm6NextScanMs != 0 && static_cast<int32_t>(millis() - bm6NextScanMs) >= 0) {
+    bm6NextScanMs = 0;
+    startBm6Scan();
+  }
+}
+#endif  // ENABLE_BM6
+
 void updateTuneBle()
 {
   if (tuneDoConnect) {
@@ -933,11 +1230,18 @@ void setupBleHub()
   Serial.printf("123TUNE BLE: target %s\n", tuneSavedAddress.c_str());
   Serial.println("BLE hub:     advertising waits for 123TUNE or 30s fallback");
   startTuneScan();
+#if ENABLE_BM6
+  Serial.printf("BM6 BLE:     target %s\n", kBm6TargetAddress);
+  scheduleBm6Scan();
+#endif
 }
 
 void updateBleHub()
 {
   updateTuneBle();
+#if ENABLE_BM6
+  updateBm6Ble();
+#endif
   updateTuneDebug();
   const uint32_t now = millis();
   if (!bleAdvertisingStarted &&
@@ -1111,6 +1415,17 @@ pre { white-space: pre-wrap; max-height: 220px; overflow: auto; padding: 12px; b
 <div class="row"><span>Command Write</span><strong class="mono">7f510003-5a6b-4d2a-9f20-14a7f3e20000</strong></div>
 </div>
 <div class="setup">
+<strong>BM6 Batteriemonitor</strong>
+<p class="hint">Leagend BM6 V2.0 (AES-verschluesselt). Liefert Bordnetz-Spannung und Umgebungstemperatur per BLE Notify.</p>
+<div class="row"><span>Verbindung</span><strong id="bm6conn">-</strong></div>
+<div class="row"><span>Spannung</span><strong id="bm6volt">- V</strong></div>
+<div class="row"><span>Temperatur</span><strong id="bm6temp">- C</strong></div>
+<div class="row"><span>RX Frames</span><strong id="bm6rx">0</strong></div>
+<div class="row"><span>RX Alter</span><strong id="bm6age">0 ms</strong></div>
+<div class="row"><span>Decode Fehler</span><strong id="bm6err">0</strong></div>
+<div class="row"><span>BM6 Adresse</span><strong class="mono">3c:ab:72:80:06:6a</strong></div>
+</div>
+<div class="setup">
 <strong>Heim-WLAN</strong>
 <div class="row"><span>Verbindung</span><strong id="wifi">nicht eingerichtet</strong></div>
 <div class="row"><span>IP im Heimnetz</span><strong id="lanip">-</strong></div>
@@ -1218,6 +1533,16 @@ async function refresh() {
     document.getElementById('canerr').textContent = d.can_status_errors ?? 0;
     document.getElementById('heap').textContent = d.heap_free ? Math.round(d.heap_free / 1024) + ' KB' : '-';
     document.getElementById('apdiag').textContent = (d.ap_ip || '-') + ' / ' + (d.ap_retry_count ?? 0);
+    var bm6el = document.getElementById('bm6conn');
+    if (bm6el) {
+      bm6el.textContent = d.bm6_connected ? 'verbunden' : 'scan/retry';
+      cls(bm6el, d.bm6_connected ? 'ok' : 'warn');
+      document.getElementById('bm6volt').textContent = Number(d.bm6_voltage ?? 0).toFixed(2) + ' V';
+      document.getElementById('bm6temp').textContent = (d.bm6_temperature ?? 0) + ' C';
+      document.getElementById('bm6rx').textContent = d.bm6_rx_count ?? 0;
+      document.getElementById('bm6age').textContent = (d.bm6_age_ms ?? 0) + ' ms';
+      document.getElementById('bm6err').textContent = d.bm6_decode_fail ?? 0;
+    }
     document.getElementById('jsondump').textContent = JSON.stringify(d, null, 2);
     pushHist('lambda', d.lambda);
     pushHist('rpm', d.rpm);
