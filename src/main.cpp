@@ -1021,6 +1021,7 @@ pre { white-space: pre-wrap; max-height: 220px; overflow: auto; padding: 12px; b
 <div class="lambda" id="lambda">-.---</div>
 <div class="row"><span>Status</span><strong id="status">warte</strong></div>
 <div class="row"><span>Sensortemperatur</span><strong id="temp">- C</strong></div>
+<div class="row"><span>123 RPM / ADV / MAP</span><strong id="main123">0 / 0.0 / 0</strong></div>
 <div class="row"><span>CAN</span><strong id="can">-</strong></div>
 </div>
 <div class="cards">
@@ -1142,6 +1143,7 @@ async function refresh() {
     document.getElementById('lambda').textContent = d.valid ? d.lambda.toFixed(3) : '-.---';
     document.getElementById('status').textContent = d.status;
     document.getElementById('temp').textContent = d.valid ? d.temperature + ' C' : '- C';
+    document.getElementById('main123').textContent = (d.rpm ?? 0) + ' / ' + Number(d.advance ?? 0).toFixed(1) + ' / ' + (d.map ?? 0);
     document.getElementById('can').textContent = d.can_ready ? 'aktiv' : 'Fehler';
     cls(document.getElementById('source'), d.source === 'CAN' ? 'tag ok' : (d.source === 'DEMO' ? 'tag warn' : 'tag bad'));
     cls(document.getElementById('status'), d.status === 'OK' ? 'ok' : (d.status === 'HEAT' || d.source === 'DEMO' ? 'warn' : 'bad'));
@@ -1490,15 +1492,45 @@ void updateDisplay()
 
   char lambdaLine[24];
   snprintf(lambdaLine, sizeof(lambdaLine), "LAM %.3f %s", snapshot.lambda, sourceTextC(snapshot));
-  displayLine(0, lambdaLine);
-
-  if (snapshot.fromCan || snapshot.fromDemo) {
-    char stateLine[24];
-    snprintf(stateLine, sizeof(stateLine), "%uC %s", snapshot.temperatureC, statusTextC(snapshot.status));
-    displayLine(1, stateLine);
-  } else {
-    displayLine(1, "Analog fallback");
+  const char *tuneState = "123:DISC";
+  bool showTunePage = false;
+#if ENABLE_BLE_HUB
+  const TuneSnapshot tune = tuneSnapshot();
+  const bool tuneFresh = tune.lastRxMs != 0 && (now - tune.lastRxMs) <= 3000;
+  if (tuneConnected && tuneFresh) {
+    tuneState = "123:OK";
+  } else if (tuneDoConnect || tuneNextScanMs == 0) {
+    tuneState = "123:SCAN";
   }
+  if (tuneConnected && tuneFresh) {
+    showTunePage = ((now / 2000U) % 2U) == 1U;
+  }
+#endif
+
+  if (!showTunePage) {
+    displayLine(0, lambdaLine);
+  }
+
+  if (!showTunePage && (snapshot.fromCan || snapshot.fromDemo)) {
+    char stateLine[24];
+    snprintf(stateLine, sizeof(stateLine), "%uC %s %s", snapshot.temperatureC, statusTextC(snapshot.status), tuneState);
+    displayLine(1, stateLine);
+  } else if (!showTunePage) {
+    char stateLine[24];
+    snprintf(stateLine, sizeof(stateLine), "Analog %s", tuneState);
+    displayLine(1, stateLine);
+  }
+
+#if ENABLE_BLE_HUB
+  if (showTunePage) {
+    char tuneLine1[24];
+    char tuneLine2[24];
+    snprintf(tuneLine1, sizeof(tuneLine1), "RPM %4d MAP %3d", static_cast<int>(tune.rpm), static_cast<int>(tune.map));
+    snprintf(tuneLine2, sizeof(tuneLine2), "ADV %4.1f RX %lu", tune.advance, static_cast<unsigned long>(tune.rxCount));
+    displayLine(0, tuneLine1);
+    displayLine(1, tuneLine2);
+  }
+#endif
 }
 
 void printBootDetails()
