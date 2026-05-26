@@ -1,5 +1,16 @@
 # Quick Start Tomorrow (Fahrzeugtest)
 
+## GitHub Links
+- Repo: `https://github.com/niedi74/spartan3v2-can-adapter`
+- Issues: `https://github.com/niedi74/spartan3v2-can-adapter/issues`
+- Letzter Doku-Stand: `https://github.com/niedi74/spartan3v2-can-adapter/blob/main/docs/handoff_2026-05-26.md`
+- Diese Quick-Start Datei: `https://github.com/niedi74/spartan3v2-can-adapter/blob/main/docs/quick-start-tomorrow.md`
+- Hauptcode: `https://github.com/niedi74/spartan3v2-can-adapter/blob/main/src/main.cpp`
+- Wichtige Commits:
+  - `https://github.com/niedi74/spartan3v2-can-adapter/commit/eed24d8`
+  - `https://github.com/niedi74/spartan3v2-can-adapter/commit/a192ff9`
+  - `https://github.com/niedi74/spartan3v2-can-adapter/commit/7dd8abc`
+
 1. Board an 12V, COM9 anschliessen, Monitor starten: `pio device monitor --port COM9 --baud 115200`.
 2. Zuendung EIN, warten bis Spartan bootet und `123TUNE BLE: scan 10s...` erscheint.
 3. Pruefen: `123TUNE BLE: found ...` und danach `subscribe OK` + `CCCD read len=2 : 01 00`.
@@ -12,4 +23,3 @@
 10. Motor starten und 2-3 Minuten laufen lassen; auf `notify`-Frames und steigendes `tune_rx` achten.
 11. Erfolgskriterium: stabile RPM/ADV/MAP im Spartan `/state` und auf dem M5-Display.
 12. Bei Abbruch/Timeout: kurze Logs sichern (Zeitpunkt + letzte 30 Zeilen), dann Zuendung kurz AUS/EIN und neu testen.
-
