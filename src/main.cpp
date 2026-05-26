@@ -1001,8 +1001,14 @@ void setupWebGui()
   haveSavedWifi = savedSsid.length() > 0;
 
   WiFi.mode(WIFI_AP_STA);
-  // WiFi-Sleep aus: stoert sonst BLE-Timing wenn Hub+Client gleichzeitig laufen.
+#if ENABLE_BLE_HUB
+  // ESP32 erzwingt WiFi-Modem-Sleep wenn BT/BLE gleichzeitig aktiv ist.
+  // Ohne diesen Sleep crasht ESP-IDF mit:
+  //   "Should enable WiFi modem sleep when both WiFi and Bluetooth are enabled"
+  WiFi.setSleep(true);
+#else
   WiFi.setSleep(false);
+#endif
   WiFi.softAPConfig(
       IPAddress(192, 168, 4, 1),
       IPAddress(192, 168, 4, 1),
@@ -1338,7 +1344,7 @@ void updateWebGui()
       homeWifiConnectStartedMs != 0 && now - homeWifiConnectStartedMs >= kHomeWifiConnectWindowMs) {
     WiFi.disconnect(false, false);
     WiFi.mode(WIFI_AP);
-    WiFi.setSleep(false);
+    WiFi.setSleep(true);
     WiFi.softAPConfig(
         IPAddress(192, 168, 4, 1),
         IPAddress(192, 168, 4, 1),
