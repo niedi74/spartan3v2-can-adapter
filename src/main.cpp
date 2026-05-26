@@ -192,10 +192,16 @@ String lastUartCommand = "";
 String lastUartResponse = "";
 #if ENABLE_BLE_HUB
 NimBLECharacteristic *bleStatusCharacteristic = nullptr;
+NimBLEServer *bleServerRef = nullptr;
 volatile uint8_t bleClientCount = 0;
 String bleAddress = "";
 bool bleAdvertisingStarted = false;
 uint32_t bleHubSetupMs = 0;
+// Hub notify stats (Spartan -> M5)
+uint32_t bleNotifyOkCount = 0;
+uint32_t bleNotifyFailCount = 0;
+uint8_t  bleNotifyFailStreak = 0;
+uint32_t lastHubStatLogMs = 0;
 NimBLEClient *tuneClient = nullptr;
 NimBLERemoteCharacteristic *tuneNusRx = nullptr;
 NimBLEAddress tuneTargetAddress;
@@ -567,7 +573,7 @@ String bleStatusPayload()
 
 class BleServerCallbacks : public NimBLEServerCallbacks {
  public:
-  void onConnect(NimBLEServer *, NimBLEConnInfo &) override
+  void onConnect(NimBLEServer *server, NimBLEConnInfo &info) override
   {
     portENTER_CRITICAL(&stateMux);
     if (bleClientCount < UINT8_MAX) {
@@ -575,10 +581,17 @@ class BleServerCallbacks : public NimBLEServerCallbacks {
     }
     const uint8_t clients = bleClientCount;
     portEXIT_CRITICAL(&stateMux);
+    bleNotifyFailStreak = 0;
     Serial.printf("BLE hub:     client connected, count=%u\n", clients);
+
+    // Konservative Conn-Params fuer M5: min=30ms, max=50ms, latency=0, supervision=2s
+    // Entspannt das BLE-Timing waehrend WiFi + Spartan-Client aktiv sind.
+    if (server != nullptr) {
+      server->updateConnParams(info.getConnHandle(), 24, 40, 0, 200);
+    }
   }
 
-  void onDisconnect(NimBLEServer *, NimBLEConnInfo &, int) override
+  void onDisconnect(NimBLEServer *, NimBLEConnInfo &, int reason) override
   {
     portENTER_CRITICAL(&stateMux);
     if (bleClientCount > 0) {
@@ -586,7 +599,8 @@ class BleServerCallbacks : public NimBLEServerCallbacks {
     }
     const uint8_t clients = bleClientCount;
     portEXIT_CRITICAL(&stateMux);
-    Serial.printf("BLE hub:     client disconnected, count=%u\n", clients);
+    bleNotifyFailStreak = 0;
+    Serial.printf("BLE hub:     client disconnected reason=%d count=%u\n", reason, clients);
     if (bleAdvertisingStarted) {
       NimBLEDevice::startAdvertising();
     }
@@ -894,6 +908,7 @@ void setupBleHub()
 #endif
 
   NimBLEServer *bleServer = NimBLEDevice::createServer();
+  bleServerRef = bleServer;
   bleServer->setCallbacks(new BleServerCallbacks());
 
   NimBLEService *service = bleServer->createService(kBleServiceUuid);
@@ -937,7 +952,39 @@ void updateBleHub()
   const String payload = bleStatusPayload();
   bleStatusCharacteristic->setValue(payload.c_str());
   if (getBleClientCount() > 0) {
-    bleStatusCharacteristic->notify();
+    const bool notifyOk = bleStatusCharacteristic->notify();
+    if (notifyOk) {
+      bleNotifyOkCount++;
+      bleNotifyFailStreak = 0;
+    } else {
+      bleNotifyFailCount++;
+      if (bleNotifyFailStreak < 255) bleNotifyFailStreak++;
+      Serial.printf("BLE hub:     notify FAIL streak=%u total_fail=%lu\n",
+                    bleNotifyFailStreak,
+                    static_cast<unsigned long>(bleNotifyFailCount));
+      // Watchdog: nach 8 Fehlern in Folge die M5-Verbindung trennen
+      // damit der M5 sauber neu connecten kann.
+      if (bleNotifyFailStreak >= 8 && bleServerRef != nullptr) {
+        Serial.println("BLE hub:     watchdog -> disconnect all clients & re-advertise");
+        bleNotifyFailStreak = 0;
+        const std::vector<uint16_t> peers = bleServerRef->getPeerDevices();
+        for (uint16_t handle : peers) {
+          bleServerRef->disconnect(handle);
+        }
+        NimBLEDevice::startAdvertising();
+      }
+    }
+  }
+
+  // Periodisches Hub-Status-Log (alle 2s)
+  if (now - lastHubStatLogMs >= 2000) {
+    lastHubStatLogMs = now;
+    Serial.printf("BLE hub:     clients=%u notify_ok=%lu notify_fail=%lu streak=%u adv=%d\n",
+                  getBleClientCount(),
+                  static_cast<unsigned long>(bleNotifyOkCount),
+                  static_cast<unsigned long>(bleNotifyFailCount),
+                  bleNotifyFailStreak,
+                  bleAdvertisingStarted ? 1 : 0);
   }
 }
 #else
@@ -954,11 +1001,8 @@ void setupWebGui()
   haveSavedWifi = savedSsid.length() > 0;
 
   WiFi.mode(WIFI_AP_STA);
-#if ENABLE_BLE_HUB
-  WiFi.setSleep(true);
-#else
+  // WiFi-Sleep aus: stoert sonst BLE-Timing wenn Hub+Client gleichzeitig laufen.
   WiFi.setSleep(false);
-#endif
   WiFi.softAPConfig(
       IPAddress(192, 168, 4, 1),
       IPAddress(192, 168, 4, 1),
@@ -1294,7 +1338,7 @@ void updateWebGui()
       homeWifiConnectStartedMs != 0 && now - homeWifiConnectStartedMs >= kHomeWifiConnectWindowMs) {
     WiFi.disconnect(false, false);
     WiFi.mode(WIFI_AP);
-    WiFi.setSleep(true);
+    WiFi.setSleep(false);
     WiFi.softAPConfig(
         IPAddress(192, 168, 4, 1),
         IPAddress(192, 168, 4, 1),
