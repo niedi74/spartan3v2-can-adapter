@@ -1399,10 +1399,19 @@ button.danger { background: #8b3c2e; color: #ffe8dc; }
 .mini h3 { margin: 0 0 8px; font-size: 1rem; color: #bde87a; }
 canvas { width: 100%; height: 78px; background: #08100c; border-radius: 10px; }
 pre { white-space: pre-wrap; max-height: 220px; overflow: auto; padding: 12px; background: #08100c; border-radius: 10px; }
+.tabs { display: flex; gap: 8px; margin: 4px 0 18px; position: sticky; top: 0; padding-top: 6px; padding-bottom: 6px; background: #0b1210; z-index: 10; }
+.tab { flex: 1; padding: 14px 18px; border-radius: 10px; background: #1a2922; color: #cbeaa7; font-weight: 700; cursor: pointer; }
+.tab.on { background: #9ed85b; color: #081005; }
+.tab-section[hidden] { display: none !important; }
 </style>
 </head>
 <body><main>
 <h1>SPARTAN 3 v2 / ESP32 Adapter</h1>
+<div class="tabs">
+<button type="button" id="tabLive" class="tab on" onclick="showTab('live')">Live</button>
+<button type="button" id="tabSetup" class="tab" onclick="showTab('setup')">Setup</button>
+</div>
+<div class="tab-section" data-tab="live">
 <div class="card">
 <span id="source" class="tag">START</span>
 <div class="lambda" id="lambda">-.---</div>
@@ -1425,27 +1434,6 @@ pre { white-space: pre-wrap; max-height: 220px; overflow: auto; padding: 12px; b
 <div class="row"><span>Frame Fehler</span><strong id="terr">0 / 0</strong></div>
 <div class="row"><span>RPM / ADV / MAP</span><strong id="tvals">0 / 0.0 / 0</strong></div>
 <div class="row"><span>123 Adresse</span><strong id="taddr" class="mono">-</strong></div>
-</div>
-<div class="setup">
-<strong>System Diagnose</strong>
-<div class="row"><span>CAN State / TX / RX</span><strong id="candiag">-</strong></div>
-<div class="row"><span>CAN Statusfehler</span><strong id="canerr">0</strong></div>
-<div class="row"><span>Heap frei</span><strong id="heap">-</strong></div>
-<div class="row"><span>AP IP / Retry</span><strong id="apdiag">-</strong></div>
-<button class="secondary" type="button" onclick="copyJson()">JSON kopieren</button>
-<pre id="jsondump">{}</pre>
-</div>
-<div class="setup">
-<strong>BLE Hub / Gateway</strong>
-<p class="hint">Fuer M5/Waveshare Gateway-Modus. Der M5 soll per Name plus Service UUID scannen; die Adresse ist nur Debug/Fast-Reconnect.</p>
-<p class="hint">Road-AP: Handy mit <span class="mono">Spartan3-Setup</span> verbinden. Spartan ist <a class="mono" href="http://192.168.4.1/">192.168.4.1</a>, M5 Dial ist <a class="mono" href="http://192.168.4.2/">192.168.4.2</a>, wenn dort der Spartan-AP-Preset aktiv ist.</p>
-<div class="row"><span>Status</span><strong id="bleenabled">-</strong></div>
-<div class="row"><span>Name</span><strong id="blename" class="mono">-</strong></div>
-<div class="row"><span>Adresse</span><strong id="bleaddr" class="mono">-</strong></div>
-<div class="row"><span>Clients</span><strong id="bleclients">0</strong></div>
-<div class="row"><span>Service</span><strong class="mono">7f510001-5a6b-4d2a-9f20-14a7f3e20000</strong></div>
-<div class="row"><span>Status Notify</span><strong class="mono">7f510002-5a6b-4d2a-9f20-14a7f3e20000</strong></div>
-<div class="row"><span>Command Write</span><strong class="mono">7f510003-5a6b-4d2a-9f20-14a7f3e20000</strong></div>
 </div>
 <div class="setup">
 <strong>BM6 Batteriemonitor</strong>
@@ -1471,6 +1459,29 @@ pre { white-space: pre-wrap; max-height: 220px; overflow: auto; padding: 12px; b
 <p class="hint">Beispiel: Tacho zeigt 60.0 km/h, GPS sagt 58.4 km/h -> Trim = 1000 * 58.4 / 60.0 = 973.</p>
 <button type="submit">Speichern</button>
 </form>
+</div>
+</div><!-- /tab live -->
+<div class="tab-section" data-tab="setup" hidden>
+<div class="setup">
+<strong>System Diagnose</strong>
+<div class="row"><span>CAN State / TX / RX</span><strong id="candiag">-</strong></div>
+<div class="row"><span>CAN Statusfehler</span><strong id="canerr">0</strong></div>
+<div class="row"><span>Heap frei</span><strong id="heap">-</strong></div>
+<div class="row"><span>AP IP / Retry</span><strong id="apdiag">-</strong></div>
+<button class="secondary" type="button" onclick="copyJson()">JSON kopieren</button>
+<pre id="jsondump">{}</pre>
+</div>
+<div class="setup">
+<strong>BLE Hub / Gateway</strong>
+<p class="hint">Fuer M5/Waveshare Gateway-Modus. Der M5 scannt nach Name + Service UUID; die Adresse ist nur Debug/Fast-Reconnect.</p>
+<p class="hint">Road-AP: Handy mit <span class="mono">Spartan3-Setup</span> verbinden. Spartan ist <a class="mono" href="http://192.168.4.1/">192.168.4.1</a>, M5 Dial ist <a class="mono" href="http://192.168.4.2/">192.168.4.2</a>.</p>
+<div class="row"><span>Status</span><strong id="bleenabled">-</strong></div>
+<div class="row"><span>Name</span><strong id="blename" class="mono">-</strong></div>
+<div class="row"><span>Adresse</span><strong id="bleaddr" class="mono">-</strong></div>
+<div class="row"><span>Clients</span><strong id="bleclients">0</strong></div>
+<div class="row"><span>Service</span><strong class="mono">7f510001-5a6b-4d2a-9f20-14a7f3e20000</strong></div>
+<div class="row"><span>Status Notify</span><strong class="mono">7f510002-5a6b-4d2a-9f20-14a7f3e20000</strong></div>
+<div class="row"><span>Command Write</span><strong class="mono">7f510003-5a6b-4d2a-9f20-14a7f3e20000</strong></div>
 </div>
 <div class="setup">
 <strong>WLAN / Hotspot</strong>
@@ -1524,9 +1535,22 @@ pre { white-space: pre-wrap; max-height: 220px; overflow: auto; padding: 12px; b
 </form>
 </div>
 <p class="hint">Aktuell ist der Bring-up-Modus aktiv. DEMO-Werte pruefen Display und Web-GUI, bis der CAN-Transceiver angeschlossen ist.</p>
+</div><!-- /tab setup -->
 <script>
 const hist = {lambda:[], rpm:[], temp:[]};
 let lastJson = {};
+function showTab(name) {
+  document.querySelectorAll('.tab-section').forEach(s => {
+    s.hidden = s.dataset.tab !== name;
+  });
+  document.getElementById('tabLive').classList.toggle('on', name === 'live');
+  document.getElementById('tabSetup').classList.toggle('on', name === 'setup');
+  try { localStorage.setItem('spartanTab', name); } catch (e) {}
+}
+try {
+  const saved = localStorage.getItem('spartanTab');
+  if (saved === 'setup') showTab('setup');
+} catch (e) {}
 document.getElementById('wifiPreset').addEventListener('change', (e) => {
   const option = e.target.selectedOptions[0];
   const ssid = option.value || '';
