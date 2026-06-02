@@ -22,6 +22,21 @@ Display firmware for a dedicated ESP32 Dev adapter board connected to a 14Point7
 
 The `m5_motorraum` environment uses `M5Unified` and currently targets `m5stack-core-esp32`. Adjust the PlatformIO board if the actual M5 model differs.
 
+## GPIO Pinbelegung (Uebersicht)
+
+| GPIO | Funktion | Richtung | Schutz |
+| --- | --- | --- | --- |
+| 2 | Status-LED | OUT | - |
+| 16 | Spartan UART RX (Serial2) | IN | Spannungsteiler 10k/18k (5V->3.3V) |
+| 17 | Spartan UART TX (Serial2) | OUT | direkt |
+| 21 | LCD SDA (I2C) | I/O | - |
+| 22 | LCD SCL (I2C) | OUT | - |
+| 25 | CAN RX (TWAI, via SN65HVD230) | IN | Transceiver |
+| 26 | CAN TX (TWAI, via SN65HVD230) | OUT | Transceiver |
+| 27 | Reed Speed-Sensor | IN (PULLUP) | gegen GND |
+| 34 | Spartan Analog (optional) | ADC | Spannungsteiler |
+| 35 | Heater Status Analog (optional) | ADC | - |
+
 ## LCD wiring
 
 | LCD | ESP32 Dev |
@@ -114,16 +129,43 @@ The motorraum ESP can also connect to the Leagend BM6 V2.0 battery monitor over 
 The `motorraum` build also starts a NimBLE GATT peripheral named `Spartan3-Hub`. This is the first step toward using the Spartan ESP as the central engine-bay gateway:
 
 ```text
-123TUNE+ -> Spartan ESP -> M5 Dial / Waveshare display
-Spartan 3 v2 -> Spartan ESP -> M5 Dial / Waveshare display
-Reed speed contact -> Spartan ESP -> M5 Dial / Waveshare display
+123TUNE+ (BLE)     ─┐
+Spartan 3 v2 (CAN) ─┤  Spartan ESP32   ──BLE──>  M5 Dial (Gateway)
+BM6 Battery (BLE)  ─┤  "Spartan3-Hub"            8 Display-Pages
+Reed Speed (GPIO27)─┘  Web GUI (Live|Setup)
 ```
 
-The current firmware publishes the Spartan status JSON by BLE Notify every 250 ms. The M5 should keep its existing direct 123TUNE+ connection mode and add a second menu mode named `Spartan Gateway`; in that mode it connects to `Spartan3-Hub` instead of the 123TUNE+ and reads combined cockpit data from there.
+The firmware publishes a compact text payload via BLE Notify every 250 ms:
 
-The Spartan ESP prints its BLE address during boot and exposes it in `/state` as `ble_address`. For the first M5 implementation, scan by advertised name plus service UUID; store the address only as an optional fast reconnect/debug hint.
+```
+L<lambda>R<rpm>A<adv>M<map>V<bm6_volt>S<speed_kmh>I<123_volt>T<123_temp>C<coil_A>
+```
 
-See [docs/ble-gateway-architecture.md](docs/ble-gateway-architecture.md) for the target architecture, BLE UUIDs, M5 mode split, M5 project notes and 123TUNE+ intake plan.
+Example: `L0.98R850A14M100V12.38S65I12.8T45C3.2`
+
+| Field | Source | Description |
+| --- | --- | --- |
+| `L` | Spartan CAN | Lambda (0.68..3.40) |
+| `R` | 123TUNE+ BLE | RPM |
+| `A` | 123TUNE+ BLE | Advance (degrees) |
+| `M` | 123TUNE+ BLE | MAP (kPa) |
+| `V` | BM6 BLE | Battery voltage |
+| `S` | Reed GPIO 27 | Speed (km/h, rounded) |
+| `I` | 123TUNE+ BLE | Internal voltage |
+| `T` | 123TUNE+ BLE | Internal temperature |
+| `C` | 123TUNE+ BLE | Coil current (A) |
+
+Fields `V`, `S`, `I`, `T`, `C` are optional — omitted when the source is not connected. The M5 parser handles any subset.
+
+### BLE UUIDs
+
+| UUID | Type |
+| --- | --- |
+| `7f510001-5a6b-4d2a-9f20-14a7f3e20000` | Service |
+| `7f510002-5a6b-4d2a-9f20-14a7f3e20000` | Status Notify (compact payload) |
+| `7f510003-5a6b-4d2a-9f20-14a7f3e20000` | Command Write |
+
+See [docs/ble-gateway-architecture.md](docs/ble-gateway-architecture.md) for the full architecture.
 
 ## Optional analog fallback
 
@@ -162,9 +204,9 @@ Spartan Grey GND  -> ESP32 GND
 
 Orange is a 5V UART signal. Do not connect it directly to an ESP32 GPIO.
 
-## Bring-up without CAN module
+## Bring-up / Demo mode
 
-The `motorraum` ESP32 Dev build currently sets `ENABLE_SPARTAN_DEMO=1`. This lets the LCD and adapter wiring be tested before the external CAN transceiver is available. It first shows a simulated heat-up phase, then cycles Lambda values around `1.000` and marks them as `DEMO`.
+`ENABLE_SPARTAN_DEMO=0` is the default (real CAN data). Set `=1` in `platformio.ini` for bench testing without a sensor. Demo cycles Lambda values around `1.000` and marks them as `DEMO`.
 
 ```text
 LAM 1.023 DEMO
@@ -173,21 +215,32 @@ LAM 1.023 DEMO
 
 CAN reception remains compiled in. A valid Spartan CAN message takes priority over demo data. When the CAN module is installed for normal operation, set `ENABLE_SPARTAN_DEMO=0` in `platformio.ini` so a missing CAN connection is shown as an error rather than concealed by test values.
 
-## Mini Web GUI
+## Web GUI
 
-The `motorraum` build also starts its own WiFi access point, so no home-network credentials are needed during bench setup:
+Two-tab layout: **Live** and **Setup**.
 
 | Setting | Value |
 | --- | --- |
-| WiFi network | `Spartan3-Setup` |
-| Password | `lambda123` |
-| Browser address | `http://192.168.4.1/` |
+| WiFi AP | `Spartan3-Setup` / `lambda123` |
+| AP address | `http://192.168.4.1/` |
+| Road hotspot | `Android-AP1` / `Frankfurt1` |
+| JSON endpoint | `/state` (also `/api/status`) |
 
-The page displays live Lambda, heat-up/normal status, sensor temperature and the current data source (`DEMO`, `CAN`, or `ADC`). Following the M5Dial setup pattern, DNS captive-portal redirection sends setup clients to the local page. Its primary compact JSON endpoint is `/state`; `/api/status` remains available as an alias.
+### Live tab
 
-The same page contains the WiFi setup form with presets for the road hotspot `Android-AP1` and `Z00-Station`, plus manual entry. Enter SSID and password once; the values are stored in ESP32 preferences and the board joins that network while keeping `Spartan3-Setup` available for recovery. If no stored WiFi exists, the `motorraum` build uses the built-in road hotspot default `Android-AP1` / `Frankfurt1`. After a successful connection, the page shows the additional network IP address.
+- Lambda hero card (value, source, status, sensor temp)
+- 123 RPM / ADV / MAP
+- 60 s charts (Lambda, RPM, Temp)
+- 123Tune BLE Diagnose (connection, RX frames, scan stats)
+- BM6 Batteriemonitor (voltage, temperature, RX count)
+- Geschwindigkeit Reed (Hz, km/h, pulses, GPS trim form)
 
-The Web GUI also contains Spartan UART configuration controls. These become active once Orange/Yellow/Grey are wired to ESP32 `GPIO 26/27/GND` through level shifting.
+### Setup tab
+
+- System Diagnose (CAN state, Heap, AP IP, JSON dump)
+- BLE Hub / Gateway (UUIDs, client count, road-AP hints)
+- WLAN / Hotspot (presets, manual entry, clear)
+- Spartan UART (GETFW, GETCANID, expert commands, CAN/Output config)
 
 ## Spartan Reference
 
