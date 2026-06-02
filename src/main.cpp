@@ -119,6 +119,37 @@
 #define ANALOG_DIVIDER_DEN 2
 #endif
 
+// ---- Reed-Sensor Geschwindigkeit ------------------------------------------
+// Reed-Kontakt gegen GND an SPEED_REED_PIN. INPUT_PULLUP, fallende Flanke =
+// Magnet vorbei. Bei 10 Magneten/Umdrehung sind das 10 Pulse pro Radumdrehung.
+//
+//   Pulse pro Sekunde * (TIRE_CIRC_MM / PULSES_PER_REV) / 1000.0 = m/s
+//   km/h = m/s * 3.6
+//
+// Reifen 205/80 R14: Umfang ~2147 mm
+// Trim-Faktor (per Web GUI / Prefs) erlaubt GPS-Kalibrierung.
+#ifndef SPEED_REED_PIN
+#define SPEED_REED_PIN -1   // -1 = disabled
+#endif
+
+#ifndef PULSES_PER_REV
+#define PULSES_PER_REV 10
+#endif
+
+#ifndef TIRE_CIRC_MM_DEFAULT
+#define TIRE_CIRC_MM_DEFAULT 2147
+#endif
+
+#ifndef SPEED_TRIM_PERMIL_DEFAULT
+#define SPEED_TRIM_PERMIL_DEFAULT 1000   // 1000 = 1.000 (kein Trim)
+#endif
+
+#ifndef SPEED_DEBOUNCE_US
+// Bei 200 km/h und 4657 P/km: ~258 Hz -> Periode 3.9 ms. 500 us debounce
+// blockt sicher kein Echtsignal aber filtert mech. Prellungen.
+#define SPEED_DEBOUNCE_US 500
+#endif
+
 #ifndef ENABLE_SPARTAN_UART
 #define ENABLE_SPARTAN_UART 1
 #endif
@@ -225,6 +256,19 @@ uint32_t heaterAdcMilliVolts = 0;
 uint8_t heaterStatusCode = 0;
 uint32_t lastDisplayMs = 0;
 uint32_t lastBleNotifyMs = 0;
+
+// ---- Reed-Speed-State (ISR + Loop) ----
+#if SPEED_REED_PIN >= 0
+volatile uint32_t speedPulseCount = 0;       // monoton steigend, ISR-only
+volatile uint32_t speedLastEdgeUs = 0;       // letzter Flanken-Zeitstempel
+uint32_t speedPrevPulseCount = 0;            // Sampling-Diff loop()
+uint32_t speedPrevSampleMs = 0;
+float speedHz = 0.0f;
+float speedKmh = 0.0f;
+uint16_t tireCircMm = TIRE_CIRC_MM_DEFAULT;  // konfigurierbar
+uint16_t speedTrimPermil = SPEED_TRIM_PERMIL_DEFAULT; // 1000 = 1.000
+#endif
+
 String uartLine;
 String lastUartCommand = "";
 String lastUartResponse = "";
@@ -572,6 +616,20 @@ String statusJson()
   json += String(bm6LastRxMs == 0 ? 0UL : static_cast<unsigned long>(now - bm6LastRxMs));
 #endif
 #endif
+#if SPEED_REED_PIN >= 0
+  json += ",\"speed_hz\":";
+  json += String(speedHz, 2);
+  json += ",\"speed_kmh\":";
+  json += String(speedKmh, 1);
+  json += ",\"speed_pulses\":";
+  json += String(static_cast<unsigned long>(speedPulseCount));
+  json += ",\"speed_tire_mm\":";
+  json += String(tireCircMm);
+  json += ",\"speed_trim_permil\":";
+  json += String(speedTrimPermil);
+  json += ",\"speed_pulses_per_rev\":";
+  json += String(PULSES_PER_REV);
+#endif
   json += "}";
   return json;
 }
@@ -630,20 +688,29 @@ String bleStatusPayload()
 {
   const SpartanReading snapshot = readingSnapshot();
   const TuneSnapshot tune = tuneSnapshot();
-  char payload[40];
+  // Format: L<lam>R<rpm>A<adv>M<map>V<volt>S<kmh>
+  char payload[48];
 #if ENABLE_BM6
-  snprintf(payload, sizeof(payload), "L%.2fR%dA%dM%dV%.2f",
-           snapshot.valid ? snapshot.lambda : 0.0f,
-           static_cast<int>(tune.rpm),
-           static_cast<int>(tune.advance),
-           static_cast<int>(tune.map),
-           bm6Voltage);
+  int n = snprintf(payload, sizeof(payload), "L%.2fR%dA%dM%dV%.2f",
+                   snapshot.valid ? snapshot.lambda : 0.0f,
+                   static_cast<int>(tune.rpm),
+                   static_cast<int>(tune.advance),
+                   static_cast<int>(tune.map),
+                   bm6Voltage);
 #else
-  snprintf(payload, sizeof(payload), "L%.2fR%dA%dM%d",
-           snapshot.valid ? snapshot.lambda : 0.0f,
-           static_cast<int>(tune.rpm),
-           static_cast<int>(tune.advance),
-           static_cast<int>(tune.map));
+  int n = snprintf(payload, sizeof(payload), "L%.2fR%dA%dM%d",
+                   snapshot.valid ? snapshot.lambda : 0.0f,
+                   static_cast<int>(tune.rpm),
+                   static_cast<int>(tune.advance),
+                   static_cast<int>(tune.map));
+#endif
+#if SPEED_REED_PIN >= 0
+  if (n > 0 && n < static_cast<int>(sizeof(payload))) {
+    snprintf(payload + n, sizeof(payload) - n, "S%d",
+             static_cast<int>(speedKmh + 0.5f));
+  }
+#else
+  (void)n;
 #endif
   return String(payload);
 }
@@ -1392,6 +1459,20 @@ pre { white-space: pre-wrap; max-height: 220px; overflow: auto; padding: 12px; b
 <div class="row"><span>BM6 Adresse</span><strong class="mono">3c:ab:72:80:06:6a</strong></div>
 </div>
 <div class="setup">
+<strong>Geschwindigkeit (Reed-Sensor)</strong>
+<p class="hint">Reed-Kontakt gegen GND auf GPIO 27. Default: 10 Pulse pro Radumdrehung, Reifen 205/80 R14 = 2147 mm. Trim per GPS abgleichen: Trim = GPS / Reed.</p>
+<div class="row"><span>Frequenz</span><strong id="spdhz">- Hz</strong></div>
+<div class="row"><span>Geschwindigkeit</span><strong id="spdkmh">- km/h</strong></div>
+<div class="row"><span>Pulse gesamt</span><strong id="spdpc">0</strong></div>
+<div class="row"><span>Pulse pro Umdrehung</span><strong id="spdppr">10</strong></div>
+<form action="/speed" method="post" style="margin-top:12px">
+<label>Reifenumfang (mm) <input type="number" name="tire" min="500" max="4000" id="ctlTire" value="2147"></label>
+<label>Trim (x1000) <input type="number" name="trim" min="500" max="1500" id="ctlTrim" value="1000"></label>
+<p class="hint">Beispiel: Tacho zeigt 60.0 km/h, GPS sagt 58.4 km/h -> Trim = 1000 * 58.4 / 60.0 = 973.</p>
+<button type="submit">Speichern</button>
+</form>
+</div>
+<div class="setup">
 <strong>WLAN / Hotspot</strong>
 <div class="row"><span>Verbindung</span><strong id="wifi">nicht eingerichtet</strong></div>
 <div class="row"><span>ESP32 IP</span><strong id="lanip">-</strong></div>
@@ -1518,6 +1599,17 @@ async function refresh() {
     document.getElementById('bm6rx').textContent = d.bm6_rx_count ?? 0;
     document.getElementById('bm6age').textContent = (d.bm6_age_ms ?? 0) + ' ms';
     document.getElementById('bm6err').textContent = d.bm6_decode_fail ?? 0;
+    var spdHz = document.getElementById('spdhz');
+    if (spdHz) {
+      spdHz.textContent = Number(d.speed_hz ?? 0).toFixed(2) + ' Hz';
+      document.getElementById('spdkmh').textContent = Number(d.speed_kmh ?? 0).toFixed(1) + ' km/h';
+      document.getElementById('spdpc').textContent = d.speed_pulses ?? 0;
+      document.getElementById('spdppr').textContent = d.speed_pulses_per_rev ?? 10;
+      var ctlTire = document.getElementById('ctlTire');
+      var ctlTrim = document.getElementById('ctlTrim');
+      if (ctlTire && document.activeElement !== ctlTire) ctlTire.value = d.speed_tire_mm ?? 2147;
+      if (ctlTrim && document.activeElement !== ctlTrim) ctlTrim.value = d.speed_trim_permil ?? 1000;
+    }
     document.getElementById('jsondump').textContent = JSON.stringify(d, null, 2);
     pushHist('lambda', d.lambda);
     pushHist('rpm', d.rpm);
@@ -1542,6 +1634,29 @@ setInterval(() => { if (!document.hidden) refresh(); }, 350);
   server.on("/hotspot-detect.html", []() { server.send(200, "text/html", "<html><body>Success</body></html>"); });
   server.on("/ncsi.txt", []() { server.send(200, "text/plain", "Microsoft NCSI"); });
   server.on("/connecttest.txt", []() { server.send(200, "text/plain", "Microsoft Connect Test"); });
+#if SPEED_REED_PIN >= 0
+  server.on("/speed", HTTP_POST, []() {
+    long tire = server.arg("tire").toInt();
+    long trim = server.arg("trim").toInt();
+    if (tire < 500 || tire > 4000) {
+      server.send(400, "text/plain", "Reifenumfang 500..4000 mm");
+      return;
+    }
+    if (trim < 500 || trim > 1500) {
+      server.send(400, "text/plain", "Trim 500..1500 (1000 = 1.000)");
+      return;
+    }
+    tireCircMm = static_cast<uint16_t>(tire);
+    speedTrimPermil = static_cast<uint16_t>(trim);
+    ensurePreferences();
+    networkPreferences.putUShort("tire_mm", tireCircMm);
+    networkPreferences.putUShort("trim_pm", speedTrimPermil);
+    Serial.printf("Speed:       saved tire=%u mm, trim=%u permil\n",
+                  tireCircMm, speedTrimPermil);
+    server.sendHeader("Location", "/", true);
+    server.send(303, "text/plain", "");
+  });
+#endif
   server.on("/wifi", HTTP_POST, []() {
     String ssid = server.arg("ssid");
     String password = server.arg("pass");
@@ -1802,6 +1917,60 @@ void updateHeaterAnalog()
 #endif
 }
 
+#if SPEED_REED_PIN >= 0
+void IRAM_ATTR speedReedIsr()
+{
+  const uint32_t now = micros();
+  if (now - speedLastEdgeUs < SPEED_DEBOUNCE_US) return;
+  speedLastEdgeUs = now;
+  speedPulseCount++;
+}
+
+void setupSpeedReed()
+{
+  // Konfig aus Prefs (falls vorhanden) lesen.
+#if ENABLE_WEB_GUI
+  ensurePreferences();
+  if (networkPreferences.isKey("tire_mm")) {
+    tireCircMm = networkPreferences.getUShort("tire_mm", TIRE_CIRC_MM_DEFAULT);
+  }
+  if (networkPreferences.isKey("trim_pm")) {
+    speedTrimPermil = networkPreferences.getUShort("trim_pm", SPEED_TRIM_PERMIL_DEFAULT);
+  }
+#endif
+  pinMode(SPEED_REED_PIN, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(SPEED_REED_PIN), speedReedIsr, FALLING);
+  speedPrevSampleMs = millis();
+  Serial.printf("Speed:       Reed GPIO%d, %u pulses/rev, tire=%u mm, trim=%u permil\n",
+                SPEED_REED_PIN, PULSES_PER_REV, tireCircMm, speedTrimPermil);
+}
+
+void updateSpeedReed()
+{
+  const uint32_t now = millis();
+  const uint32_t dtMs = now - speedPrevSampleMs;
+  if (dtMs < 250) return;  // 4 Hz Sampling
+
+  noInterrupts();
+  const uint32_t curCount = speedPulseCount;
+  interrupts();
+  const uint32_t pulses = curCount - speedPrevPulseCount;
+  speedPrevPulseCount = curCount;
+  speedPrevSampleMs = now;
+
+  const float hz = (1000.0f * static_cast<float>(pulses)) / static_cast<float>(dtMs);
+  speedHz = hz;
+  // km/h = Hz * (TIRE_CIRC_MM / PULSES_PER_REV) / 1000 * 3.6 * trim
+  //      = Hz * tireCircMm * 0.0036 / PULSES_PER_REV * (trim/1000)
+  speedKmh = hz * static_cast<float>(tireCircMm) * 0.0036f
+             / static_cast<float>(PULSES_PER_REV)
+             * (static_cast<float>(speedTrimPermil) / 1000.0f);
+}
+#else
+void setupSpeedReed() {}
+void updateSpeedReed() {}
+#endif
+
 void setupUart()
 {
 #if ENABLE_SPARTAN_UART
@@ -1970,6 +2139,7 @@ void setup()
   setupWebGui();
   setupCan();
   setupUart();
+  setupSpeedReed();
 #if ENABLE_SPARTAN_ANALOG
   analogSetPinAttenuation(SPARTAN_ANALOG_PIN, ADC_11db);
 #endif
@@ -1988,6 +2158,7 @@ void loop()
   updateAnalog();
   updateHeaterAnalog();
   updateUart();
+  updateSpeedReed();
   updateWebGui();
   updateBleHub();
   updateDisplay();
