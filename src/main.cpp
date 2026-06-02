@@ -281,8 +281,8 @@ uint32_t bleHubSetupMs = 0;
 NimBLEClient *tuneClient = nullptr;
 NimBLERemoteCharacteristic *tuneNusRx = nullptr;
 NimBLEAddress tuneTargetAddress;
-bool tuneDoConnect = false;
-bool tuneConnected = false;
+volatile bool tuneDoConnect = false;
+volatile bool tuneConnected = false;
 uint32_t tuneNextScanMs = 0;
 uint32_t tuneLastPingMs = 0;
 uint32_t tuneScanSeen = 0;
@@ -384,19 +384,7 @@ void setupDisplay()
 #endif
 }
 
-String statusText(uint8_t status)
-{
-  switch (status) {
-    case 1:
-      return "WAIT";
-    case 2:
-      return "HEAT";
-    case 3:
-      return "OK";
-    default:
-      return "ERR";
-  }
-}
+// statusText(String) entfernt — nur statusTextC(const char*) verwenden.
 
 const char *statusTextC(uint8_t status)
 {
@@ -426,13 +414,7 @@ const char *sourceTextC(const SpartanReading &snapshot)
   return "NONE";
 }
 
-String sourceText()
-{
-  portENTER_CRITICAL(&stateMux);
-  const SpartanReading snapshot = reading;
-  portEXIT_CRITICAL(&stateMux);
-  return sourceTextC(snapshot);
-}
+// sourceText(String) entfernt — nur sourceTextC(const char*) verwenden.
 
 SpartanReading readingSnapshot()
 {
@@ -511,7 +493,9 @@ String statusJson()
   const uint8_t clients = getBleClientCount();
 #endif
   const uint32_t now = millis();
-  String json = "{\"valid\":";
+  String json;
+  json.reserve(768);  // verhindert wiederholte Heap-Reallokationen
+  json += "{\"valid\":";
   json += snapshot.valid ? "true" : "false";
   json += ",\"lambda\":";
   json += String(snapshot.lambda, 3);
@@ -680,8 +664,10 @@ void decodeTuneFrame(const uint8_t *data, size_t length)
   if (knownOpcode && tuneRxCount < UINT32_MAX) {
     tuneRxCount++;
   }
-  tuneLastRxMs = millis();
   portEXIT_CRITICAL(&stateMux);
+  // millis() ausserhalb der Critical Section — ist nicht zeitkritisch genug
+  // um den Jitter zu rechtfertigen, spart aber Interrupt-Latenz.
+  tuneLastRxMs = millis();
 }
 
 String bleStatusPayload()
