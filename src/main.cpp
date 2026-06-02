@@ -674,30 +674,34 @@ String bleStatusPayload()
 {
   const SpartanReading snapshot = readingSnapshot();
   const TuneSnapshot tune = tuneSnapshot();
-  // Format: L<lam>R<rpm>A<adv>M<map>V<volt>S<kmh>
-  char payload[48];
-#if ENABLE_BM6
-  int n = snprintf(payload, sizeof(payload), "L%.2fR%dA%dM%dV%.2f",
-                   snapshot.valid ? snapshot.lambda : 0.0f,
-                   static_cast<int>(tune.rpm),
-                   static_cast<int>(tune.advance),
-                   static_cast<int>(tune.map),
-                   bm6Voltage);
-#else
+  // Kompakt-Format fuer M5 Gateway:
+  //   L<lambda>R<rpm>A<adv>M<map>  (Basis)
+  //   V<bm6_volt>                  (BM6 Batterie)
+  //   S<speed_kmh>                 (Reed)
+  //   I<123_volt>                  (123 interne Spannung)
+  //   T<123_temp>                  (123 interne Temp)
+  //   C<coil_current>              (123 Zuendspulenstrom)
+  char payload[72];
   int n = snprintf(payload, sizeof(payload), "L%.2fR%dA%dM%d",
                    snapshot.valid ? snapshot.lambda : 0.0f,
                    static_cast<int>(tune.rpm),
                    static_cast<int>(tune.advance),
                    static_cast<int>(tune.map));
+#if ENABLE_BM6
+  if (n > 0 && n < static_cast<int>(sizeof(payload)))
+    n += snprintf(payload + n, sizeof(payload) - n, "V%.2f", bm6Voltage);
 #endif
 #if SPEED_REED_PIN >= 0
-  if (n > 0 && n < static_cast<int>(sizeof(payload))) {
-    snprintf(payload + n, sizeof(payload) - n, "S%d",
-             static_cast<int>(speedKmh + 0.5f));
-  }
-#else
-  (void)n;
+  if (n > 0 && n < static_cast<int>(sizeof(payload)))
+    n += snprintf(payload + n, sizeof(payload) - n, "S%d",
+                  static_cast<int>(speedKmh + 0.5f));
 #endif
+  // 123TUNE+ interne Werte (nur wenn verbunden)
+  if (tune.rxCount > 0 && n > 0 && n < static_cast<int>(sizeof(payload))) {
+    n += snprintf(payload + n, sizeof(payload) - n, "I%.1fT%dC%.1f",
+                  tune.voltage, static_cast<int>(tune.temperature),
+                  tune.coilCurrent);
+  }
   return String(payload);
 }
 
