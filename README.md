@@ -15,6 +15,7 @@ Display firmware for a dedicated ESP32 Dev adapter board connected to a 14Point7
 - Optional interfaces: protected UART and scaled analog input
 - Current bring-up mode: simulated Spartan readings until the CAN module arrives
 - Setup Web GUI: ESP32 access point `Spartan3-Setup`, password `lambda123`
+- Road hotspot default: `Android-AP1` / `Frankfurt1` (2.4 GHz)
 - BLE gateway prototype: advertises `Spartan3-Hub` for M5/Waveshare cockpit clients
 
 ### M5
@@ -40,8 +41,8 @@ The ESP32 contains a TWAI/CAN controller but requires a physical CAN transceiver
 | --- | --- | --- |
 | 3V3 | VCC | - |
 | GND | GND | Black electronics ground |
-| GPIO 17 | TXD / D | - |
-| GPIO 16 | RXD / R | - |
+| GPIO 26 | TXD / D | - |
+| GPIO 25 | RXD / R | - |
 | - | CANH | Blue CAN High |
 | - | CANL | Purple CAN Low |
 
@@ -68,8 +69,8 @@ Spartan UART is intended here for setup commands such as `GETFW`, `GETCANID`, or
 
 | ESP32 Dev | Protected interface | Spartan 3 v2 |
 | --- | --- | --- |
-| GPIO 26 RX | Level shifter or divider | Orange UART TX |
-| GPIO 27 TX | Level shifter | Yellow UART RX |
+| GPIO 16 RX | Level shifter or divider | Orange UART TX |
+| GPIO 17 TX | Level shifter | Yellow UART RX |
 | GND | Common ground | Grey UART Ground |
 
 The Spartan UART side must not feed a 5 V signal directly into an ESP32 GPIO. Use a bidirectional level shifter or at least a safe divider on Spartan TX to ESP32 RX. UART runs at `9600 8N1`.
@@ -84,11 +85,29 @@ This means the adapter needs only the ESP32 USB connection for setup from a lapt
 
 | Adapter header | ESP32 Dev | Purpose |
 | --- | --- | --- |
-| Spartan UART TX in | GPIO 26 RX | Receives Spartan replies through level shift/divider |
-| Spartan UART RX out | GPIO 27 TX | Sends commands to Spartan through level shift |
+| Spartan UART TX in | GPIO 16 RX | Receives Spartan replies through level shift/divider |
+| Spartan UART RX out | GPIO 17 TX | Sends commands to Spartan through level shift |
 | UART GND | GND | Common ground |
 
-Do not use ESP32 `GPIO 1/3` for Spartan UART on this board; those are normally tied to the ESP32 USB serial/programming port. `Serial2` on `GPIO 26/27` keeps programming/debug USB and Spartan configuration separate.
+Do not use ESP32 `GPIO 1/3` for Spartan UART on this board; those are normally tied to the ESP32 USB serial/programming port. `Serial2` on `GPIO 16/17` keeps programming/debug USB and Spartan configuration separate.
+
+## Speed Reed Input
+
+The planned speed pickup uses one reed contact against ground on `GPIO 27`, with the ESP32 internal pull-up enabled. The current magnet ring target is:
+
+| Setting | Value |
+| --- | --- |
+| Reed input | `GPIO 27` to GND |
+| Pulses per wheel revolution | `10` |
+| Tire | `205/80 R14` |
+| Calculated circumference | `2147 mm` |
+| Start calibration | `4657 pulses/km` |
+
+The tire value is a geometric starting point. Final speed should be calibrated from GPS or a measured road distance because real rolling circumference changes with load, pressure and tire model.
+
+## BM6 Battery Monitor
+
+The motorraum ESP can also connect to the Leagend BM6 V2.0 battery monitor over BLE. The live-tested target address is `3C:AB:72:80:06:6A`; `/state` exposes `bm6_connected`, `bm6_voltage`, `bm6_temperature`, `bm6_rx_count`, `bm6_decode_fail` and `bm6_age_ms`.
 
 ## BLE gateway mode
 
@@ -122,8 +141,26 @@ At factory output settings, `0 V` represents Lambda `0.68` and `5 V` represents 
 ```powershell
 pio run -e motorraum
 pio run -e motorraum -t upload
+pio run -e spartan_uart_test -t upload
 pio run -e m5_motorraum
 ```
+
+## Spartan UART Test Wiring
+
+Use the `spartan_uart_test` environment when connecting the Spartan 3 v2 UART wires directly to the ESP32 DevKit.
+
+```text
+Spartan Orange TX -> 10k -> ESP32 GPIO16 RX2
+                         |
+                        18k
+                         |
+                        GND
+
+Spartan Yellow RX -> ESP32 GPIO17 TX2
+Spartan Grey GND  -> ESP32 GND
+```
+
+Orange is a 5V UART signal. Do not connect it directly to an ESP32 GPIO.
 
 ## Bring-up without CAN module
 
@@ -148,7 +185,7 @@ The `motorraum` build also starts its own WiFi access point, so no home-network 
 
 The page displays live Lambda, heat-up/normal status, sensor temperature and the current data source (`DEMO`, `CAN`, or `ADC`). Following the M5Dial setup pattern, DNS captive-portal redirection sends setup clients to the local page. Its primary compact JSON endpoint is `/state`; `/api/status` remains available as an alias.
 
-The same page contains the home-WiFi setup form. Enter SSID and password once; the values are stored in ESP32 preferences and the board joins that network while keeping `Spartan3-Setup` available for recovery. After a successful connection, the page shows the additional home-network IP address.
+The same page contains the WiFi setup form with presets for the road hotspot `Android-AP1` and `Z00-Station`, plus manual entry. Enter SSID and password once; the values are stored in ESP32 preferences and the board joins that network while keeping `Spartan3-Setup` available for recovery. If no stored WiFi exists, the `motorraum` build uses the built-in road hotspot default `Android-AP1` / `Frankfurt1`. After a successful connection, the page shows the additional network IP address.
 
 The Web GUI also contains Spartan UART configuration controls. These become active once Orange/Yellow/Grey are wired to ESP32 `GPIO 26/27/GND` through level shifting.
 

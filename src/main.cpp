@@ -20,6 +20,7 @@
 
 #if ENABLE_BLE_HUB
 #include <NimBLEDevice.h>
+#include <mbedtls/aes.h>
 #endif
 
 #ifdef USE_M5_DISPLAY
@@ -65,6 +66,14 @@
 #define WEB_AP_PASSWORD "lambda123"
 #endif
 
+#ifndef HOME_WIFI_SSID
+#define HOME_WIFI_SSID ""
+#endif
+
+#ifndef HOME_WIFI_PASSWORD
+#define HOME_WIFI_PASSWORD ""
+#endif
+
 #ifndef ENABLE_SPARTAN_CAN
 #define ENABLE_SPARTAN_CAN 1
 #endif
@@ -91,6 +100,14 @@
 
 #ifndef SPARTAN_ANALOG_PIN
 #define SPARTAN_ANALOG_PIN 34
+#endif
+
+#ifndef ENABLE_SPARTAN_HEATER_ANALOG
+#define ENABLE_SPARTAN_HEATER_ANALOG 0
+#endif
+
+#ifndef SPARTAN_HEATER_PIN
+#define SPARTAN_HEATER_PIN 35
 #endif
 
 // With a 10k high-side and 20k low-side divider, ADC voltage is input * 2/3.
@@ -143,6 +160,24 @@ constexpr uint32_t kTuneScanWindowMs = 10000;
 constexpr uint32_t kTuneReconnectDelayMs = 5000;
 constexpr uint32_t kTunePingIntervalMs = 1650;
 constexpr uint32_t kBleHubAdvertiseFallbackMs = 30000;
+
+#ifndef ENABLE_BM6
+#define ENABLE_BM6 1
+#endif
+
+constexpr char kBm6TargetAddress[] = "3c:ab:72:80:06:6a";
+constexpr char kBm6ServiceUuid[] = "0000fff0-0000-1000-8000-00805f9b34fb";
+constexpr char kBm6WriteUuid[] = "0000fff3-0000-1000-8000-00805f9b34fb";
+constexpr char kBm6NotifyUuid[] = "0000fff4-0000-1000-8000-00805f9b34fb";
+constexpr uint32_t kBm6ScanWindowMs = 10000;
+constexpr uint32_t kBm6ReconnectDelayMs = 8000;
+constexpr uint32_t kBm6TriggerIntervalMs = 2000;
+const uint8_t kBm6AesKey[16] = {
+    0x6C, 0x65, 0x61, 0x67, 0x65, 0x6E, 0x64, 0xFF,
+    0xFE, 0x30, 0x31, 0x30, 0x30, 0x30, 0x30, 0x39};
+const uint8_t kBm6TriggerPlain[16] = {
+    0xD1, 0x55, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
 #endif
 
 struct SpartanReading {
@@ -185,6 +220,9 @@ uint32_t tuneLastRxMs = 0;
 uint32_t tuneBadLengthCount = 0;
 uint32_t tuneUnknownOpcodeCount = 0;
 uint32_t lastTuneDebugMs = 0;
+float heaterStatusVolts = 0.0f;
+uint32_t heaterAdcMilliVolts = 0;
+uint8_t heaterStatusCode = 0;
 uint32_t lastDisplayMs = 0;
 uint32_t lastBleNotifyMs = 0;
 String uartLine;
@@ -206,6 +244,20 @@ uint32_t tuneLastPingMs = 0;
 uint32_t tuneScanSeen = 0;
 uint32_t tuneScanCandidates = 0;
 String tuneSavedAddress = "";
+#if ENABLE_BM6
+NimBLEClient *bm6Client = nullptr;
+NimBLERemoteCharacteristic *bm6WriteChar = nullptr;
+NimBLEAddress bm6TargetAddress;
+bool bm6DoConnect = false;
+bool bm6Connected = false;
+uint32_t bm6NextScanMs = 0;
+uint32_t bm6LastTriggerMs = 0;
+uint32_t bm6LastRxMs = 0;
+uint32_t bm6RxCount = 0;
+uint32_t bm6DecodeFailCount = 0;
+float bm6Voltage = 0.0f;
+int8_t bm6Temperature = 0;
+#endif
 #endif
 #if ENABLE_WEB_GUI
 WebServer server(80);
@@ -441,6 +493,14 @@ String statusJson()
   json += String(canStatusErrors);
   json += ",\"heap_free\":";
   json += String(heap_caps_get_free_size(MALLOC_CAP_8BIT));
+#if ENABLE_SPARTAN_HEATER_ANALOG
+  json += ",\"heater_adc_mv\":";
+  json += String(heaterAdcMilliVolts);
+  json += ",\"heater_volts\":";
+  json += String(heaterStatusVolts, 2);
+  json += ",\"heater_status_code\":";
+  json += String(heaterStatusCode);
+#endif
 #if ENABLE_BLE_HUB
   json += ",\"ble_clients\":";
   json += String(clients);
@@ -497,6 +557,20 @@ String statusJson()
   json += String(static_cast<int>(tune.temperature));
   json += ",\"volt\":";
   json += String(tune.voltage, 1);
+#if ENABLE_BM6
+  json += ",\"bm6_connected\":";
+  json += bm6Connected ? "true" : "false";
+  json += ",\"bm6_voltage\":";
+  json += String(bm6Voltage, 2);
+  json += ",\"bm6_temperature\":";
+  json += String(static_cast<int>(bm6Temperature));
+  json += ",\"bm6_rx_count\":";
+  json += String(static_cast<unsigned long>(bm6RxCount));
+  json += ",\"bm6_decode_fail\":";
+  json += String(static_cast<unsigned long>(bm6DecodeFailCount));
+  json += ",\"bm6_age_ms\":";
+  json += String(bm6LastRxMs == 0 ? 0UL : static_cast<unsigned long>(now - bm6LastRxMs));
+#endif
 #endif
   json += "}";
   return json;
@@ -556,12 +630,21 @@ String bleStatusPayload()
 {
   const SpartanReading snapshot = readingSnapshot();
   const TuneSnapshot tune = tuneSnapshot();
-  char payload[24];
+  char payload[40];
+#if ENABLE_BM6
+  snprintf(payload, sizeof(payload), "L%.2fR%dA%dM%dV%.2f",
+           snapshot.valid ? snapshot.lambda : 0.0f,
+           static_cast<int>(tune.rpm),
+           static_cast<int>(tune.advance),
+           static_cast<int>(tune.map),
+           bm6Voltage);
+#else
   snprintf(payload, sizeof(payload), "L%.2fR%dA%dM%d",
            snapshot.valid ? snapshot.lambda : 0.0f,
            static_cast<int>(tune.rpm),
            static_cast<int>(tune.advance),
            static_cast<int>(tune.map));
+#endif
   return String(payload);
 }
 
@@ -840,6 +923,227 @@ void runTuneReadDump()
   sendTuneCommand("13@");
 }
 
+#if ENABLE_BM6
+bool bm6AesEncrypt(const uint8_t in[16], uint8_t out[16])
+{
+  mbedtls_aes_context ctx;
+  mbedtls_aes_init(&ctx);
+  if (mbedtls_aes_setkey_enc(&ctx, kBm6AesKey, 128) != 0) {
+    mbedtls_aes_free(&ctx);
+    return false;
+  }
+  uint8_t iv[16] = {0};
+  const int rc = mbedtls_aes_crypt_cbc(&ctx, MBEDTLS_AES_ENCRYPT, 16, iv, in, out);
+  mbedtls_aes_free(&ctx);
+  return rc == 0;
+}
+
+bool bm6AesDecrypt(const uint8_t in[16], uint8_t out[16])
+{
+  mbedtls_aes_context ctx;
+  mbedtls_aes_init(&ctx);
+  if (mbedtls_aes_setkey_dec(&ctx, kBm6AesKey, 128) != 0) {
+    mbedtls_aes_free(&ctx);
+    return false;
+  }
+  uint8_t iv[16] = {0};
+  const int rc = mbedtls_aes_crypt_cbc(&ctx, MBEDTLS_AES_DECRYPT, 16, iv, in, out);
+  mbedtls_aes_free(&ctx);
+  return rc == 0;
+}
+
+void scheduleBm6Scan()
+{
+  bm6NextScanMs = millis() + kBm6ReconnectDelayMs;
+}
+
+void resetBm6Client()
+{
+  if (bm6Client == nullptr) return;
+  if (bm6Client->isConnected()) {
+    bm6Client->disconnect();
+  }
+  NimBLEDevice::deleteClient(bm6Client);
+  bm6Client = nullptr;
+  bm6WriteChar = nullptr;
+  bm6Connected = false;
+  bm6LastTriggerMs = 0;
+}
+
+class Bm6ClientCallbacks : public NimBLEClientCallbacks {
+ public:
+  void onDisconnect(NimBLEClient *, int reason) override
+  {
+    bm6Connected = false;
+    bm6WriteChar = nullptr;
+    Serial.printf("BM6 BLE:     disconnected reason=%d\n", reason);
+    scheduleBm6Scan();
+  }
+};
+
+Bm6ClientCallbacks bm6ClientCallbacks;
+
+void decodeBm6Notify(const uint8_t *data, size_t length)
+{
+  if (length != 16) {
+    bm6DecodeFailCount++;
+    Serial.printf("BM6 BLE:     notify wrong len=%u\n", static_cast<unsigned>(length));
+    return;
+  }
+
+  uint8_t plain[16] = {0};
+  if (!bm6AesDecrypt(data, plain)) {
+    bm6DecodeFailCount++;
+    Serial.println("BM6 BLE:     AES decrypt fail");
+    return;
+  }
+
+  if (plain[0] == 0xD1 && plain[1] == 0x55 && plain[2] == 0x07) {
+    const bool tempNeg = plain[3] != 0;
+    const int8_t tempVal = static_cast<int8_t>(plain[4]);
+    const uint16_t voltRaw = (static_cast<uint16_t>(plain[7]) << 8) | plain[8];
+    bm6Voltage = static_cast<float>(voltRaw) / 100.0f;
+    bm6Temperature = tempNeg ? -tempVal : tempVal;
+    bm6LastRxMs = millis();
+    bm6RxCount++;
+    Serial.printf("BM6 BLE:     V=%.2fV T=%d C rx=%lu\n",
+                  bm6Voltage,
+                  static_cast<int>(bm6Temperature),
+                  static_cast<unsigned long>(bm6RxCount));
+  } else {
+    bm6DecodeFailCount++;
+    Serial.printf("BM6 BLE:     unknown frame %02X %02X %02X\n", plain[0], plain[1], plain[2]);
+  }
+}
+
+void onBm6Notify(NimBLERemoteCharacteristic *, uint8_t *data, size_t length, bool)
+{
+  decodeBm6Notify(data, length);
+}
+
+bool bm6SendTrigger()
+{
+  if (!bm6Connected || bm6WriteChar == nullptr) return false;
+  uint8_t cipher[16] = {0};
+  if (!bm6AesEncrypt(kBm6TriggerPlain, cipher)) {
+    Serial.println("BM6 BLE:     trigger encrypt fail");
+    return false;
+  }
+  const bool ok = bm6WriteChar->writeValue(cipher, 16, true);
+  bm6LastTriggerMs = millis();
+  Serial.printf("BM6 BLE:     trigger -> %s\n", ok ? "OK" : "FAIL");
+  return ok;
+}
+
+class Bm6ScanCallbacks : public NimBLEScanCallbacks {
+ public:
+  void onResult(const NimBLEAdvertisedDevice *device) override
+  {
+    String addr = device->getAddress().toString().c_str();
+    addr.toLowerCase();
+    if (addr != kBm6TargetAddress) return;
+    bm6TargetAddress = device->getAddress();
+    bm6DoConnect = true;
+    bm6NextScanMs = 0;
+    NimBLEDevice::getScan()->stop();
+    Serial.printf("BM6 BLE:     found %s\n", addr.c_str());
+  }
+
+  void onScanEnd(const NimBLEScanResults &, int reason) override
+  {
+    if (!bm6Connected && !bm6DoConnect) {
+      Serial.printf("BM6 BLE:     scan end reason=%d\n", reason);
+      scheduleBm6Scan();
+    }
+  }
+};
+
+Bm6ScanCallbacks bm6ScanCallbacks;
+
+void startBm6Scan()
+{
+  if (bm6Connected || bm6DoConnect) return;
+  NimBLEScan *scan = NimBLEDevice::getScan();
+  scan->setScanCallbacks(&bm6ScanCallbacks, false);
+  scan->setActiveScan(true);
+  scan->setInterval(100);
+  scan->setWindow(99);
+  Serial.println("BM6 BLE:     scan 10s...");
+  if (!scan->start(kBm6ScanWindowMs, false)) {
+    Serial.println("BM6 BLE:     scan start failed");
+    scheduleBm6Scan();
+  }
+}
+
+void connectBm6()
+{
+  bm6DoConnect = false;
+  if (bm6Connected) return;
+  if (bm6Client != nullptr && !bm6Client->isConnected()) {
+    resetBm6Client();
+  }
+  if (bm6Client == nullptr) {
+    bm6Client = NimBLEDevice::createClient();
+    bm6Client->setClientCallbacks(&bm6ClientCallbacks, false);
+  }
+
+  bm6Client->setConnectionParams(6, 12, 0, 150);
+  Serial.println("BM6 BLE:     connecting...");
+  if (!bm6Client->connect(bm6TargetAddress, true, false, false)) {
+    Serial.println("BM6 BLE:     connect failed");
+    resetBm6Client();
+    scheduleBm6Scan();
+    return;
+  }
+  delay(500);
+
+  NimBLERemoteService *svc = bm6Client->getService(kBm6ServiceUuid);
+  if (svc == nullptr) {
+    Serial.println("BM6 BLE:     FFF0 service missing");
+    bm6Client->disconnect();
+    scheduleBm6Scan();
+    return;
+  }
+  bm6WriteChar = svc->getCharacteristic(kBm6WriteUuid);
+  NimBLERemoteCharacteristic *notifyChar = svc->getCharacteristic(kBm6NotifyUuid);
+  if (bm6WriteChar == nullptr || notifyChar == nullptr || !notifyChar->canNotify()) {
+    Serial.println("BM6 BLE:     FFF3/FFF4 missing");
+    bm6Client->disconnect();
+    scheduleBm6Scan();
+    return;
+  }
+
+  const bool subOk = notifyChar->subscribe(true, onBm6Notify, true);
+  Serial.printf("BM6 BLE:     subscribe %s\n", subOk ? "OK" : "FAIL");
+  if (!subOk) {
+    bm6Client->disconnect();
+    scheduleBm6Scan();
+    return;
+  }
+  bm6Connected = true;
+  bm6SendTrigger();
+}
+
+void updateBm6Ble()
+{
+  if (bm6DoConnect) {
+    connectBm6();
+    return;
+  }
+  if (bm6Connected) {
+    const uint32_t now = millis();
+    if (now - bm6LastRxMs > 5000 && now - bm6LastTriggerMs > kBm6TriggerIntervalMs) {
+      bm6SendTrigger();
+    }
+    return;
+  }
+  if (bm6NextScanMs != 0 && static_cast<int32_t>(millis() - bm6NextScanMs) >= 0) {
+    bm6NextScanMs = 0;
+    startBm6Scan();
+  }
+}
+#endif
+
 void updateTuneBle()
 {
   if (tuneDoConnect) {
@@ -918,11 +1222,18 @@ void setupBleHub()
   Serial.printf("123TUNE BLE: target %s\n", tuneSavedAddress.c_str());
   Serial.println("BLE hub:     advertising waits for 123TUNE or 30s fallback");
   startTuneScan();
+#if ENABLE_BM6
+  Serial.printf("BM6 BLE:     target %s\n", kBm6TargetAddress);
+  scheduleBm6Scan();
+#endif
 }
 
 void updateBleHub()
 {
   updateTuneBle();
+#if ENABLE_BM6
+  updateBm6Ble();
+#endif
   updateTuneDebug();
   const uint32_t now = millis();
   if (!bleAdvertisingStarted &&
@@ -951,7 +1262,14 @@ void setupWebGui()
   ensurePreferences();
   const String savedSsid = networkPreferences.isKey("ssid") ? networkPreferences.getString("ssid", "") : "";
   const String savedPassword = networkPreferences.isKey("pass") ? networkPreferences.getString("pass", "") : "";
-  haveSavedWifi = savedSsid.length() > 0;
+  String stationSsid = savedSsid;
+  String stationPassword = savedPassword;
+  const bool usingBuiltInWifi = stationSsid.length() == 0 && strlen(HOME_WIFI_SSID) > 0;
+  if (usingBuiltInWifi) {
+    stationSsid = HOME_WIFI_SSID;
+    stationPassword = HOME_WIFI_PASSWORD;
+  }
+  haveSavedWifi = stationSsid.length() > 0;
 
   WiFi.mode(WIFI_AP_STA);
 #if ENABLE_BLE_HUB
@@ -969,9 +1287,11 @@ void setupWebGui()
   }
 
   if (haveSavedWifi) {
-    WiFi.begin(savedSsid.c_str(), savedPassword.c_str());
+    WiFi.begin(stationSsid.c_str(), stationPassword.c_str());
     homeWifiConnectStartedMs = millis();
-    Serial.printf("Home WiFi:   connecting to '%s'\n", savedSsid.c_str());
+    Serial.printf("Home WiFi:   connecting to '%s'%s\n",
+                  stationSsid.c_str(),
+                  usingBuiltInWifi ? " (built-in)" : "");
   } else {
     Serial.println("Home WiFi:   not configured");
   }
@@ -1061,15 +1381,32 @@ pre { white-space: pre-wrap; max-height: 220px; overflow: auto; padding: 12px; b
 <div class="row"><span>Command Write</span><strong class="mono">7f510003-5a6b-4d2a-9f20-14a7f3e20000</strong></div>
 </div>
 <div class="setup">
-<strong>Heim-WLAN</strong>
+<strong>BM6 Batteriemonitor</strong>
+<p class="hint">Leagend BM6 V2.0. Liefert Bordnetz-Spannung und Umgebungstemperatur per BLE.</p>
+<div class="row"><span>Verbindung</span><strong id="bm6conn">-</strong></div>
+<div class="row"><span>Spannung</span><strong id="bm6volt">- V</strong></div>
+<div class="row"><span>Temperatur</span><strong id="bm6temp">- C</strong></div>
+<div class="row"><span>RX Frames</span><strong id="bm6rx">0</strong></div>
+<div class="row"><span>RX Alter</span><strong id="bm6age">0 ms</strong></div>
+<div class="row"><span>Decode Fehler</span><strong id="bm6err">0</strong></div>
+<div class="row"><span>BM6 Adresse</span><strong class="mono">3c:ab:72:80:06:6a</strong></div>
+</div>
+<div class="setup">
+<strong>WLAN / Hotspot</strong>
 <div class="row"><span>Verbindung</span><strong id="wifi">nicht eingerichtet</strong></div>
-<div class="row"><span>IP im Heimnetz</span><strong id="lanip">-</strong></div>
+<div class="row"><span>ESP32 IP</span><strong id="lanip">-</strong></div>
 <form action="/wifi" method="post">
+<label for="wifiPreset">Profil</label><select id="wifiPreset">
+<option value="">Manuell</option>
+<option value="Android-AP1" data-pass="Frankfurt1">S24 Hotspot Android-AP1</option>
+<option value="Z00-Station" data-pass="">Z00-Station</option>
+</select>
 <label for="ssid">WLAN-Name</label><input id="ssid" name="ssid" required>
-<label for="pass">Passwort</label><input id="pass" name="pass" type="password">
+<label for="pass">Passwort</label><input id="pass" name="pass" type="password" placeholder="leer lassen = vorhandenes Passwort behalten">
 <button type="submit">Speichern &amp; verbinden</button>
 </form>
-<form action="/wifi_clear" method="post" style="margin-top:12px"><button class="secondary" type="submit">Heim-WLAN loeschen</button></form>
+<p class="hint">Im Auto am einfachsten Handy-Hotspot starten und Laptop, M5 und ESP32 in dasselbe Netz lassen. Die ESP32-IP steht oben und im USB-Log.</p>
+<form action="/wifi_clear" method="post" style="margin-top:12px"><button class="secondary" type="submit">Gespeichertes WLAN loeschen</button></form>
 </div>
 <div class="setup">
 <strong>Spartan UART-Konfiguration</strong>
@@ -1109,6 +1446,12 @@ pre { white-space: pre-wrap; max-height: 220px; overflow: auto; padding: 12px; b
 <script>
 const hist = {lambda:[], rpm:[], temp:[]};
 let lastJson = {};
+document.getElementById('wifiPreset').addEventListener('change', (e) => {
+  const option = e.target.selectedOptions[0];
+  const ssid = option.value || '';
+  document.getElementById('ssid').value = ssid;
+  document.getElementById('pass').value = option.dataset.pass || '';
+});
 function cls(el, state) { el.className = state; }
 function pushHist(name, value) {
   const a = hist[name];
@@ -1168,6 +1511,13 @@ async function refresh() {
     document.getElementById('canerr').textContent = d.can_status_errors ?? 0;
     document.getElementById('heap').textContent = d.heap_free ? Math.round(d.heap_free / 1024) + ' KB' : '-';
     document.getElementById('apdiag').textContent = (d.ap_ip || '-') + ' / ' + (d.ap_retry_count ?? 0);
+    document.getElementById('bm6conn').textContent = d.bm6_connected ? 'verbunden' : 'scan/retry';
+    cls(document.getElementById('bm6conn'), d.bm6_connected ? 'ok' : 'warn');
+    document.getElementById('bm6volt').textContent = Number(d.bm6_voltage ?? 0).toFixed(2) + ' V';
+    document.getElementById('bm6temp').textContent = (d.bm6_temperature ?? 0) + ' C';
+    document.getElementById('bm6rx').textContent = d.bm6_rx_count ?? 0;
+    document.getElementById('bm6age').textContent = (d.bm6_age_ms ?? 0) + ' ms';
+    document.getElementById('bm6err').textContent = d.bm6_decode_fail ?? 0;
     document.getElementById('jsondump').textContent = JSON.stringify(d, null, 2);
     pushHist('lambda', d.lambda);
     pushHist('rpm', d.rpm);
@@ -1194,10 +1544,18 @@ setInterval(() => { if (!document.hidden) refresh(); }, 350);
   server.on("/connecttest.txt", []() { server.send(200, "text/plain", "Microsoft Connect Test"); });
   server.on("/wifi", HTTP_POST, []() {
     String ssid = server.arg("ssid");
-    const String password = server.arg("pass");
+    String password = server.arg("pass");
     ssid.trim();
     if (ssid.length() == 0) {
       server.send(400, "text/plain", "WLAN-Name fehlt.");
+      return;
+    }
+    if (password.length() == 0 && networkPreferences.isKey("ssid") &&
+        ssid == networkPreferences.getString("ssid", "")) {
+      password = networkPreferences.getString("pass", "");
+    }
+    if (password.length() == 0) {
+      server.send(400, "text/plain", "WLAN-Passwort fehlt. Nur beim gleichen gespeicherten WLAN darf es leer bleiben.");
       return;
     }
 
@@ -1426,6 +1784,24 @@ void updateAnalog()
 #endif
 }
 
+void updateHeaterAnalog()
+{
+#if ENABLE_SPARTAN_HEATER_ANALOG
+  heaterAdcMilliVolts = analogReadMilliVolts(SPARTAN_HEATER_PIN);
+  heaterStatusVolts = (heaterAdcMilliVolts / 1000.0f) * ANALOG_DIVIDER_NUM / ANALOG_DIVIDER_DEN;
+
+  if (heaterStatusVolts < 0.5f) {
+    heaterStatusCode = 0;
+  } else if (heaterStatusVolts < 1.5f) {
+    heaterStatusCode = 1;
+  } else if (heaterStatusVolts < 2.5f) {
+    heaterStatusCode = 2;
+  } else {
+    heaterStatusCode = 3;
+  }
+#endif
+}
+
 void setupUart()
 {
 #if ENABLE_SPARTAN_UART
@@ -1457,6 +1833,7 @@ void updateUart()
     if (c == '\r' || c == '\n') {
       if (uartLine.startsWith(">") && uartLine.length() > 1) {
         sendSpartanUartCommand(uartLine.substring(1));
+#if ENABLE_BLE_HUB
       } else if (uartLine == "!read") {
         runTuneReadDump();
       } else if (uartLine.startsWith("!") && uartLine.length() > 1) {
@@ -1465,6 +1842,7 @@ void updateUart()
         if (command.length() > 0 && command.length() < 16) {
           sendTuneCommand(command.c_str());
         }
+#endif
       }
       uartLine = "";
     } else {
@@ -1485,8 +1863,13 @@ void updateDisplay()
   const SpartanReading snapshot = readingSnapshot();
   const bool stale = !snapshot.valid || (snapshot.fromCan && now - snapshot.receivedMs > kCanStaleMs);
   if (stale) {
+#if ENABLE_SPARTAN_UART && !ENABLE_SPARTAN_CAN
+    displayLine(0, lastUartCommand.length() ? "UART " + lastUartCommand : "UART bereit");
+    displayLine(1, lastUartResponse.length() ? lastUartResponse : ">GETFW testen");
+#else
     displayLine(0, "SPARTAN CAN");
     displayLine(1, canReady ? "warte Daten..." : "CAN FEHLER");
+#endif
     return;
   }
 
@@ -1549,6 +1932,11 @@ void printBootDetails()
 #else
   Serial.println("Analog:      fallback disabled at build time");
 #endif
+#if ENABLE_SPARTAN_HEATER_ANALOG
+  Serial.printf("Heater ADC:  pin=%u enabled, divider=%u/%u\n", SPARTAN_HEATER_PIN, ANALOG_DIVIDER_NUM, ANALOG_DIVIDER_DEN);
+#else
+  Serial.println("Heater ADC:  disabled");
+#endif
 #if ENABLE_SPARTAN_DEMO
   Serial.println("Demo:        enabled until real CAN data is received");
 #else
@@ -1585,6 +1973,9 @@ void setup()
 #if ENABLE_SPARTAN_ANALOG
   analogSetPinAttenuation(SPARTAN_ANALOG_PIN, ADC_11db);
 #endif
+#if ENABLE_SPARTAN_HEATER_ANALOG
+  analogSetPinAttenuation(SPARTAN_HEATER_PIN, ADC_11db);
+#endif
 }
 
 void loop()
@@ -1595,6 +1986,7 @@ void loop()
   updateCan();
   updateDemo();
   updateAnalog();
+  updateHeaterAnalog();
   updateUart();
   updateWebGui();
   updateBleHub();
