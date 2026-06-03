@@ -1636,7 +1636,12 @@ details.setup > .inside { padding: 0 16px 16px; }
 <div class="row"><span>Geraet / Motor / Sonde</span><strong id="hours">0 / 0 / 0 h</strong></div>
 <div class="row"><span>AP IP / Retry</span><strong id="apdiag">-</strong></div>
 <button class="secondary" type="button" onclick="copyJson()">JSON kopieren</button>
+<details class="setup">
+<summary>JSON Rohdaten</summary>
+<div class="inside">
 <pre id="jsondump">{}</pre>
+</div>
+</details>
 </div>
 </details>
 <details class="setup">
