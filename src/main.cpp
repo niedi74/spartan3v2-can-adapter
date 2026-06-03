@@ -1506,60 +1506,87 @@ void setupWebGui()
 <title>Spartan 3 v2 Setup</title>
 <style>
 :root { color-scheme: dark; font-family: Arial, sans-serif; }
-body { margin: 0; background: #0b1210; color: #e6ede8; }
-main { max-width: 760px; margin: auto; padding: 28px 18px; }
-h1 { font-size: 1.35rem; color: #9ed85b; margin: 0 0 22px; }
-.card { padding: 20px; border: 1px solid #26372e; border-radius: 16px; background: #101a15; }
-.lambda { font-size: 3.4rem; font-weight: 700; color: #9ed85b; margin: 4px 0 18px; }
+body { margin: 0; background: #0b1210; color: #e6ede8; font-size: 16px; }
+main { max-width: 760px; margin: auto; padding: 18px 14px 30px; }
+h1 { font-size: 1.22rem; color: #9ed85b; margin: 4px 0 14px; }
+.card { padding: 16px; border: 1px solid #26372e; border-radius: 10px; background: #101a15; }
+.topline { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 12px; }
+.lambda { font-size: 3.2rem; font-weight: 700; color: #9ed85b; margin: 2px 0 10px; line-height: 1; }
 .tag { display: inline-block; padding: 5px 10px; border-radius: 20px; background: #26372e; color: #bde87a; }
-.row { display: flex; justify-content: space-between; border-top: 1px solid #26372e; padding: 13px 0; }
+.row { display: flex; justify-content: space-between; gap: 14px; border-top: 1px solid #26372e; padding: 12px 0; }
 .row strong { text-align: right; }
-.setup { margin-top: 18px; padding: 20px; border: 1px solid #26372e; border-radius: 16px; background: #101a15; }
-input { display: block; box-sizing: border-box; width: 100%; margin: 8px 0 13px; padding: 12px; border: 1px solid #35453c; border-radius: 8px; background: #0b1210; color: #e6ede8; }
-select { display: block; box-sizing: border-box; width: 100%; margin: 8px 0 13px; padding: 12px; border: 1px solid #35453c; border-radius: 8px; background: #0b1210; color: #e6ede8; }
-button { padding: 11px 14px; margin-right: 7px; border: 0; border-radius: 8px; background: #78ad43; color: #081005; font-weight: 700; }
+.setup { margin-top: 14px; padding: 16px; border: 1px solid #26372e; border-radius: 10px; background: #101a15; }
+input, select { display: block; box-sizing: border-box; width: 100%; min-height: 44px; margin: 8px 0 13px; padding: 12px; border: 1px solid #35453c; border-radius: 8px; background: #0b1210; color: #e6ede8; font-size: 1rem; }
+button { min-height: 44px; padding: 11px 14px; margin-right: 7px; border: 0; border-radius: 8px; background: #78ad43; color: #081005; font-weight: 700; font-size: .98rem; }
 button.secondary { background: #26372e; color: #e6ede8; }
 button.danger { background: #8b3c2e; color: #ffe8dc; }
 .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .grid button { width: 100%; margin: 0; }
-.hint { color: #9ca99f; font-size: .92rem; margin-top: 18px; line-height: 1.45; }
+.hint { color: #9ca99f; font-size: .92rem; margin-top: 12px; line-height: 1.45; }
 .mono { font-family: Consolas, monospace; color: #cbeaa7; overflow-wrap: anywhere; }
 .ok { color: #9ed85b; }
 .warn { color: #ffd166; }
 .bad { color: #ff6b6b; }
-.cards { display: grid; grid-template-columns: repeat(auto-fit,minmax(220px,1fr)); gap: 14px; margin-top: 18px; }
-.mini { padding: 14px; border: 1px solid #26372e; border-radius: 14px; background: #0d1712; }
+.metrics { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 10px; margin: 12px 0 4px; }
+.metric { min-height: 64px; padding: 12px; border: 1px solid #26372e; border-radius: 8px; background: #0d1712; }
+.metric span { display: block; color: #9ca99f; font-size: .78rem; }
+.metric strong { display: block; margin-top: 5px; font-size: 1.35rem; color: #e6ede8; overflow-wrap: anywhere; }
+.metric.wide { grid-column: 1 / -1; }
+.cards { display: grid; grid-template-columns: repeat(auto-fit,minmax(220px,1fr)); gap: 10px; margin-top: 14px; }
+.mini { padding: 12px; border: 1px solid #26372e; border-radius: 8px; background: #0d1712; }
 .mini h3 { margin: 0 0 8px; font-size: 1rem; color: #bde87a; }
 canvas { width: 100%; height: 78px; background: #08100c; border-radius: 10px; }
 pre { white-space: pre-wrap; max-height: 220px; overflow: auto; padding: 12px; background: #08100c; border-radius: 10px; }
-.tabs { display: flex; gap: 8px; margin: 4px 0 18px; position: sticky; top: 0; padding-top: 6px; padding-bottom: 6px; background: #0b1210; z-index: 10; }
+.tabs { display: flex; gap: 8px; margin: 4px 0 14px; position: sticky; top: 0; padding-top: 6px; padding-bottom: 6px; background: #0b1210; z-index: 10; }
 .tab { flex: 1; padding: 14px 18px; border-radius: 10px; background: #1a2922; color: #cbeaa7; font-weight: 700; cursor: pointer; }
 .tab.on { background: #9ed85b; color: #081005; }
 .tab-section[hidden] { display: none !important; }
+details.setup { padding: 0; overflow: hidden; }
+details.setup > summary { list-style: none; cursor: pointer; padding: 16px; font-weight: 700; color: #e6ede8; }
+details.setup > summary::-webkit-details-marker { display: none; }
+details.setup > summary::after { content: "+"; float: right; color: #9ed85b; }
+details.setup[open] > summary::after { content: "-"; }
+details.setup > .inside { padding: 0 16px 16px; }
+@media (max-width: 520px) {
+  main { padding: 14px 10px 26px; }
+  .lambda { font-size: 2.85rem; }
+  .row { align-items: flex-start; }
+  .metrics { grid-template-columns: 1fr 1fr; gap: 8px; }
+  .metric strong { font-size: 1.12rem; }
+  .grid { grid-template-columns: 1fr; }
+  button { width: 100%; margin: 0 0 8px; }
+}
 </style>
 </head>
 <body><main>
-<h1>SPARTAN 3 v2 / ESP32 Adapter</h1>
+<h1>SPARTAN 3 v2 Motorraum Hub</h1>
 <div class="tabs">
 <button type="button" id="tabLive" class="tab on" onclick="showTab('live')">Live</button>
 <button type="button" id="tabSetup" class="tab" onclick="showTab('setup')">Setup</button>
 </div>
 <div class="tab-section" data-tab="live">
 <div class="card">
-<span id="source" class="tag">START</span>
+<div class="topline"><span id="source" class="tag">START</span><span id="wifiTop" class="mono">offline</span></div>
 <div class="lambda" id="lambda">-.---</div>
-<div class="row"><span>Status</span><strong id="status">warte</strong></div>
-<div class="row"><span>Sensortemperatur</span><strong id="temp">- C</strong></div>
-<div class="row"><span>123 RPM / ADV / MAP</span><strong id="main123">0 / 0.0 / 0</strong></div>
-<div class="row"><span>CAN</span><strong id="can">-</strong></div>
+<div class="metrics">
+<div class="metric"><span>Status</span><strong id="status">warte</strong></div>
+<div class="metric"><span>CAN</span><strong id="can">-</strong></div>
+<div class="metric"><span>Temp</span><strong id="temp">- C</strong></div>
+<div class="metric"><span>Speed</span><strong id="liveSpeed">0.0 km/h</strong></div>
+<div class="metric wide"><span>123 RPM / ADV / MAP</span><strong id="main123">0 / 0.0 / 0</strong></div>
+<div class="metric"><span>BM6</span><strong id="liveBm6">- V</strong></div>
+<div class="metric"><span>Sonde h</span><strong id="liveHours">0.00</strong></div>
+</div>
+<p class="hint">Messstelle hinten im Auspuff: Lambda kann bei Falschluft magerer wirken als der Motor wirklich laeuft.</p>
 </div>
 <div class="cards">
 <div class="mini"><h3>Lambda 60s</h3><canvas id="chartLambda" width="320" height="78"></canvas></div>
 <div class="mini"><h3>RPM 60s</h3><canvas id="chartRpm" width="320" height="78"></canvas></div>
 <div class="mini"><h3>Temp 60s</h3><canvas id="chartTemp" width="320" height="78"></canvas></div>
 </div>
-<div class="setup">
-<strong>123Tune BLE Diagnose</strong>
+<details class="setup">
+<summary>123Tune BLE Diagnose</summary>
+<div class="inside">
 <div class="row"><span>Verbindung</span><strong id="tconn">-</strong></div>
 <div class="row"><span>RX Frames</span><strong id="trx">0</strong></div>
 <div class="row"><span>RX Alter</span><strong id="tage">0 ms</strong></div>
@@ -1568,8 +1595,10 @@ pre { white-space: pre-wrap; max-height: 220px; overflow: auto; padding: 12px; b
 <div class="row"><span>RPM / ADV / MAP</span><strong id="tvals">0 / 0.0 / 0</strong></div>
 <div class="row"><span>123 Adresse</span><strong id="taddr" class="mono">-</strong></div>
 </div>
-<div class="setup">
-<strong>BM6 Batteriemonitor</strong>
+</details>
+<details class="setup" open>
+<summary>BM6 Batteriemonitor</summary>
+<div class="inside">
 <p class="hint">Leagend BM6 V2.0. Liefert Bordnetz-Spannung und Umgebungstemperatur per BLE.</p>
 <div class="row"><span>Verbindung</span><strong id="bm6conn">-</strong></div>
 <div class="row"><span>Spannung</span><strong id="bm6volt">- V</strong></div>
@@ -1579,8 +1608,10 @@ pre { white-space: pre-wrap; max-height: 220px; overflow: auto; padding: 12px; b
 <div class="row"><span>Decode Fehler</span><strong id="bm6err">0</strong></div>
 <div class="row"><span>BM6 Adresse</span><strong class="mono">3c:ab:72:80:06:6a</strong></div>
 </div>
-<div class="setup">
-<strong>Geschwindigkeit (Reed-Sensor)</strong>
+</details>
+<details class="setup" open>
+<summary>Geschwindigkeit (Reed-Sensor)</summary>
+<div class="inside">
 <p class="hint">Reed-Kontakt gegen GND auf GPIO 27. Default: 10 Pulse pro Radumdrehung, Reifen 205/80 R14 = 2147 mm. Trim per GPS abgleichen: Trim = GPS / Reed.</p>
 <div class="row"><span>Frequenz</span><strong id="spdhz">- Hz</strong></div>
 <div class="row"><span>Geschwindigkeit</span><strong id="spdkmh">- km/h</strong></div>
@@ -1593,10 +1624,12 @@ pre { white-space: pre-wrap; max-height: 220px; overflow: auto; padding: 12px; b
 <button type="submit">Speichern</button>
 </form>
 </div>
+</details>
 </div><!-- /tab live -->
 <div class="tab-section" data-tab="setup" hidden>
-<div class="setup">
-<strong>System Diagnose</strong>
+<details class="setup" open>
+<summary>System Diagnose</summary>
+<div class="inside">
 <div class="row"><span>CAN State / TX / RX</span><strong id="candiag">-</strong></div>
 <div class="row"><span>CAN Statusfehler</span><strong id="canerr">0</strong></div>
 <div class="row"><span>Heap frei</span><strong id="heap">-</strong></div>
@@ -1605,8 +1638,10 @@ pre { white-space: pre-wrap; max-height: 220px; overflow: auto; padding: 12px; b
 <button class="secondary" type="button" onclick="copyJson()">JSON kopieren</button>
 <pre id="jsondump">{}</pre>
 </div>
-<div class="setup">
-<strong>BLE Hub / Gateway</strong>
+</details>
+<details class="setup">
+<summary>BLE Hub / Gateway</summary>
+<div class="inside">
 <p class="hint">Fuer M5/Waveshare Gateway-Modus. Der M5 scannt nach Name + Service UUID; die Adresse ist nur Debug/Fast-Reconnect.</p>
 <p class="hint">Road-AP: Handy mit <span class="mono">Spartan3-Setup</span> verbinden. Spartan ist <a class="mono" href="http://192.168.4.1/">192.168.4.1</a>, M5 Dial ist <a class="mono" href="http://192.168.4.2/">192.168.4.2</a>.</p>
 <div class="row"><span>Status</span><strong id="bleenabled">-</strong></div>
@@ -1617,8 +1652,10 @@ pre { white-space: pre-wrap; max-height: 220px; overflow: auto; padding: 12px; b
 <div class="row"><span>Status Notify</span><strong class="mono">7f510002-5a6b-4d2a-9f20-14a7f3e20000</strong></div>
 <div class="row"><span>Command Write</span><strong class="mono">7f510003-5a6b-4d2a-9f20-14a7f3e20000</strong></div>
 </div>
-<div class="setup">
-<strong>WLAN / Hotspot</strong>
+</details>
+<details class="setup" open>
+<summary>WLAN / Hotspot</summary>
+<div class="inside">
 <div class="row"><span>Verbindung</span><strong id="wifi">nicht eingerichtet</strong></div>
 <div class="row"><span>ESP32 IP</span><strong id="lanip">-</strong></div>
 <div class="row"><span>Gespeichert</span><strong id="wifisaved">-</strong></div>
@@ -1635,8 +1672,10 @@ pre { white-space: pre-wrap; max-height: 220px; overflow: auto; padding: 12px; b
 <p class="hint">Im Auto am einfachsten Handy-Hotspot starten und Laptop, M5 und ESP32 in dasselbe Netz lassen. Die ESP32-IP steht oben und im USB-Log.</p>
 <form action="/wifi_clear" method="post" style="margin-top:12px"><button class="secondary" type="submit">Gespeichertes WLAN loeschen</button></form>
 </div>
-<div class="setup">
-<strong>BLE Zielgeraete</strong>
+</details>
+<details class="setup" open>
+<summary>BLE Zielgeraete</summary>
+<div class="inside">
 <p class="hint">Feste Favoriten fuer 123 und BM6. Manuell bleibt moeglich, damit wir spaeter weitere Geraete schnell aufnehmen koennen.</p>
 <div class="row"><span>123 aktuell</span><strong id="taddrsetup" class="mono">-</strong></div>
 <form action="/ble_target" method="post">
@@ -1647,7 +1686,6 @@ pre { white-space: pre-wrap; max-height: 220px; overflow: auto; padding: 12px; b
 <label for="tune_mac">123 BLE-Adresse</label><input id="tune_mac" name="tune_mac" placeholder="aa:bb:cc:dd:ee:ff">
 <button type="submit">123 Ziel speichern</button>
 </form>
-#if ENABLE_BM6
 <div class="row"><span>BM6 aktuell</span><strong id="bm6addrsetup" class="mono">-</strong></div>
 <form action="/bm6_target" method="post">
 <label for="bm6Preset">BM6 Profil</label><select id="bm6Preset">
@@ -1657,10 +1695,11 @@ pre { white-space: pre-wrap; max-height: 220px; overflow: auto; padding: 12px; b
 <label for="bm6_mac">BM6 BLE-Adresse</label><input id="bm6_mac" name="bm6_mac" placeholder="aa:bb:cc:dd:ee:ff">
 <button type="submit">BM6 Ziel speichern</button>
 </form>
-#endif
 </div>
-<div class="setup">
-<strong>Spartan UART-Konfiguration</strong>
+</details>
+<details class="setup">
+<summary>Spartan UART-Konfiguration</summary>
+<div class="inside">
 <p class="hint">Nur benutzen, wenn Orange/Gelb/Grau ueber Pegelwandler mit dem ESP32 verbunden sind. Die Befehle gehen direkt an Spartan UART.</p>
 <div class="row"><span>Status</span><strong id="ustate">bereit</strong></div>
 <div class="row"><span>Letzter Befehl</span><strong id="ucmd" class="mono">-</strong></div>
@@ -1695,6 +1734,7 @@ pre { white-space: pre-wrap; max-height: 220px; overflow: auto; padding: 12px; b
 <button type="submit">Betriebsart senden</button>
 </form>
 </div>
+</details>
 <p class="hint">Aktuell ist der Bring-up-Modus aktiv. DEMO-Werte pruefen Display und Web-GUI, bis der CAN-Transceiver angeschlossen ist.</p>
 </div><!-- /tab setup -->
 <script>
@@ -1715,11 +1755,9 @@ try {
 document.getElementById('tunePreset').addEventListener('change', (e) => {
   document.getElementById('tune_mac').value = e.target.value || '';
 });
-#if ENABLE_BM6
 document.getElementById('bm6Preset').addEventListener('change', (e) => {
   document.getElementById('bm6_mac').value = e.target.value || '';
 });
-#endif
 document.getElementById('wifiPreset').addEventListener('change', (e) => {
   const option = e.target.selectedOptions[0];
   const ssid = option.value || '';
@@ -1778,6 +1816,7 @@ async function refresh() {
     document.getElementById('temp').textContent = d.valid ? d.temperature + ' C' : '- C';
     document.getElementById('main123').textContent = (d.rpm ?? 0) + ' / ' + Number(d.advance ?? 0).toFixed(1) + ' / ' + (d.map ?? 0);
     document.getElementById('can').textContent = d.can_ready ? 'aktiv' : 'Fehler';
+    document.getElementById('wifiTop').textContent = d.wifi_connected ? d.wifi_ip : (d.ap_ip || 'offline');
     cls(document.getElementById('source'), d.source === 'CAN' ? 'tag ok' : (d.source === 'DEMO' ? 'tag warn' : 'tag bad'));
     cls(document.getElementById('status'), d.status === 'OK' ? 'ok' : (d.status === 'HEAT' || d.source === 'DEMO' ? 'warn' : 'bad'));
     cls(document.getElementById('can'), d.can_ready && d.can_state === 1 ? 'ok' : 'bad');
@@ -1816,10 +1855,12 @@ async function refresh() {
     document.getElementById('canerr').textContent = d.can_status_errors ?? 0;
     document.getElementById('heap').textContent = d.heap_free ? Math.round(d.heap_free / 1024) + ' KB' : '-';
     document.getElementById('hours').textContent = Number(d.device_hours ?? 0).toFixed(2) + ' / ' + Number(d.engine_hours ?? 0).toFixed(2) + ' / ' + Number(d.sensor_hours ?? 0).toFixed(2) + ' h';
+    document.getElementById('liveHours').textContent = Number(d.sensor_hours ?? 0).toFixed(2) + ' h';
     document.getElementById('apdiag').textContent = (d.ap_ip || '-') + ' / ' + (d.ap_retry_count ?? 0);
     document.getElementById('bm6conn').textContent = d.bm6_connected ? 'verbunden' : 'scan/retry';
     cls(document.getElementById('bm6conn'), d.bm6_connected ? 'ok' : 'warn');
     document.getElementById('bm6volt').textContent = Number(d.bm6_voltage ?? 0).toFixed(2) + ' V';
+    document.getElementById('liveBm6').textContent = Number(d.bm6_voltage ?? 0).toFixed(2) + ' V';
     document.getElementById('bm6temp').textContent = (d.bm6_temperature ?? 0) + ' C';
     document.getElementById('bm6rx').textContent = d.bm6_rx_count ?? 0;
     document.getElementById('bm6age').textContent = (d.bm6_age_ms ?? 0) + ' ms';
@@ -1832,6 +1873,7 @@ async function refresh() {
     if (spdHz) {
       spdHz.textContent = Number(d.speed_hz ?? 0).toFixed(2) + ' Hz';
       document.getElementById('spdkmh').textContent = Number(d.speed_kmh ?? 0).toFixed(1) + ' km/h';
+      document.getElementById('liveSpeed').textContent = Number(d.speed_kmh ?? 0).toFixed(1) + ' km/h';
       document.getElementById('spdpc').textContent = d.speed_pulses ?? 0;
       document.getElementById('spdppr').textContent = d.speed_pulses_per_rev ?? 10;
       var ctlTire = document.getElementById('ctlTire');
