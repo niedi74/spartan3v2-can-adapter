@@ -150,6 +150,14 @@
 #define SPEED_DEBOUNCE_US 500
 #endif
 
+#ifndef ENGINE_RUNNING_RPM_THRESHOLD
+#define ENGINE_RUNNING_RPM_THRESHOLD 650
+#endif
+
+#ifndef HOURMETER_SAVE_INTERVAL_MS
+#define HOURMETER_SAVE_INTERVAL_MS 30000
+#endif
+
 #ifndef ENABLE_SPARTAN_UART
 #define ENABLE_SPARTAN_UART 1
 #endif
@@ -256,6 +264,11 @@ uint32_t heaterAdcMilliVolts = 0;
 uint8_t heaterStatusCode = 0;
 uint32_t lastDisplayMs = 0;
 uint32_t lastBleNotifyMs = 0;
+uint64_t deviceSeconds = 0;
+uint64_t engineSeconds = 0;
+uint64_t sensorSeconds = 0;
+uint32_t lastHourmeterTickMs = 0;
+uint32_t lastHourmeterSaveMs = 0;
 
 // ---- Reed-Speed-State (ISR + Loop) ----
 #if SPEED_REED_PIN >= 0
@@ -272,6 +285,10 @@ uint16_t speedTrimPermil = SPEED_TRIM_PERMIL_DEFAULT; // 1000 = 1.000
 String uartLine;
 String lastUartCommand = "";
 String lastUartResponse = "";
+String lastUartState = "bereit";
+uint32_t lastUartCommandMs = 0;
+uint32_t lastUartResponseMs = 0;
+String savedWifiSsid = "";
 #if ENABLE_BLE_HUB
 NimBLECharacteristic *bleStatusCharacteristic = nullptr;
 volatile uint8_t bleClientCount = 0;
@@ -292,6 +309,7 @@ String tuneSavedAddress = "";
 NimBLEClient *bm6Client = nullptr;
 NimBLERemoteCharacteristic *bm6WriteChar = nullptr;
 NimBLEAddress bm6TargetAddress;
+String bm6SavedAddress = "";
 bool bm6DoConnect = false;
 bool bm6Connected = false;
 uint32_t bm6NextScanMs = 0;
@@ -323,6 +341,28 @@ void ensurePreferences()
     networkPreferencesReady = true;
   }
 #endif
+}
+
+String normalizeMacInput(const String &raw)
+{
+  String mac = raw;
+  mac.trim();
+  mac.toLowerCase();
+  return mac;
+}
+
+bool looksLikeMacAddress(const String &mac)
+{
+  if (mac.length() != 17) return false;
+  for (uint8_t i = 0; i < mac.length(); i++) {
+    const char c = mac[i];
+    if (i % 3 == 2) {
+      if (c != ':') return false;
+    } else if (!isHexadecimalDigit(c)) {
+      return false;
+    }
+  }
+  return true;
 }
 
 String fitLine(const String &text)
@@ -478,6 +518,9 @@ void sendSpartanUartCommand(const String &command)
 
   lastUartCommand = sanitized;
   lastUartResponse = "";
+  lastUartState = "gesendet - warte auf Antwort";
+  lastUartCommandMs = millis();
+  lastUartResponseMs = 0;
   Serial2.println(sanitized);
   Serial.printf("UART command sent: %s\n", sanitized.c_str());
 #else
@@ -521,6 +564,12 @@ String statusJson()
   json += String(canStatusErrors);
   json += ",\"heap_free\":";
   json += String(heap_caps_get_free_size(MALLOC_CAP_8BIT));
+  json += ",\"device_hours\":";
+  json += String(static_cast<double>(deviceSeconds) / 3600.0, 2);
+  json += ",\"engine_hours\":";
+  json += String(static_cast<double>(engineSeconds) / 3600.0, 2);
+  json += ",\"sensor_hours\":";
+  json += String(static_cast<double>(sensorSeconds) / 3600.0, 2);
 #if ENABLE_SPARTAN_HEATER_ANALOG
   json += ",\"heater_adc_mv\":";
   json += String(heaterAdcMilliVolts);
@@ -541,6 +590,9 @@ String statusJson()
 #if ENABLE_WEB_GUI
   json += ",\"wifi_saved\":";
   json += haveSavedWifi ? "true" : "false";
+  json += ",\"wifi_saved_ssid\":\"";
+  json += savedWifiSsid;
+  json += "\"";
   json += ",\"wifi_connected\":";
   json += WiFi.status() == WL_CONNECTED ? "true" : "false";
   json += ",\"wifi_ssid\":\"";
@@ -556,7 +608,12 @@ String statusJson()
   json += lastUartCommand;
   json += "\",\"uart_response\":\"";
   json += lastUartResponse;
-  json += "\"";
+  json += "\",\"uart_state\":\"";
+  json += lastUartState;
+  json += "\",\"uart_age_ms\":";
+  json += String(lastUartCommandMs == 0 ? 0UL : static_cast<unsigned long>(now - lastUartCommandMs));
+  json += ",\"uart_response_age_ms\":";
+  json += String(lastUartResponseMs == 0 ? 0UL : static_cast<unsigned long>(now - lastUartResponseMs));
 #if ENABLE_BLE_HUB
   json += ",\"tune_connected\":";
   json += tuneConnected ? "true" : "false";
@@ -598,6 +655,9 @@ String statusJson()
   json += String(static_cast<unsigned long>(bm6DecodeFailCount));
   json += ",\"bm6_age_ms\":";
   json += String(bm6LastRxMs == 0 ? 0UL : static_cast<unsigned long>(now - bm6LastRxMs));
+  json += ",\"bm6_saved_address\":\"";
+  json += bm6SavedAddress;
+  json += "\"";
 #endif
 #endif
 #if SPEED_REED_PIN >= 0
@@ -1098,8 +1158,16 @@ class Bm6ScanCallbacks : public NimBLEScanCallbacks {
   {
     String addr = device->getAddress().toString().c_str();
     addr.toLowerCase();
-    if (addr != kBm6TargetAddress) return;
+    if (addr != bm6SavedAddress && addr != kBm6TargetAddress) return;
     bm6TargetAddress = device->getAddress();
+    if (bm6SavedAddress != addr) {
+      bm6SavedAddress = addr;
+#if ENABLE_WEB_GUI
+      ensurePreferences();
+      networkPreferences.putString("bm6_mac", bm6SavedAddress);
+#endif
+      Serial.printf("BM6 BLE:     saved address %s\n", bm6SavedAddress.c_str());
+    }
     bm6DoConnect = true;
     bm6NextScanMs = 0;
     NimBLEDevice::getScan()->stop();
@@ -1250,8 +1318,17 @@ void setupBleHub()
       ? networkPreferences.getString("tune_mac", kTuneTargetAddress)
       : String(kTuneTargetAddress);
   tuneSavedAddress.toLowerCase();
+#if ENABLE_BM6
+  bm6SavedAddress = networkPreferences.isKey("bm6_mac")
+      ? networkPreferences.getString("bm6_mac", kBm6TargetAddress)
+      : String(kBm6TargetAddress);
+  bm6SavedAddress.toLowerCase();
+#endif
 #else
   tuneSavedAddress = kTuneTargetAddress;
+#if ENABLE_BM6
+  bm6SavedAddress = kBm6TargetAddress;
+#endif
 #endif
 
   NimBLEServer *bleServer = NimBLEDevice::createServer();
@@ -1280,7 +1357,7 @@ void setupBleHub()
   Serial.println("BLE hub:     advertising waits for 123TUNE or 30s fallback");
   startTuneScan();
 #if ENABLE_BM6
-  Serial.printf("BM6 BLE:     target %s\n", kBm6TargetAddress);
+  Serial.printf("BM6 BLE:     target %s\n", bm6SavedAddress.c_str());
   scheduleBm6Scan();
 #endif
 }
@@ -1313,18 +1390,84 @@ void setupBleHub() {}
 void updateBleHub() {}
 #endif
 
+void setupHourmeters()
+{
+  ensurePreferences();
+  deviceSeconds = networkPreferences.getULong64("dev_sec", 0);
+  engineSeconds = networkPreferences.getULong64("eng_sec", 0);
+  sensorSeconds = networkPreferences.getULong64("sns_sec", 0);
+  lastHourmeterTickMs = millis();
+  lastHourmeterSaveMs = millis();
+  Serial.printf("Hours:       device=%.2f h engine=%.2f h sensor=%.2f h\n",
+                static_cast<double>(deviceSeconds) / 3600.0,
+                static_cast<double>(engineSeconds) / 3600.0,
+                static_cast<double>(sensorSeconds) / 3600.0);
+}
+
+void saveHourmeters()
+{
+  ensurePreferences();
+  networkPreferences.putULong64("dev_sec", deviceSeconds);
+  networkPreferences.putULong64("eng_sec", engineSeconds);
+  networkPreferences.putULong64("sns_sec", sensorSeconds);
+  lastHourmeterSaveMs = millis();
+}
+
+void updateHourmeters()
+{
+  const uint32_t now = millis();
+  if (lastHourmeterTickMs == 0) {
+    lastHourmeterTickMs = now;
+    return;
+  }
+  const uint32_t elapsedMs = now - lastHourmeterTickMs;
+  if (elapsedMs < 1000) return;
+
+  const uint32_t elapsedSec = elapsedMs / 1000;
+  lastHourmeterTickMs += elapsedSec * 1000;
+  deviceSeconds += elapsedSec;
+
+  const SpartanReading snapshot = readingSnapshot();
+#if ENABLE_BLE_HUB
+  const TuneSnapshot tune = tuneSnapshot();
+  const bool rpmRunning = tune.rpm > ENGINE_RUNNING_RPM_THRESHOLD;
+#else
+  const bool rpmRunning = false;
+#endif
+#if SPEED_REED_PIN >= 0
+  const bool speedRunning = speedKmh > 0.5f;
+#else
+  const bool speedRunning = false;
+#endif
+  const bool engineRunning = rpmRunning || speedRunning;
+  const bool sensorActive = snapshot.status == 3 || heaterStatusCode >= 2 || snapshot.temperatureC >= 700;
+
+  if (engineRunning) {
+    engineSeconds += elapsedSec;
+  }
+  if (sensorActive) {
+    sensorSeconds += elapsedSec;
+  }
+
+  if (now - lastHourmeterSaveMs >= HOURMETER_SAVE_INTERVAL_MS) {
+    saveHourmeters();
+  }
+}
+
 void setupWebGui()
 {
 #if ENABLE_WEB_GUI
   ensurePreferences();
   const String savedSsid = networkPreferences.isKey("ssid") ? networkPreferences.getString("ssid", "") : "";
   const String savedPassword = networkPreferences.isKey("pass") ? networkPreferences.getString("pass", "") : "";
+  savedWifiSsid = savedSsid;
   String stationSsid = savedSsid;
   String stationPassword = savedPassword;
   const bool usingBuiltInWifi = stationSsid.length() == 0 && strlen(HOME_WIFI_SSID) > 0;
   if (usingBuiltInWifi) {
     stationSsid = HOME_WIFI_SSID;
     stationPassword = HOME_WIFI_PASSWORD;
+    savedWifiSsid = stationSsid;
   }
   haveSavedWifi = stationSsid.length() > 0;
 
@@ -1457,6 +1600,7 @@ pre { white-space: pre-wrap; max-height: 220px; overflow: auto; padding: 12px; b
 <div class="row"><span>CAN State / TX / RX</span><strong id="candiag">-</strong></div>
 <div class="row"><span>CAN Statusfehler</span><strong id="canerr">0</strong></div>
 <div class="row"><span>Heap frei</span><strong id="heap">-</strong></div>
+<div class="row"><span>Geraet / Motor / Sonde</span><strong id="hours">0 / 0 / 0 h</strong></div>
 <div class="row"><span>AP IP / Retry</span><strong id="apdiag">-</strong></div>
 <button class="secondary" type="button" onclick="copyJson()">JSON kopieren</button>
 <pre id="jsondump">{}</pre>
@@ -1477,11 +1621,12 @@ pre { white-space: pre-wrap; max-height: 220px; overflow: auto; padding: 12px; b
 <strong>WLAN / Hotspot</strong>
 <div class="row"><span>Verbindung</span><strong id="wifi">nicht eingerichtet</strong></div>
 <div class="row"><span>ESP32 IP</span><strong id="lanip">-</strong></div>
+<div class="row"><span>Gespeichert</span><strong id="wifisaved">-</strong></div>
 <form action="/wifi" method="post">
 <label for="wifiPreset">Profil</label><select id="wifiPreset">
 <option value="">Manuell</option>
 <option value="Android-AP1" data-pass="Frankfurt1">S24 Hotspot Android-AP1</option>
-<option value="Z00-Station" data-pass="">Z00-Station</option>
+<option value="ZOO_station" data-pass="">ZOO_station</option>
 </select>
 <label for="ssid">WLAN-Name</label><input id="ssid" name="ssid" required>
 <label for="pass">Passwort</label><input id="pass" name="pass" type="password" placeholder="leer lassen = vorhandenes Passwort behalten">
@@ -1491,11 +1636,37 @@ pre { white-space: pre-wrap; max-height: 220px; overflow: auto; padding: 12px; b
 <form action="/wifi_clear" method="post" style="margin-top:12px"><button class="secondary" type="submit">Gespeichertes WLAN loeschen</button></form>
 </div>
 <div class="setup">
+<strong>BLE Zielgeraete</strong>
+<p class="hint">Feste Favoriten fuer 123 und BM6. Manuell bleibt moeglich, damit wir spaeter weitere Geraete schnell aufnehmen koennen.</p>
+<div class="row"><span>123 aktuell</span><strong id="taddrsetup" class="mono">-</strong></div>
+<form action="/ble_target" method="post">
+<label for="tunePreset">123 Profil</label><select id="tunePreset">
+<option value="">Manuell</option>
+<option value="ef:a8:b2:de:e0:9e">123 #1 ef:a8:b2:de:e0:9e</option>
+</select>
+<label for="tune_mac">123 BLE-Adresse</label><input id="tune_mac" name="tune_mac" placeholder="aa:bb:cc:dd:ee:ff">
+<button type="submit">123 Ziel speichern</button>
+</form>
+#if ENABLE_BM6
+<div class="row"><span>BM6 aktuell</span><strong id="bm6addrsetup" class="mono">-</strong></div>
+<form action="/bm6_target" method="post">
+<label for="bm6Preset">BM6 Profil</label><select id="bm6Preset">
+<option value="">Manuell</option>
+<option value="3c:ab:72:80:06:6a">BM6 #1 3c:ab:72:80:06:6a</option>
+</select>
+<label for="bm6_mac">BM6 BLE-Adresse</label><input id="bm6_mac" name="bm6_mac" placeholder="aa:bb:cc:dd:ee:ff">
+<button type="submit">BM6 Ziel speichern</button>
+</form>
+#endif
+</div>
+<div class="setup">
 <strong>Spartan UART-Konfiguration</strong>
 <p class="hint">Nur benutzen, wenn Orange/Gelb/Grau ueber Pegelwandler mit dem ESP32 verbunden sind. Die Befehle gehen direkt an Spartan UART.</p>
+<div class="row"><span>Status</span><strong id="ustate">bereit</strong></div>
 <div class="row"><span>Letzter Befehl</span><strong id="ucmd" class="mono">-</strong></div>
-<div class="row"><span>Antwort</span><strong id="uresp" class="mono">-</strong></div>
-<form action="/uart_cmd" method="post" class="grid">
+<div class="row"><span>Antwort / Timeout</span><strong id="uresp" class="mono">-</strong></div>
+<div class="row"><span>Alter Befehl / Antwort</span><strong id="uage">-</strong></div>
+<form action="/uart_cmd" method="post" class="grid" data-async="uart">
 <button name="cmd" value="GETFW">GETFW</button>
 <button name="cmd" value="GETHW">GETHW</button>
 <button name="cmd" value="GETCANID">GETCANID</button>
@@ -1505,7 +1676,7 @@ pre { white-space: pre-wrap; max-height: 220px; overflow: auto; padding: 12px; b
 <button name="cmd" value="GETCANR">GETCANR</button>
 <button name="cmd" value="GETTYPE">GETTYPE</button>
 </form>
-<form action="/uart_cmd" method="post">
+<form action="/uart_cmd" method="post" data-async="uart">
 <label for="cmd">Expertenbefehl</label><input id="cmd" name="cmd" placeholder="z.B. SETCANID1024">
 <button type="submit">Senden</button>
 </form>
@@ -1541,11 +1712,35 @@ try {
   const saved = localStorage.getItem('spartanTab');
   if (saved === 'setup') showTab('setup');
 } catch (e) {}
+document.getElementById('tunePreset').addEventListener('change', (e) => {
+  document.getElementById('tune_mac').value = e.target.value || '';
+});
+#if ENABLE_BM6
+document.getElementById('bm6Preset').addEventListener('change', (e) => {
+  document.getElementById('bm6_mac').value = e.target.value || '';
+});
+#endif
 document.getElementById('wifiPreset').addEventListener('change', (e) => {
   const option = e.target.selectedOptions[0];
   const ssid = option.value || '';
   document.getElementById('ssid').value = ssid;
   document.getElementById('pass').value = option.dataset.pass || '';
+});
+document.querySelectorAll('form[data-async=\"uart\"]').forEach((form) => {
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const submitter = e.submitter;
+    const fd = new FormData(form);
+    if (submitter && submitter.name) {
+      fd.set(submitter.name, submitter.value);
+    }
+    try {
+      await fetch(form.action, { method: 'POST', body: fd, cache: 'no-store' });
+      lastJson.uart_state = 'gesendet - warte auf Antwort';
+      lastJson.uart_response = '';
+      refresh();
+    } catch (err) {}
+  });
 });
 function cls(el, state) { el.className = state; }
 function pushHist(name, value) {
@@ -1592,8 +1787,20 @@ async function refresh() {
     document.getElementById('bleclients').textContent = d.ble_clients ?? '0';
     document.getElementById('wifi').textContent = d.wifi_connected ? d.wifi_ssid : (d.wifi_saved ? 'verbindet...' : 'nicht eingerichtet');
     document.getElementById('lanip').textContent = d.wifi_connected ? d.wifi_ip : '-';
+    document.getElementById('wifisaved').textContent = d.wifi_saved_ssid || '-';
     document.getElementById('ucmd').textContent = d.uart_command || '-';
-    document.getElementById('uresp').textContent = d.uart_response || '-';
+    const ucmdAge = d.uart_age_ms ?? 0;
+    const urspAge = d.uart_response_age_ms ?? 0;
+    let uartState = d.uart_state || 'bereit';
+    let uartResp = d.uart_response || '';
+    if ((d.uart_command || '').length && !uartResp && ucmdAge > 1800) {
+      uartState = 'Timeout - keine Antwort';
+      uartResp = 'keine Antwort vom Spartan auf UART';
+    }
+    document.getElementById('ustate').textContent = uartState;
+    cls(document.getElementById('ustate'), uartState.indexOf('Timeout') >= 0 ? 'bad' : (uartResp ? 'ok' : 'warn'));
+    document.getElementById('uresp').textContent = uartResp || '-';
+    document.getElementById('uage').textContent = Math.round(ucmdAge) + ' ms / ' + (uartResp ? Math.round(urspAge) + ' ms' : '-');
     document.getElementById('tconn').textContent = d.tune_connected ? 'verbunden' : 'scan/retry';
     cls(document.getElementById('tconn'), d.tune_connected ? 'ok' : 'warn');
     document.getElementById('trx').textContent = d.tune_rx ?? 0;
@@ -1602,9 +1809,13 @@ async function refresh() {
     document.getElementById('terr').textContent = (d.tune_bad_length ?? 0) + ' / ' + (d.tune_unknown_opcode ?? 0);
     document.getElementById('tvals').textContent = (d.rpm ?? 0) + ' / ' + Number(d.advance ?? 0).toFixed(1) + ' / ' + (d.map ?? 0);
     document.getElementById('taddr').textContent = d.tune_saved_address || '-';
+    document.getElementById('taddrsetup').textContent = d.tune_saved_address || '-';
+    var tuneMac = document.getElementById('tune_mac');
+    if (tuneMac && document.activeElement !== tuneMac) tuneMac.value = d.tune_saved_address || '';
     document.getElementById('candiag').textContent = (d.can_state ?? '-') + ' / ' + (d.can_tx_errors ?? 0) + ' / ' + (d.can_rx_errors ?? 0);
     document.getElementById('canerr').textContent = d.can_status_errors ?? 0;
     document.getElementById('heap').textContent = d.heap_free ? Math.round(d.heap_free / 1024) + ' KB' : '-';
+    document.getElementById('hours').textContent = Number(d.device_hours ?? 0).toFixed(2) + ' / ' + Number(d.engine_hours ?? 0).toFixed(2) + ' / ' + Number(d.sensor_hours ?? 0).toFixed(2) + ' h';
     document.getElementById('apdiag').textContent = (d.ap_ip || '-') + ' / ' + (d.ap_retry_count ?? 0);
     document.getElementById('bm6conn').textContent = d.bm6_connected ? 'verbunden' : 'scan/retry';
     cls(document.getElementById('bm6conn'), d.bm6_connected ? 'ok' : 'warn');
@@ -1613,6 +1824,10 @@ async function refresh() {
     document.getElementById('bm6rx').textContent = d.bm6_rx_count ?? 0;
     document.getElementById('bm6age').textContent = (d.bm6_age_ms ?? 0) + ' ms';
     document.getElementById('bm6err').textContent = d.bm6_decode_fail ?? 0;
+    var bm6AddrSetup = document.getElementById('bm6addrsetup');
+    if (bm6AddrSetup) bm6AddrSetup.textContent = d.bm6_saved_address || '-';
+    var bm6Mac = document.getElementById('bm6_mac');
+    if (bm6Mac && document.activeElement !== bm6Mac) bm6Mac.value = d.bm6_saved_address || '';
     var spdHz = document.getElementById('spdhz');
     if (spdHz) {
       spdHz.textContent = Number(d.speed_hz ?? 0).toFixed(2) + ' Hz';
@@ -1701,10 +1916,51 @@ setInterval(() => { if (!document.hidden) refresh(); }, 350);
     networkPreferences.remove("ssid");
     networkPreferences.remove("pass");
     haveSavedWifi = false;
+    savedWifiSsid = "";
     WiFi.disconnect();
     Serial.println("Home WiFi:   credentials cleared");
     server.sendHeader("Location", "/", true);
     server.send(303, "text/plain", "");
+  });
+  server.on("/ble_target", HTTP_POST, []() {
+#if ENABLE_BLE_HUB
+    const String mac = normalizeMacInput(server.arg("tune_mac"));
+    if (!looksLikeMacAddress(mac)) {
+      server.send(400, "text/plain", "123 BLE-Adresse ungueltig. Format aa:bb:cc:dd:ee:ff");
+      return;
+    }
+    ensurePreferences();
+    tuneSavedAddress = mac;
+    networkPreferences.putString("tune_mac", tuneSavedAddress);
+    resetTuneClient();
+    tuneDoConnect = false;
+    scheduleTuneScan();
+    Serial.printf("123TUNE BLE: target override %s\n", tuneSavedAddress.c_str());
+    server.sendHeader("Location", "/", true);
+    server.send(303, "text/plain", "");
+#else
+    server.send(400, "text/plain", "BLE hub nicht aktiv");
+#endif
+  });
+  server.on("/bm6_target", HTTP_POST, []() {
+#if ENABLE_BLE_HUB && ENABLE_BM6
+    const String mac = normalizeMacInput(server.arg("bm6_mac"));
+    if (!looksLikeMacAddress(mac)) {
+      server.send(400, "text/plain", "BM6 BLE-Adresse ungueltig. Format aa:bb:cc:dd:ee:ff");
+      return;
+    }
+    ensurePreferences();
+    bm6SavedAddress = mac;
+    networkPreferences.putString("bm6_mac", bm6SavedAddress);
+    resetBm6Client();
+    bm6DoConnect = false;
+    scheduleBm6Scan();
+    Serial.printf("BM6 BLE:     target override %s\n", bm6SavedAddress.c_str());
+    server.sendHeader("Location", "/", true);
+    server.send(303, "text/plain", "");
+#else
+    server.send(400, "text/plain", "BM6 nicht aktiv");
+#endif
   });
   server.on("/uart_cmd", HTTP_POST, []() {
     sendSpartanUartCommand(server.arg("cmd"));
@@ -2001,13 +2257,22 @@ void setupUart()
 void updateUart()
 {
 #if ENABLE_SPARTAN_UART
+  if (lastUartCommandMs != 0 && lastUartResponseMs == 0 && millis() - lastUartCommandMs > 1800) {
+    lastUartState = "Timeout - keine Antwort";
+  }
   while (Serial2.available()) {
     const char c = static_cast<char>(Serial2.read());
     Serial.write(c);
     if (c == '\r' || c == '\n') {
       lastUartResponse.trim();
+      if (lastUartResponse.length() > 0) {
+        lastUartState = "Antwort empfangen";
+        lastUartResponseMs = millis();
+      }
     } else if (lastUartResponse.length() < 96 && isPrintable(c)) {
       lastUartResponse += c;
+      lastUartState = "Antwort empfangen";
+      lastUartResponseMs = millis();
     }
   }
 
@@ -2056,46 +2321,40 @@ void updateDisplay()
     return;
   }
 
-  char lambdaLine[24];
-  snprintf(lambdaLine, sizeof(lambdaLine), "LAM %.3f %s", snapshot.lambda, sourceTextC(snapshot));
-  const char *tuneState = "123:DISC";
-  bool showTunePage = false;
+  // Feste 2-Zeilen-Anzeige (kein Springen mehr):
+  //   Zeile 1: Lambda + RPM + Zuendwinkel (die 3 Hauptwerte)
+  //   Zeile 2: Sensor-Temp + Status + 123-Verbindungsstatus
 #if ENABLE_BLE_HUB
   const TuneSnapshot tune = tuneSnapshot();
   const bool tuneFresh = tune.lastRxMs != 0 && (now - tune.lastRxMs) <= 3000;
+  const char *tuneState = "123:--";
   if (tuneConnected && tuneFresh) {
-    tuneState = "123:OK";
+    tuneState = "123:OK";    // verbunden + frische Daten
+  } else if (tuneConnected) {
+    tuneState = "123:CON";   // verbunden, keine Daten (Zuendung aus)
   } else if (tuneDoConnect || tuneNextScanMs == 0) {
-    tuneState = "123:SCAN";
+    tuneState = "123:SCN";   // sucht
   }
-  if (tuneConnected && tuneFresh) {
-    showTunePage = ((now / 2000U) % 2U) == 1U;
-  }
-#endif
+  const int rpmI = static_cast<int>(tune.rpm);
+  const int advI = static_cast<int>(tune.advance + (tune.advance >= 0 ? 0.5f : -0.5f));
 
-  if (!showTunePage) {
-    displayLine(0, lambdaLine);
-  }
+  char line1[24];
+  // z.B. "L1.01 900 14"  -> Lambda, RPM, Zuendwinkel
+  snprintf(line1, sizeof(line1), "L%.2f %d %d", snapshot.lambda, rpmI, advI);
+  displayLine(0, line1);
 
-  if (!showTunePage && (snapshot.fromCan || snapshot.fromDemo)) {
-    char stateLine[24];
-    snprintf(stateLine, sizeof(stateLine), "%uC %s %s", snapshot.temperatureC, statusTextC(snapshot.status), tuneState);
-    displayLine(1, stateLine);
-  } else if (!showTunePage) {
-    char stateLine[24];
-    snprintf(stateLine, sizeof(stateLine), "Analog %s", tuneState);
-    displayLine(1, stateLine);
-  }
-
-#if ENABLE_BLE_HUB
-  if (showTunePage) {
-    char tuneLine1[24];
-    char tuneLine2[24];
-    snprintf(tuneLine1, sizeof(tuneLine1), "RPM %4d MAP %3d", static_cast<int>(tune.rpm), static_cast<int>(tune.map));
-    snprintf(tuneLine2, sizeof(tuneLine2), "ADV %4.1f RX %lu", tune.advance, static_cast<unsigned long>(tune.rxCount));
-    displayLine(0, tuneLine1);
-    displayLine(1, tuneLine2);
-  }
+  char line2[24];
+  // z.B. "770C OK 123:OK"
+  snprintf(line2, sizeof(line2), "%uC %s %s",
+           snapshot.temperatureC, statusTextC(snapshot.status), tuneState);
+  displayLine(1, line2);
+#else
+  char line1[24];
+  snprintf(line1, sizeof(line1), "LAM %.3f %s", snapshot.lambda, sourceTextC(snapshot));
+  displayLine(0, line1);
+  char line2[24];
+  snprintf(line2, sizeof(line2), "%uC %s", snapshot.temperatureC, statusTextC(snapshot.status));
+  displayLine(1, line2);
 #endif
 }
 
@@ -2151,6 +2410,7 @@ void setup()
   printBootDetails();
   setupBleHub();
   setupWebGui();
+  setupHourmeters();
   setupCan();
   setupUart();
   setupSpeedReed();
@@ -2173,6 +2433,7 @@ void loop()
   updateHeaterAnalog();
   updateUart();
   updateSpeedReed();
+  updateHourmeters();
   updateWebGui();
   updateBleHub();
   updateDisplay();
