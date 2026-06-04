@@ -1609,20 +1609,14 @@ details.setup > .inside { padding: 0 16px 16px; }
 <div class="row"><span>BM6 Adresse</span><strong class="mono">3c:ab:72:80:06:6a</strong></div>
 </div>
 </details>
-<details class="setup" open>
-<summary>Geschwindigkeit (Reed-Sensor)</summary>
+<details class="setup">
+<summary>Live Meta</summary>
 <div class="inside">
-<p class="hint">Reed-Kontakt gegen GND auf GPIO 27. Default: 10 Pulse pro Radumdrehung, Reifen 205/80 R14 = 2147 mm. Trim per GPS abgleichen: Trim = GPS / Reed.</p>
-<div class="row"><span>Frequenz</span><strong id="spdhz">- Hz</strong></div>
-<div class="row"><span>Geschwindigkeit</span><strong id="spdkmh">- km/h</strong></div>
-<div class="row"><span>Pulse gesamt</span><strong id="spdpc">0</strong></div>
-<div class="row"><span>Pulse pro Umdrehung</span><strong id="spdppr">10</strong></div>
-<form action="/speed" method="post" style="margin-top:12px">
-<label>Reifenumfang (mm) <input type="number" name="tire" min="500" max="4000" id="ctlTire" value="2147"></label>
-<label>Trim (x1000) <input type="number" name="trim" min="500" max="1500" id="ctlTrim" value="1000"></label>
-<p class="hint">Beispiel: Tacho zeigt 60.0 km/h, GPS sagt 58.4 km/h -> Trim = 1000 * 58.4 / 60.0 = 973.</p>
-<button type="submit">Speichern</button>
-</form>
+<div class="row"><span>WLAN / IP</span><strong id="liveWifiMeta" class="mono">-</strong></div>
+<div class="row"><span>Speed Hz / Pulse</span><strong id="liveSpeedMeta">0.00 / 0</strong></div>
+<div class="row"><span>123 Alter / RX</span><strong id="liveTuneMeta">0 ms / 0</strong></div>
+<div class="row"><span>BM6 Alter / RX</span><strong id="liveBm6Meta">0 ms / 0</strong></div>
+<div class="row"><span>Geraet / Motor / Sonde</span><strong id="liveHoursMeta">0 / 0 / 0 h</strong></div>
 </div>
 </details>
 </div><!-- /tab live -->
@@ -1642,6 +1636,22 @@ details.setup > .inside { padding: 0 16px 16px; }
 <pre id="jsondump">{}</pre>
 </div>
 </details>
+</div>
+</details>
+<details class="setup" open>
+<summary>Geschwindigkeit Setup (Reed-Sensor)</summary>
+<div class="inside">
+<p class="hint">Reed-Kontakt gegen GND auf GPIO 27. Default: 10 Pulse pro Radumdrehung, Reifen 205/80 R14 = 2147 mm. Trim per GPS abgleichen: Trim = GPS / Reed.</p>
+<div class="row"><span>Live Frequenz</span><strong id="spdhz">- Hz</strong></div>
+<div class="row"><span>Live Geschwindigkeit</span><strong id="spdkmh">- km/h</strong></div>
+<div class="row"><span>Pulse gesamt</span><strong id="spdpc">0</strong></div>
+<div class="row"><span>Pulse pro Umdrehung</span><strong id="spdppr">10</strong></div>
+<form action="/speed" method="post" style="margin-top:12px">
+<label>Reifenumfang (mm) <input type="number" name="tire" min="500" max="4000" id="ctlTire" value="2147"></label>
+<label>Trim (x1000) <input type="number" name="trim" min="500" max="1500" id="ctlTrim" value="1000"></label>
+<p class="hint">Beispiel: Tacho zeigt 60.0 km/h, GPS sagt 58.4 km/h -> Trim = 1000 * 58.4 / 60.0 = 973.</p>
+<button type="submit">Speichern</button>
+</form>
 </div>
 </details>
 <details class="setup">
@@ -1668,7 +1678,7 @@ details.setup > .inside { padding: 0 16px 16px; }
 <label for="wifiPreset">Profil</label><select id="wifiPreset">
 <option value="">Manuell</option>
 <option value="Android-AP1" data-pass="Frankfurt1">S24 Hotspot Android-AP1</option>
-<option value="ZOO_station" data-pass="">ZOO_station</option>
+<option value="Z00-Station" data-pass="">Z00-Station</option>
 </select>
 <label for="ssid">WLAN-Name</label><input id="ssid" name="ssid" required>
 <label for="pass">Passwort</label><input id="pass" name="pass" type="password" placeholder="leer lassen = vorhandenes Passwort behalten">
@@ -1832,6 +1842,7 @@ async function refresh() {
     document.getElementById('wifi').textContent = d.wifi_connected ? d.wifi_ssid : (d.wifi_saved ? 'verbindet...' : 'nicht eingerichtet');
     document.getElementById('lanip').textContent = d.wifi_connected ? d.wifi_ip : '-';
     document.getElementById('wifisaved').textContent = d.wifi_saved_ssid || '-';
+    document.getElementById('liveWifiMeta').textContent = d.wifi_connected ? ((d.wifi_ssid || '-') + ' / ' + (d.wifi_ip || '-')) : ('AP ' + (d.ap_ip || '-'));
     document.getElementById('ucmd').textContent = d.uart_command || '-';
     const ucmdAge = d.uart_age_ms ?? 0;
     const urspAge = d.uart_response_age_ms ?? 0;
@@ -1861,6 +1872,7 @@ async function refresh() {
     document.getElementById('heap').textContent = d.heap_free ? Math.round(d.heap_free / 1024) + ' KB' : '-';
     document.getElementById('hours').textContent = Number(d.device_hours ?? 0).toFixed(2) + ' / ' + Number(d.engine_hours ?? 0).toFixed(2) + ' / ' + Number(d.sensor_hours ?? 0).toFixed(2) + ' h';
     document.getElementById('liveHours').textContent = Number(d.sensor_hours ?? 0).toFixed(2) + ' h';
+    document.getElementById('liveHoursMeta').textContent = Number(d.device_hours ?? 0).toFixed(2) + ' / ' + Number(d.engine_hours ?? 0).toFixed(2) + ' / ' + Number(d.sensor_hours ?? 0).toFixed(2) + ' h';
     document.getElementById('apdiag').textContent = (d.ap_ip || '-') + ' / ' + (d.ap_retry_count ?? 0);
     document.getElementById('bm6conn').textContent = d.bm6_connected ? 'verbunden' : 'scan/retry';
     cls(document.getElementById('bm6conn'), d.bm6_connected ? 'ok' : 'warn');
@@ -1870,6 +1882,8 @@ async function refresh() {
     document.getElementById('bm6rx').textContent = d.bm6_rx_count ?? 0;
     document.getElementById('bm6age').textContent = (d.bm6_age_ms ?? 0) + ' ms';
     document.getElementById('bm6err').textContent = d.bm6_decode_fail ?? 0;
+    document.getElementById('liveTuneMeta').textContent = (d.tune_age_ms ?? 0) + ' ms / ' + (d.tune_rx ?? 0);
+    document.getElementById('liveBm6Meta').textContent = (d.bm6_age_ms ?? 0) + ' ms / ' + (d.bm6_rx_count ?? 0);
     var bm6AddrSetup = document.getElementById('bm6addrsetup');
     if (bm6AddrSetup) bm6AddrSetup.textContent = d.bm6_saved_address || '-';
     var bm6Mac = document.getElementById('bm6_mac');
@@ -1879,6 +1893,7 @@ async function refresh() {
       spdHz.textContent = Number(d.speed_hz ?? 0).toFixed(2) + ' Hz';
       document.getElementById('spdkmh').textContent = Number(d.speed_kmh ?? 0).toFixed(1) + ' km/h';
       document.getElementById('liveSpeed').textContent = Number(d.speed_kmh ?? 0).toFixed(1) + ' km/h';
+      document.getElementById('liveSpeedMeta').textContent = Number(d.speed_hz ?? 0).toFixed(2) + ' Hz / ' + (d.speed_pulses ?? 0);
       document.getElementById('spdpc').textContent = d.speed_pulses ?? 0;
       document.getElementById('spdppr').textContent = d.speed_pulses_per_rev ?? 10;
       var ctlTire = document.getElementById('ctlTire');
