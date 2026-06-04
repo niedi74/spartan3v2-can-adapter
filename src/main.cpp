@@ -565,7 +565,7 @@ String statusJson()
 #endif
   const uint32_t now = millis();
   String json;
-  json.reserve(768);  // verhindert wiederholte Heap-Reallokationen
+  json.reserve(2200);  // verhindert wiederholte Heap-Reallokationen
   json += "{\"valid\":";
   json += snapshot.valid ? "true" : "false";
   json += ",\"lambda\":";
@@ -990,9 +990,9 @@ String bleStatusPayload()
 #endif
   // 123TUNE+ interne Werte (nur wenn verbunden)
   if (tune.rxCount > 0 && n > 0 && n < static_cast<int>(sizeof(payload))) {
-    n += snprintf(payload + n, sizeof(payload) - n, "I%.1fT%dC%.1f",
-                  tune.voltage, static_cast<int>(tune.temperature),
-                  tune.coilCurrent);
+    snprintf(payload + n, sizeof(payload) - n, "I%.1fT%dC%.1f",
+             tune.voltage, static_cast<int>(tune.temperature),
+             tune.coilCurrent);
   }
   return String(payload);
 }
@@ -1736,7 +1736,7 @@ void setupWebGui()
   }
 
   server.on("/", []() {
-    server.send(200, "text/html", R"HTML(
+    server.send_P(200, "text/html", R"HTML(
 <!doctype html>
 <html lang="de">
 <head>
@@ -2177,7 +2177,7 @@ async function refresh() {
   } catch (e) {}
 }
 refresh();
-setInterval(() => { if (!document.hidden) refresh(); }, 350);
+setInterval(() => { if (!document.hidden) refresh(); }, 750);
 </script></main></body></html>)HTML");
   });
 
