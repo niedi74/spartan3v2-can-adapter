@@ -2,6 +2,7 @@
 #include <driver/twai.h>
 #include <esp_heap_caps.h>
 #include <cstring>
+#include <time.h>
 
 #ifndef ENABLE_WEB_GUI
 #define ENABLE_WEB_GUI 0
@@ -335,14 +336,20 @@ uint32_t lastApRetryMs = 0;
 uint32_t apRetryCount = 0;
 bool logFsReady = false;
 uint32_t lastCsvAppendMs = 0;
+bool ntpConfigured = false;
 const char *kLogFile = "/drive.csv";
 const char *kOldLogFile = "/drive_old.csv";
-const char *kLogHeader =
-    "ms;source;lambda_valid;lambda;spartan_temp_c;spartan_status;rpm;advance;map;"
-    "tune_volt;bm6_volt;bm6_temp;speed_kmh;speed_hz;speed_pulses;"
-    "heater_v;device_h;engine_h;sensor_h";
 const size_t kMaxLogBytes = 1200000;
 const uint32_t kLogIntervalMs = 500;
+const uint16_t kLogColSpartan = 0x0001;
+const uint16_t kLogColTune = 0x0002;
+const uint16_t kLogColBm6 = 0x0004;
+const uint16_t kLogColSpeed = 0x0008;
+const uint16_t kLogColHeater = 0x0010;
+const uint16_t kLogColHours = 0x0020;
+const uint16_t kLogColDefault = kLogColSpartan | kLogColTune | kLogColBm6 |
+                                kLogColSpeed | kLogColHeater | kLogColHours;
+uint16_t logColumnMask = kLogColDefault;
 #endif
 
 void ensurePreferences()
@@ -486,6 +493,8 @@ void storeReading(const SpartanReading &fresh)
 #if ENABLE_WEB_GUI
 String humanBytes(size_t bytes);
 size_t logFileSize(const char *path);
+bool systemTimeValid();
+String csvTimeText(uint32_t ms);
 void ensureLogHeader();
 void sendLogFile(const char *path, const char *downloadName);
 #endif
@@ -628,6 +637,13 @@ String statusJson()
   json += String(static_cast<unsigned long>(logFileSize(kLogFile)));
   json += ",\"log_old_bytes\":";
   json += String(static_cast<unsigned long>(logFileSize(kOldLogFile)));
+  json += ",\"log_columns\":";
+  json += String(logColumnMask);
+  json += ",\"time_valid\":";
+  json += systemTimeValid() ? "true" : "false";
+  json += ",\"time_text\":\"";
+  json += csvTimeText(now);
+  json += "\"";
 #endif
   json += ",\"uart_command\":\"";
   json += lastUartCommand;
@@ -721,19 +737,66 @@ size_t logFileSize(const char *path)
   return size;
 }
 
+bool logCol(uint16_t flag)
+{
+  return (logColumnMask & flag) != 0;
+}
+
+String logHeader()
+{
+  String header = "ms;epoch;time";
+  if (logCol(kLogColSpartan)) header += ";source;lambda_valid;lambda;spartan_temp_c;spartan_status";
+  if (logCol(kLogColTune)) header += ";rpm;advance;map;tune_volt";
+  if (logCol(kLogColBm6)) header += ";bm6_volt;bm6_temp";
+  if (logCol(kLogColSpeed)) header += ";speed_kmh;speed_hz;speed_pulses";
+  if (logCol(kLogColHeater)) header += ";heater_v";
+  if (logCol(kLogColHours)) header += ";device_h;engine_h;sensor_h";
+  return header;
+}
+
+bool systemTimeValid()
+{
+  time_t now = time(nullptr);
+  return now > 1700000000;
+}
+
+String csvTimeText(uint32_t ms)
+{
+  if (!systemTimeValid()) {
+    return String("boot+") + String(static_cast<unsigned long>(ms)) + "ms";
+  }
+  time_t now = time(nullptr);
+  struct tm info;
+  localtime_r(&now, &info);
+  char buf[24];
+  strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &info);
+  return String(buf);
+}
+
 void ensureLogHeader()
 {
   if (!logFsReady) return;
+  const String expectedHeader = logHeader();
   bool needsHeader = !SPIFFS.exists(kLogFile);
   if (!needsHeader) {
     File existing = SPIFFS.open(kLogFile, FILE_READ);
     needsHeader = !existing || existing.size() == 0;
+    if (existing && existing.size() > 0) {
+      String firstLine = existing.readStringUntil('\n');
+      firstLine.trim();
+      if (firstLine != expectedHeader) {
+        existing.close();
+        SPIFFS.remove(kOldLogFile);
+        SPIFFS.rename(kLogFile, kOldLogFile);
+        needsHeader = true;
+      }
+    }
     if (existing) existing.close();
   }
   if (!needsHeader) return;
   File f = SPIFFS.open(kLogFile, FILE_WRITE);
   if (!f) return;
-  f.println(kLogHeader);
+  f.println(expectedHeader);
   f.close();
 }
 
@@ -778,37 +841,53 @@ void appendLiveCsv()
   File f = SPIFFS.open(kLogFile, FILE_APPEND);
   if (!f) return;
 
-  f.printf("%lu;%s;%u;%.3f;%u;%u;%.0f;%.1f;%.0f;%.1f;%.2f;%d;%.1f;%.2f;%lu;%.2f;%.2f;%.2f;%.2f\n",
+  const time_t epoch = systemTimeValid() ? time(nullptr) : 0;
+  f.printf("%lu;%lu;%s",
            static_cast<unsigned long>(now),
-           sourceTextC(spartan),
-           spartan.valid ? 1 : 0,
-           spartan.lambda,
-           spartan.temperatureC,
-           spartan.status,
-           tune.rpm,
-           tune.advance,
-           tune.map,
-           tune.voltage,
+           static_cast<unsigned long>(epoch),
+           csvTimeText(now).c_str());
+  if (logCol(kLogColSpartan)) {
+    f.printf(";%s;%u;%.3f;%u;%u",
+             sourceTextC(spartan),
+             spartan.valid ? 1 : 0,
+             spartan.lambda,
+             spartan.temperatureC,
+             spartan.status);
+  }
+  if (logCol(kLogColTune)) {
+    f.printf(";%.0f;%.1f;%.0f;%.1f",
+             tune.rpm,
+             tune.advance,
+             tune.map,
+             tune.voltage);
+  }
+  if (logCol(kLogColBm6)) {
 #if ENABLE_BM6
-           bm6Voltage,
-           static_cast<int>(bm6Temperature),
+    f.printf(";%.2f;%d", bm6Voltage, static_cast<int>(bm6Temperature));
 #else
-           0.0f,
-           0,
+    f.print(";0.00;0");
 #endif
+  }
+  if (logCol(kLogColSpeed)) {
 #if SPEED_REED_PIN >= 0
-           speedKmh,
-           speedHz,
-           static_cast<unsigned long>(speedPulseCount),
+    f.printf(";%.1f;%.2f;%lu",
+             speedKmh,
+             speedHz,
+             static_cast<unsigned long>(speedPulseCount));
 #else
-           0.0f,
-           0.0f,
-           0UL,
+    f.print(";0.0;0.00;0");
 #endif
-           heaterStatusVolts,
-           static_cast<double>(deviceSeconds) / 3600.0,
-           static_cast<double>(engineSeconds) / 3600.0,
-           static_cast<double>(sensorSeconds) / 3600.0);
+  }
+  if (logCol(kLogColHeater)) {
+    f.printf(";%.2f", heaterStatusVolts);
+  }
+  if (logCol(kLogColHours)) {
+    f.printf(";%.2f;%.2f;%.2f",
+             static_cast<double>(deviceSeconds) / 3600.0,
+             static_cast<double>(engineSeconds) / 3600.0,
+             static_cast<double>(sensorSeconds) / 3600.0);
+  }
+  f.println();
   f.close();
 }
 
@@ -1611,6 +1690,7 @@ void setupWebGui()
 {
 #if ENABLE_WEB_GUI
   ensurePreferences();
+  logColumnMask = networkPreferences.getUShort("log_cols", kLogColDefault);
   logFsReady = SPIFFS.begin(true);
   Serial.printf("Logs:        SPIFFS %s, current=%s, old=%s\n",
                 logFsReady ? "OK" : "FAIL",
@@ -1676,6 +1756,7 @@ h1 { font-size: 1.22rem; color: #9ed85b; margin: 4px 0 14px; }
 .row strong { text-align: right; }
 .setup { margin-top: 14px; padding: 16px; border: 1px solid #26372e; border-radius: 10px; background: #101a15; }
 input, select { display: block; box-sizing: border-box; width: 100%; min-height: 44px; margin: 8px 0 13px; padding: 12px; border: 1px solid #35453c; border-radius: 8px; background: #0b1210; color: #e6ede8; font-size: 1rem; }
+input[type="checkbox"] { display: inline-block; width: auto; min-height: 0; margin: 0 10px 0 0; transform: scale(1.25); }
 button { min-height: 44px; padding: 11px 14px; margin-right: 7px; border: 0; border-radius: 8px; background: #78ad43; color: #081005; font-weight: 700; font-size: .98rem; }
 button.secondary { background: #26372e; color: #e6ede8; }
 button.danger { background: #8b3c2e; color: #ffe8dc; }
@@ -1790,7 +1871,18 @@ details.setup > .inside { padding: 0 16px 16px; }
 <details class="setup">
 <summary>CSV Inhalt</summary>
 <div class="inside">
-<p class="hint">Spalten: ms, Quelle, Lambda, Spartan Temp/Status, 123 RPM/ADV/MAP, BM6, Speed, Heater und Betriebsstunden.</p>
+<p class="hint">Zeit ist immer Pflicht: ms, epoch und time. Wenn NTP noch fehlt, bleibt epoch 0 und time zeigt boot+ms.</p>
+<div class="row"><span>Zeit</span><strong id="logtime">-</strong></div>
+<form action="/log_columns" method="post">
+<label><input type="checkbox" name="spartan" id="colSpartan" value="1"> Spartan Lambda/Temp/Status</label>
+<label><input type="checkbox" name="tune" id="colTune" value="1"> 123 RPM/ADV/MAP/Volt</label>
+<label><input type="checkbox" name="bm6" id="colBm6" value="1"> BM6 Batterie</label>
+<label><input type="checkbox" name="speed" id="colSpeed" value="1"> Speed/Reed</label>
+<label><input type="checkbox" name="heater" id="colHeater" value="1"> Heater Analog</label>
+<label><input type="checkbox" name="hours" id="colHours" value="1"> Betriebsstunden</label>
+<button type="submit">Spalten speichern</button>
+</form>
+<p class="hint">Aendern der Spalten startet die Current-CSV neu, damit Header und Daten zusammenpassen.</p>
 </div>
 </details>
 </div><!-- /tab log -->
@@ -2005,6 +2097,14 @@ async function refresh() {
     document.getElementById('logstatus').textContent = d.log_ready ? 'bereit' : 'Dateisystem fehlt';
     document.getElementById('logcurrent').textContent = fmtBytes(d.log_current_bytes);
     document.getElementById('logold').textContent = fmtBytes(d.log_old_bytes);
+    document.getElementById('logtime').textContent = (d.time_valid ? 'NTP ' : 'Bootzeit ') + (d.time_text || '-');
+    const cols = Number(d.log_columns ?? 63);
+    document.getElementById('colSpartan').checked = !!(cols & 1);
+    document.getElementById('colTune').checked = !!(cols & 2);
+    document.getElementById('colBm6').checked = !!(cols & 4);
+    document.getElementById('colSpeed').checked = !!(cols & 8);
+    document.getElementById('colHeater').checked = !!(cols & 16);
+    document.getElementById('colHours').checked = !!(cols & 32);
     document.getElementById('ucmd').textContent = d.uart_command || '-';
     const ucmdAge = d.uart_age_ms ?? 0;
     const urspAge = d.uart_response_age_ms ?? 0;
@@ -2088,6 +2188,26 @@ setInterval(() => { if (!document.hidden) refresh(); }, 350);
       SPIFFS.remove(kLogFile);
       ensureLogHeader();
     }
+    server.sendHeader("Location", "/", true);
+    server.send(303, "text/plain", "");
+  });
+  server.on("/log_columns", HTTP_POST, []() {
+    uint16_t mask = 0;
+    if (server.hasArg("spartan")) mask |= kLogColSpartan;
+    if (server.hasArg("tune")) mask |= kLogColTune;
+    if (server.hasArg("bm6")) mask |= kLogColBm6;
+    if (server.hasArg("speed")) mask |= kLogColSpeed;
+    if (server.hasArg("heater")) mask |= kLogColHeater;
+    if (server.hasArg("hours")) mask |= kLogColHours;
+    if (mask == 0) mask = kLogColSpartan;
+    logColumnMask = mask;
+    ensurePreferences();
+    networkPreferences.putUShort("log_cols", logColumnMask);
+    if (logFsReady) {
+      SPIFFS.remove(kLogFile);
+      ensureLogHeader();
+    }
+    Serial.printf("Logs:        columns mask=0x%04X\n", logColumnMask);
     server.sendHeader("Location", "/", true);
     server.send(303, "text/plain", "");
   });
@@ -2259,6 +2379,11 @@ void updateWebGui()
       homeWifiDisabledForRoadAp = false;
       homeWifiConnectStartedMs = 0;
       Serial.printf("Home WiFi:   connected to '%s', http://%s/\n", WiFi.SSID().c_str(), WiFi.localIP().toString().c_str());
+      if (!ntpConfigured) {
+        configTzTime("CET-1CEST,M3.5.0,M10.5.0/3", "pool.ntp.org", "time.nist.gov");
+        ntpConfigured = true;
+        Serial.println("Time:        NTP requested");
+      }
     }
   }
   if (haveSavedWifi && !homeWifiDisabledForRoadAp && wifiStatus != WL_CONNECTED &&
