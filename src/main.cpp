@@ -13,7 +13,9 @@
 
 #if ENABLE_WEB_GUI
 #include <DNSServer.h>
+#include <FS.h>
 #include <Preferences.h>
+#include <SPIFFS.h>
 #include <WebServer.h>
 #include <WiFi.h>
 #endif
@@ -331,6 +333,16 @@ uint32_t homeWifiConnectStartedMs = 0;
 bool homeWifiDisabledForRoadAp = false;
 uint32_t lastApRetryMs = 0;
 uint32_t apRetryCount = 0;
+bool logFsReady = false;
+uint32_t lastCsvAppendMs = 0;
+const char *kLogFile = "/drive.csv";
+const char *kOldLogFile = "/drive_old.csv";
+const char *kLogHeader =
+    "ms;source;lambda_valid;lambda;spartan_temp_c;spartan_status;rpm;advance;map;"
+    "tune_volt;bm6_volt;bm6_temp;speed_kmh;speed_hz;speed_pulses;"
+    "heater_v;device_h;engine_h;sensor_h";
+const size_t kMaxLogBytes = 1200000;
+const uint32_t kLogIntervalMs = 500;
 #endif
 
 void ensurePreferences()
@@ -471,6 +483,13 @@ void storeReading(const SpartanReading &fresh)
   portEXIT_CRITICAL(&stateMux);
 }
 
+#if ENABLE_WEB_GUI
+String humanBytes(size_t bytes);
+size_t logFileSize(const char *path);
+void ensureLogHeader();
+void sendLogFile(const char *path, const char *downloadName);
+#endif
+
 #if ENABLE_BLE_HUB
 TuneSnapshot tuneSnapshot()
 {
@@ -603,6 +622,12 @@ String statusJson()
   json += WiFi.softAPIP().toString();
   json += "\",\"ap_retry_count\":";
   json += String(apRetryCount);
+  json += ",\"log_ready\":";
+  json += logFsReady ? "true" : "false";
+  json += ",\"log_current_bytes\":";
+  json += String(static_cast<unsigned long>(logFileSize(kLogFile)));
+  json += ",\"log_old_bytes\":";
+  json += String(static_cast<unsigned long>(logFileSize(kOldLogFile)));
 #endif
   json += ",\"uart_command\":\"";
   json += lastUartCommand;
@@ -677,6 +702,134 @@ String statusJson()
   json += "}";
   return json;
 }
+
+#if ENABLE_WEB_GUI
+String humanBytes(size_t bytes)
+{
+  if (bytes < 1024) return String(bytes) + " B";
+  if (bytes < 1024UL * 1024UL) return String(bytes / 1024.0f, 1) + " KB";
+  return String(bytes / (1024.0f * 1024.0f), 2) + " MB";
+}
+
+size_t logFileSize(const char *path)
+{
+  if (!logFsReady || !SPIFFS.exists(path)) return 0;
+  File f = SPIFFS.open(path, FILE_READ);
+  if (!f) return 0;
+  const size_t size = f.size();
+  f.close();
+  return size;
+}
+
+void ensureLogHeader()
+{
+  if (!logFsReady) return;
+  bool needsHeader = !SPIFFS.exists(kLogFile);
+  if (!needsHeader) {
+    File existing = SPIFFS.open(kLogFile, FILE_READ);
+    needsHeader = !existing || existing.size() == 0;
+    if (existing) existing.close();
+  }
+  if (!needsHeader) return;
+  File f = SPIFFS.open(kLogFile, FILE_WRITE);
+  if (!f) return;
+  f.println(kLogHeader);
+  f.close();
+}
+
+void rotateLogIfNeeded()
+{
+  if (!logFsReady || !SPIFFS.exists(kLogFile)) return;
+  File f = SPIFFS.open(kLogFile, FILE_READ);
+  const size_t size = f ? f.size() : 0;
+  if (f) f.close();
+  if (size < kMaxLogBytes) return;
+  SPIFFS.remove(kOldLogFile);
+  SPIFFS.rename(kLogFile, kOldLogFile);
+  ensureLogHeader();
+}
+
+bool shouldLogCsv(const SpartanReading &spartan, const TuneSnapshot &tune)
+{
+  if (tune.rpm > ENGINE_RUNNING_RPM_THRESHOLD) return true;
+#if SPEED_REED_PIN >= 0
+  if (speedKmh > 0.5f) return true;
+#endif
+  return spartan.valid;
+}
+
+void appendLiveCsv()
+{
+  if (!logFsReady) return;
+  const uint32_t now = millis();
+  if (now - lastCsvAppendMs < kLogIntervalMs) return;
+  lastCsvAppendMs = now;
+
+  const SpartanReading spartan = readingSnapshot();
+#if ENABLE_BLE_HUB
+  const TuneSnapshot tune = tuneSnapshot();
+#else
+  const TuneSnapshot tune;
+#endif
+  if (!shouldLogCsv(spartan, tune)) return;
+
+  rotateLogIfNeeded();
+  ensureLogHeader();
+  File f = SPIFFS.open(kLogFile, FILE_APPEND);
+  if (!f) return;
+
+  f.printf("%lu;%s;%u;%.3f;%u;%u;%.0f;%.1f;%.0f;%.1f;%.2f;%d;%.1f;%.2f;%lu;%.2f;%.2f;%.2f;%.2f\n",
+           static_cast<unsigned long>(now),
+           sourceTextC(spartan),
+           spartan.valid ? 1 : 0,
+           spartan.lambda,
+           spartan.temperatureC,
+           spartan.status,
+           tune.rpm,
+           tune.advance,
+           tune.map,
+           tune.voltage,
+#if ENABLE_BM6
+           bm6Voltage,
+           static_cast<int>(bm6Temperature),
+#else
+           0.0f,
+           0,
+#endif
+#if SPEED_REED_PIN >= 0
+           speedKmh,
+           speedHz,
+           static_cast<unsigned long>(speedPulseCount),
+#else
+           0.0f,
+           0.0f,
+           0UL,
+#endif
+           heaterStatusVolts,
+           static_cast<double>(deviceSeconds) / 3600.0,
+           static_cast<double>(engineSeconds) / 3600.0,
+           static_cast<double>(sensorSeconds) / 3600.0);
+  f.close();
+}
+
+void sendLogFile(const char *path, const char *downloadName)
+{
+  if (!logFsReady || !SPIFFS.exists(path)) {
+    server.send(404, "text/plain", "Logdatei nicht vorhanden.");
+    return;
+  }
+  File f = SPIFFS.open(path, FILE_READ);
+  if (!f) {
+    server.send(500, "text/plain", "Logdatei kann nicht geoeffnet werden.");
+    return;
+  }
+  server.sendHeader("Content-Disposition", String("attachment; filename=\"") + downloadName + "\"");
+  server.streamFile(f, "text/csv");
+  f.close();
+}
+#else
+void appendLiveCsv() {}
+#endif
 
 #if ENABLE_BLE_HUB
 int hexNibble(uint8_t c)
@@ -1458,6 +1611,12 @@ void setupWebGui()
 {
 #if ENABLE_WEB_GUI
   ensurePreferences();
+  logFsReady = SPIFFS.begin(true);
+  Serial.printf("Logs:        SPIFFS %s, current=%s, old=%s\n",
+                logFsReady ? "OK" : "FAIL",
+                humanBytes(logFileSize(kLogFile)).c_str(),
+                humanBytes(logFileSize(kOldLogFile)).c_str());
+  ensureLogHeader();
   const String savedSsid = networkPreferences.isKey("ssid") ? networkPreferences.getString("ssid", "") : "";
   const String savedPassword = networkPreferences.isKey("pass") ? networkPreferences.getString("pass", "") : "";
   savedWifiSsid = savedSsid;
@@ -1520,6 +1679,7 @@ input, select { display: block; box-sizing: border-box; width: 100%; min-height:
 button { min-height: 44px; padding: 11px 14px; margin-right: 7px; border: 0; border-radius: 8px; background: #78ad43; color: #081005; font-weight: 700; font-size: .98rem; }
 button.secondary { background: #26372e; color: #e6ede8; }
 button.danger { background: #8b3c2e; color: #ffe8dc; }
+.buttonlink { display: block; box-sizing: border-box; min-height: 44px; padding: 12px 14px; border-radius: 8px; background: #78ad43; color: #081005; font-weight: 700; text-align: center; text-decoration: none; }
 .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .grid button { width: 100%; margin: 0; }
 .hint { color: #9ca99f; font-size: .92rem; margin-top: 12px; line-height: 1.45; }
@@ -1532,10 +1692,6 @@ button.danger { background: #8b3c2e; color: #ffe8dc; }
 .metric span { display: block; color: #9ca99f; font-size: .78rem; }
 .metric strong { display: block; margin-top: 5px; font-size: 1.35rem; color: #e6ede8; overflow-wrap: anywhere; }
 .metric.wide { grid-column: 1 / -1; }
-.cards { display: grid; grid-template-columns: repeat(auto-fit,minmax(220px,1fr)); gap: 10px; margin-top: 14px; }
-.mini { padding: 12px; border: 1px solid #26372e; border-radius: 8px; background: #0d1712; }
-.mini h3 { margin: 0 0 8px; font-size: 1rem; color: #bde87a; }
-canvas { width: 100%; height: 78px; background: #08100c; border-radius: 10px; }
 pre { white-space: pre-wrap; max-height: 220px; overflow: auto; padding: 12px; background: #08100c; border-radius: 10px; }
 .tabs { display: flex; gap: 8px; margin: 4px 0 14px; position: sticky; top: 0; padding-top: 6px; padding-bottom: 6px; background: #0b1210; z-index: 10; }
 .tab { flex: 1; padding: 14px 18px; border-radius: 10px; background: #1a2922; color: #cbeaa7; font-weight: 700; cursor: pointer; }
@@ -1578,11 +1734,6 @@ details.setup > .inside { padding: 0 16px 16px; }
 <div class="metric"><span>Sonde h</span><strong id="liveHours">0.00</strong></div>
 </div>
 <p class="hint">Messstelle hinten im Auspuff: Lambda kann bei Falschluft magerer wirken als der Motor wirklich laeuft.</p>
-</div>
-<div class="cards">
-<div class="mini"><h3>Lambda 60s</h3><canvas id="chartLambda" width="320" height="78"></canvas></div>
-<div class="mini"><h3>RPM 60s</h3><canvas id="chartRpm" width="320" height="78"></canvas></div>
-<div class="mini"><h3>Temp 60s</h3><canvas id="chartTemp" width="320" height="78"></canvas></div>
 </div>
 <details class="setup">
 <summary>123Tune BLE Diagnose</summary>
@@ -1636,6 +1787,20 @@ details.setup > .inside { padding: 0 16px 16px; }
 <pre id="jsondump">{}</pre>
 </div>
 </details>
+</div>
+</details>
+<details class="setup" open>
+<summary>Logbuch</summary>
+<div class="inside">
+<p class="hint">Schreibt CSV ins ESP32-Dateisystem, wenn Motor/Daten aktiv sind. Current ist die laufende Datei, Last ist die vorige rotierte Datei.</p>
+<div class="row"><span>Status</span><strong id="logstatus">-</strong></div>
+<div class="row"><span>Current</span><strong id="logcurrent">0 B</strong></div>
+<div class="row"><span>Last rotated</span><strong id="logold">0 B</strong></div>
+<div class="grid">
+<a href="/download" class="buttonlink">Current CSV</a>
+<a href="/download_old" class="buttonlink">Last CSV</a>
+</div>
+<form action="/clear" method="post" style="margin-top:12px"><button class="secondary" type="submit">Current Log loeschen</button></form>
 </div>
 </details>
 <details class="setup" open>
@@ -1753,7 +1918,6 @@ details.setup > .inside { padding: 0 16px 16px; }
 <p class="hint">Aktuell ist der Bring-up-Modus aktiv. DEMO-Werte pruefen Display und Web-GUI, bis der CAN-Transceiver angeschlossen ist.</p>
 </div><!-- /tab setup -->
 <script>
-const hist = {lambda:[], rpm:[], temp:[]};
 let lastJson = {};
 function showTab(name) {
   document.querySelectorAll('.tab-section').forEach(s => {
@@ -1796,26 +1960,11 @@ document.querySelectorAll('form[data-async=\"uart\"]').forEach((form) => {
   });
 });
 function cls(el, state) { el.className = state; }
-function pushHist(name, value) {
-  const a = hist[name];
-  a.push(Number(value) || 0);
-  while (a.length > 170) a.shift();
-}
-function draw(id, data, color) {
-  const c = document.getElementById(id), x = c.getContext('2d'), w = c.width, h = c.height;
-  x.clearRect(0,0,w,h);
-  x.strokeStyle = '#26372e'; x.lineWidth = 1;
-  for (let i=1;i<4;i++) { x.beginPath(); x.moveTo(0,i*h/4); x.lineTo(w,i*h/4); x.stroke(); }
-  if (!data.length) return;
-  let min = Math.min(...data), max = Math.max(...data);
-  if (max - min < 0.01) { max += 0.01; min -= 0.01; }
-  x.strokeStyle = color; x.lineWidth = 2; x.beginPath();
-  data.forEach((v,i) => {
-    const px = data.length === 1 ? w : i * w / (data.length - 1);
-    const py = h - ((v - min) / (max - min)) * (h - 8) - 4;
-    if (i === 0) x.moveTo(px, py); else x.lineTo(px, py);
-  });
-  x.stroke();
+function fmtBytes(n) {
+  n = Number(n || 0);
+  if (n < 1024) return n + ' B';
+  if (n < 1048576) return (n / 1024).toFixed(1) + ' KB';
+  return (n / 1048576).toFixed(2) + ' MB';
 }
 async function copyJson() {
   try { await navigator.clipboard.writeText(JSON.stringify(lastJson, null, 2)); } catch(e) {}
@@ -1843,6 +1992,9 @@ async function refresh() {
     document.getElementById('lanip').textContent = d.wifi_connected ? d.wifi_ip : '-';
     document.getElementById('wifisaved').textContent = d.wifi_saved_ssid || '-';
     document.getElementById('liveWifiMeta').textContent = d.wifi_connected ? ((d.wifi_ssid || '-') + ' / ' + (d.wifi_ip || '-')) : ('AP ' + (d.ap_ip || '-'));
+    document.getElementById('logstatus').textContent = d.log_ready ? 'bereit' : 'Dateisystem fehlt';
+    document.getElementById('logcurrent').textContent = fmtBytes(d.log_current_bytes);
+    document.getElementById('logold').textContent = fmtBytes(d.log_old_bytes);
     document.getElementById('ucmd').textContent = d.uart_command || '-';
     const ucmdAge = d.uart_age_ms ?? 0;
     const urspAge = d.uart_response_age_ms ?? 0;
@@ -1902,12 +2054,6 @@ async function refresh() {
       if (ctlTrim && document.activeElement !== ctlTrim) ctlTrim.value = d.speed_trim_permil ?? 1000;
     }
     document.getElementById('jsondump').textContent = JSON.stringify(d, null, 2);
-    pushHist('lambda', d.lambda);
-    pushHist('rpm', d.rpm);
-    pushHist('temp', d.temperature);
-    draw('chartLambda', hist.lambda, '#9ed85b');
-    draw('chartRpm', hist.rpm, '#4cc9f0');
-    draw('chartTemp', hist.temp, '#ffd166');
   } catch (e) {}
 }
 refresh();
@@ -1925,6 +2071,16 @@ setInterval(() => { if (!document.hidden) refresh(); }, 350);
   server.on("/hotspot-detect.html", []() { server.send(200, "text/html", "<html><body>Success</body></html>"); });
   server.on("/ncsi.txt", []() { server.send(200, "text/plain", "Microsoft NCSI"); });
   server.on("/connecttest.txt", []() { server.send(200, "text/plain", "Microsoft Connect Test"); });
+  server.on("/download", HTTP_GET, []() { sendLogFile(kLogFile, "spartan_hub_drive.csv"); });
+  server.on("/download_old", HTTP_GET, []() { sendLogFile(kOldLogFile, "spartan_hub_drive_old.csv"); });
+  server.on("/clear", HTTP_POST, []() {
+    if (logFsReady) {
+      SPIFFS.remove(kLogFile);
+      ensureLogHeader();
+    }
+    server.sendHeader("Location", "/", true);
+    server.send(303, "text/plain", "");
+  });
 #if SPEED_REED_PIN >= 0
   server.on("/speed", HTTP_POST, []() {
     long tire = server.arg("tire").toInt();
@@ -2496,6 +2652,7 @@ void loop()
   updateUart();
   updateSpeedReed();
   updateHourmeters();
+  appendLiveCsv();
   updateWebGui();
   updateBleHub();
   updateDisplay();
