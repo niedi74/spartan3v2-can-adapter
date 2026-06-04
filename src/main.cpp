@@ -1799,6 +1799,7 @@ details.setup > .inside { padding: 0 16px 16px; }
 <h1>SPARTAN 3 v2 Motorraum Hub</h1>
 <div class="tabs">
 <button type="button" id="tabLive" class="tab on" onclick="showTab('live')">Live</button>
+<button type="button" id="tabDiag" class="tab" onclick="showTab('diag')">Diagnose</button>
 <button type="button" id="tabLog" class="tab" onclick="showTab('log')">Log</button>
 <button type="button" id="tabSetup" class="tab" onclick="showTab('setup')">Setup</button>
 </div>
@@ -1812,11 +1813,15 @@ details.setup > .inside { padding: 0 16px 16px; }
 <div class="metric"><span>Temp</span><strong id="temp">- C</strong></div>
 <div class="metric"><span>Speed</span><strong id="liveSpeed">0.0 km/h</strong></div>
 <div class="metric wide"><span>123 RPM / ADV / MAP</span><strong id="main123">0 / 0.0 / 0</strong></div>
+<div class="metric"><span>123 BLE</span><strong id="liveTuneConn">scan</strong></div>
 <div class="metric"><span>BM6</span><strong id="liveBm6">- V</strong></div>
+<div class="metric"><span>BM6 BLE</span><strong id="liveBm6Conn">scan</strong></div>
 <div class="metric"><span>Sonde h</span><strong id="liveHours">0.00</strong></div>
 </div>
 <p class="hint">Messstelle hinten im Auspuff: Lambda kann bei Falschluft magerer wirken als der Motor wirklich laeuft.</p>
 </div>
+</div><!-- /tab live -->
+<div class="tab-section" data-tab="diag" hidden>
 <details class="setup">
 <summary>123Tune BLE Diagnose</summary>
 <div class="inside">
@@ -1852,7 +1857,7 @@ details.setup > .inside { padding: 0 16px 16px; }
 <div class="row"><span>Geraet / Motor / Sonde</span><strong id="liveHoursMeta">0 / 0 / 0 h</strong></div>
 </div>
 </details>
-</div><!-- /tab live -->
+</div><!-- /tab diag -->
 <div class="tab-section" data-tab="log" hidden>
 <details class="setup" open>
 <summary>Logbuch</summary>
@@ -2025,13 +2030,14 @@ function showTab(name) {
     s.hidden = s.dataset.tab !== name;
   });
   document.getElementById('tabLive').classList.toggle('on', name === 'live');
+  document.getElementById('tabDiag').classList.toggle('on', name === 'diag');
   document.getElementById('tabLog').classList.toggle('on', name === 'log');
   document.getElementById('tabSetup').classList.toggle('on', name === 'setup');
   try { localStorage.setItem('spartanTab', name); } catch (e) {}
 }
 try {
   const saved = localStorage.getItem('spartanTab');
-  if (saved === 'setup' || saved === 'log') showTab(saved);
+  if (saved === 'setup' || saved === 'log' || saved === 'diag') showTab(saved);
 } catch (e) {}
 document.getElementById('tunePreset').addEventListener('change', (e) => {
   document.getElementById('tune_mac').value = e.target.value || '';
@@ -2120,6 +2126,8 @@ async function refresh() {
     document.getElementById('uage').textContent = Math.round(ucmdAge) + ' ms / ' + (uartResp ? Math.round(urspAge) + ' ms' : '-');
     document.getElementById('tconn').textContent = d.tune_connected ? 'verbunden' : 'scan/retry';
     cls(document.getElementById('tconn'), d.tune_connected ? 'ok' : 'warn');
+    document.getElementById('liveTuneConn').textContent = d.tune_connected ? 'verbunden' : 'scan';
+    cls(document.getElementById('liveTuneConn'), d.tune_connected ? 'ok' : 'warn');
     document.getElementById('trx').textContent = d.tune_rx ?? 0;
     document.getElementById('tage').textContent = (d.tune_age_ms ?? 0) + ' ms';
     document.getElementById('tscan').textContent = (d.tune_scan_seen ?? 0) + ' / ' + (d.tune_scan_candidates ?? 0);
@@ -2138,6 +2146,8 @@ async function refresh() {
     document.getElementById('apdiag').textContent = (d.ap_ip || '-') + ' / ' + (d.ap_retry_count ?? 0);
     document.getElementById('bm6conn').textContent = d.bm6_connected ? 'verbunden' : 'scan/retry';
     cls(document.getElementById('bm6conn'), d.bm6_connected ? 'ok' : 'warn');
+    document.getElementById('liveBm6Conn').textContent = d.bm6_connected ? 'verbunden' : 'scan';
+    cls(document.getElementById('liveBm6Conn'), d.bm6_connected ? 'ok' : 'warn');
     document.getElementById('bm6volt').textContent = Number(d.bm6_voltage ?? 0).toFixed(2) + ' V';
     document.getElementById('liveBm6').textContent = Number(d.bm6_voltage ?? 0).toFixed(2) + ' V';
     document.getElementById('bm6temp').textContent = (d.bm6_temperature ?? 0) + ' C';
