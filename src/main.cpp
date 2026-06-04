@@ -1718,6 +1718,7 @@ details.setup > .inside { padding: 0 16px 16px; }
 <h1>SPARTAN 3 v2 Motorraum Hub</h1>
 <div class="tabs">
 <button type="button" id="tabLive" class="tab on" onclick="showTab('live')">Live</button>
+<button type="button" id="tabLog" class="tab" onclick="showTab('log')">Log</button>
 <button type="button" id="tabSetup" class="tab" onclick="showTab('setup')">Setup</button>
 </div>
 <div class="tab-section" data-tab="live">
@@ -1771,6 +1772,28 @@ details.setup > .inside { padding: 0 16px 16px; }
 </div>
 </details>
 </div><!-- /tab live -->
+<div class="tab-section" data-tab="log" hidden>
+<details class="setup" open>
+<summary>Logbuch</summary>
+<div class="inside">
+<p class="hint">Schreibt CSV ins ESP32-Dateisystem, wenn Motor/Daten aktiv sind. Current ist die laufende Datei, Last ist die vorige rotierte Datei.</p>
+<div class="row"><span>Status</span><strong id="logstatus">-</strong></div>
+<div class="row"><span>Current</span><strong id="logcurrent">0 B</strong></div>
+<div class="row"><span>Last rotated</span><strong id="logold">0 B</strong></div>
+<div class="grid">
+<a href="/download" class="buttonlink">Current CSV</a>
+<a href="/download_old" class="buttonlink">Last CSV</a>
+</div>
+<form action="/clear" method="post" style="margin-top:12px"><button class="secondary" type="submit">Current Log loeschen</button></form>
+</div>
+</details>
+<details class="setup">
+<summary>CSV Inhalt</summary>
+<div class="inside">
+<p class="hint">Spalten: ms, Quelle, Lambda, Spartan Temp/Status, 123 RPM/ADV/MAP, BM6, Speed, Heater und Betriebsstunden.</p>
+</div>
+</details>
+</div><!-- /tab log -->
 <div class="tab-section" data-tab="setup" hidden>
 <details class="setup" open>
 <summary>System Diagnose</summary>
@@ -1787,20 +1810,6 @@ details.setup > .inside { padding: 0 16px 16px; }
 <pre id="jsondump">{}</pre>
 </div>
 </details>
-</div>
-</details>
-<details class="setup" open>
-<summary>Logbuch</summary>
-<div class="inside">
-<p class="hint">Schreibt CSV ins ESP32-Dateisystem, wenn Motor/Daten aktiv sind. Current ist die laufende Datei, Last ist die vorige rotierte Datei.</p>
-<div class="row"><span>Status</span><strong id="logstatus">-</strong></div>
-<div class="row"><span>Current</span><strong id="logcurrent">0 B</strong></div>
-<div class="row"><span>Last rotated</span><strong id="logold">0 B</strong></div>
-<div class="grid">
-<a href="/download" class="buttonlink">Current CSV</a>
-<a href="/download_old" class="buttonlink">Last CSV</a>
-</div>
-<form action="/clear" method="post" style="margin-top:12px"><button class="secondary" type="submit">Current Log loeschen</button></form>
 </div>
 </details>
 <details class="setup" open>
@@ -1924,12 +1933,13 @@ function showTab(name) {
     s.hidden = s.dataset.tab !== name;
   });
   document.getElementById('tabLive').classList.toggle('on', name === 'live');
+  document.getElementById('tabLog').classList.toggle('on', name === 'log');
   document.getElementById('tabSetup').classList.toggle('on', name === 'setup');
   try { localStorage.setItem('spartanTab', name); } catch (e) {}
 }
 try {
   const saved = localStorage.getItem('spartanTab');
-  if (saved === 'setup') showTab('setup');
+  if (saved === 'setup' || saved === 'log') showTab(saved);
 } catch (e) {}
 document.getElementById('tunePreset').addEventListener('change', (e) => {
   document.getElementById('tune_mac').value = e.target.value || '';
