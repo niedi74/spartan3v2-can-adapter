@@ -182,6 +182,7 @@ namespace {
 constexpr uint8_t kDisplayRows = 2;
 #else
 LiquidCrystal_I2C lcd(LCD_I2C_ADDR, LCD_COLS, LCD_ROWS);
+bool lcdReady = false;
 #endif
 
 constexpr uint32_t kDisplayIntervalMs = 200;
@@ -298,6 +299,17 @@ volatile uint8_t bleClientCount = 0;
 String bleAddress = "";
 bool bleAdvertisingStarted = false;
 uint32_t bleHubSetupMs = 0;
+struct BleHubClient {
+  String address;
+  String idAddress;
+  uint16_t handle = 0;
+  uint16_t mtu = 0;
+  uint16_t intervalMs10 = 0;
+  uint32_t connectedMs = 0;
+};
+constexpr uint8_t kBleHubClientMax = 4;
+BleHubClient bleHubClients[kBleHubClientMax];
+uint8_t bleHubClientCount = 0;
 NimBLEClient *tuneClient = nullptr;
 NimBLERemoteCharacteristic *tuneNusRx = nullptr;
 NimBLEAddress tuneTargetAddress;
@@ -308,6 +320,17 @@ uint32_t tuneLastPingMs = 0;
 uint32_t tuneScanSeen = 0;
 uint32_t tuneScanCandidates = 0;
 String tuneSavedAddress = "";
+struct BleScanDevice {
+  String address;
+  String name;
+  int rssi = 0;
+  bool tuneLike = false;
+  bool bm6Like = false;
+  uint32_t seenMs = 0;
+};
+constexpr uint8_t kBleScanDeviceMax = 12;
+BleScanDevice bleScanDevices[kBleScanDeviceMax];
+uint8_t bleScanDeviceCount = 0;
 #if ENABLE_BM6
 NimBLEClient *bm6Client = nullptr;
 NimBLERemoteCharacteristic *bm6WriteChar = nullptr;
@@ -370,6 +393,56 @@ String normalizeMacInput(const String &raw)
   return mac;
 }
 
+String jsonEscape(const String &raw)
+{
+  String out;
+  out.reserve(raw.length() + 4);
+  for (size_t i = 0; i < raw.length(); i++) {
+    const char c = raw[i];
+    if (c == '\\' || c == '"') {
+      out += '\\';
+      out += c;
+    } else if (c >= 0x20) {
+      out += c;
+    }
+  }
+  return out;
+}
+
+#if ENABLE_BLE_HUB
+void recordBleScanDevice(const NimBLEAdvertisedDevice *device, bool tuneLike, bool bm6Like)
+{
+  String address = device->getAddress().toString().c_str();
+  address.toLowerCase();
+  String name = device->getName().c_str();
+  const int rssi = device->getRSSI();
+  const uint32_t now = millis();
+
+  uint8_t slot = bleScanDeviceCount;
+  for (uint8_t i = 0; i < bleScanDeviceCount; i++) {
+    if (bleScanDevices[i].address == address) {
+      slot = i;
+      break;
+    }
+  }
+  if (slot >= kBleScanDeviceMax) {
+    slot = 0;
+    for (uint8_t i = 1; i < bleScanDeviceCount; i++) {
+      if (bleScanDevices[i].seenMs < bleScanDevices[slot].seenMs) slot = i;
+    }
+  } else if (slot == bleScanDeviceCount) {
+    bleScanDeviceCount++;
+  }
+
+  bleScanDevices[slot].address = address;
+  bleScanDevices[slot].name = name;
+  bleScanDevices[slot].rssi = rssi;
+  bleScanDevices[slot].tuneLike = bleScanDevices[slot].tuneLike || tuneLike;
+  bleScanDevices[slot].bm6Like = bleScanDevices[slot].bm6Like || bm6Like;
+  bleScanDevices[slot].seenMs = now;
+}
+#endif
+
 bool looksLikeMacAddress(const String &mac)
 {
   if (mac.length() != 17) return false;
@@ -409,6 +482,9 @@ void displayLine(uint8_t row, const String &text)
   M5.Display.setCursor(10, y + 8);
   M5.Display.print(text);
 #else
+  if (!lcdReady) {
+    return;
+  }
   if (row >= LCD_ROWS) {
     return;
   }
@@ -430,6 +506,16 @@ void setupDisplay()
   M5.Display.clear(BLACK);
 #else
   Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
+  Wire.beginTransmission(LCD_I2C_ADDR);
+  const uint8_t lcdProbe = Wire.endTransmission();
+  if (lcdProbe != 0) {
+    Serial.printf("LCD:         not found at 0x%02X (I2C err=%u), display disabled\n",
+                  LCD_I2C_ADDR,
+                  lcdProbe);
+    lcdReady = false;
+    return;
+  }
+  lcdReady = true;
   lcd.init();
   lcd.backlight();
   lcd.clear();
@@ -525,6 +611,43 @@ uint8_t getBleClientCount()
   portEXIT_CRITICAL(&stateMux);
   return count;
 }
+
+void addBleHubClient(const NimBLEConnInfo &connInfo)
+{
+  const uint16_t handle = connInfo.getConnHandle();
+  uint8_t slot = bleHubClientCount;
+  for (uint8_t i = 0; i < bleHubClientCount; i++) {
+    if (bleHubClients[i].handle == handle) {
+      slot = i;
+      break;
+    }
+  }
+  if (slot >= kBleHubClientMax) {
+    slot = 0;
+  } else if (slot == bleHubClientCount) {
+    bleHubClientCount++;
+  }
+  bleHubClients[slot].address = connInfo.getAddress().toString().c_str();
+  bleHubClients[slot].address.toLowerCase();
+  bleHubClients[slot].idAddress = connInfo.getIdAddress().toString().c_str();
+  bleHubClients[slot].idAddress.toLowerCase();
+  bleHubClients[slot].handle = handle;
+  bleHubClients[slot].mtu = connInfo.getMTU();
+  bleHubClients[slot].intervalMs10 = static_cast<uint16_t>(connInfo.getConnInterval() * 125 / 10);
+  bleHubClients[slot].connectedMs = millis();
+}
+
+void removeBleHubClient(uint16_t handle)
+{
+  for (uint8_t i = 0; i < bleHubClientCount; i++) {
+    if (bleHubClients[i].handle != handle) continue;
+    for (uint8_t j = i + 1; j < bleHubClientCount; j++) {
+      bleHubClients[j - 1] = bleHubClients[j];
+    }
+    bleHubClientCount--;
+    return;
+  }
+}
 #endif
 
 void sendSpartanUartCommand(const String &command)
@@ -613,7 +736,41 @@ String statusJson()
   json += BLE_HUB_NAME;
   json += "\",\"ble_address\":\"";
   json += bleAddress;
-  json += "\"";
+  json += "\",\"ble_hub_clients\":[";
+  for (uint8_t i = 0; i < bleHubClientCount; i++) {
+    if (i > 0) json += ",";
+    json += "{\"addr\":\"";
+    json += bleHubClients[i].address;
+    json += "\",\"id_addr\":\"";
+    json += bleHubClients[i].idAddress;
+    json += "\",\"handle\":";
+    json += String(bleHubClients[i].handle);
+    json += ",\"mtu\":";
+    json += String(bleHubClients[i].mtu);
+    json += ",\"interval_ms\":";
+    json += String(static_cast<float>(bleHubClients[i].intervalMs10) / 10.0f, 1);
+    json += ",\"age_ms\":";
+    json += String(now - bleHubClients[i].connectedMs);
+    json += "}";
+  }
+  json += "],\"ble_scan\":[";
+  for (uint8_t i = 0; i < bleScanDeviceCount; i++) {
+    if (i > 0) json += ",";
+    json += "{\"addr\":\"";
+    json += bleScanDevices[i].address;
+    json += "\",\"name\":\"";
+    json += jsonEscape(bleScanDevices[i].name);
+    json += "\",\"rssi\":";
+    json += String(bleScanDevices[i].rssi);
+    json += ",\"age_ms\":";
+    json += String(now - bleScanDevices[i].seenMs);
+    json += ",\"tune\":";
+    json += bleScanDevices[i].tuneLike ? "true" : "false";
+    json += ",\"bm6\":";
+    json += bleScanDevices[i].bm6Like ? "true" : "false";
+    json += "}";
+  }
+  json += "]";
 #endif
 #if ENABLE_WEB_GUI
   json += ",\"wifi_saved\":";
@@ -862,7 +1019,7 @@ void appendLiveCsv()
              tune.voltage);
   }
   if (logCol(kLogColBm6)) {
-#if ENABLE_BM6
+#if ENABLE_BLE_HUB && ENABLE_BM6
     f.printf(";%.2f;%d", bm6Voltage, static_cast<int>(bm6Temperature));
 #else
     f.print(";0.00;0");
@@ -999,26 +1156,35 @@ String bleStatusPayload()
 
 class BleServerCallbacks : public NimBLEServerCallbacks {
  public:
-  void onConnect(NimBLEServer *, NimBLEConnInfo &) override
+  void onConnect(NimBLEServer *, NimBLEConnInfo &connInfo) override
   {
+    addBleHubClient(connInfo);
     portENTER_CRITICAL(&stateMux);
     if (bleClientCount < UINT8_MAX) {
       bleClientCount++;
     }
     const uint8_t clients = bleClientCount;
     portEXIT_CRITICAL(&stateMux);
-    Serial.printf("BLE hub:     client connected, count=%u\n", clients);
+    Serial.printf("BLE hub:     client connected %s handle=%u mtu=%u count=%u\n",
+                  connInfo.getAddress().toString().c_str(),
+                  connInfo.getConnHandle(),
+                  connInfo.getMTU(),
+                  clients);
   }
 
-  void onDisconnect(NimBLEServer *, NimBLEConnInfo &, int) override
+  void onDisconnect(NimBLEServer *, NimBLEConnInfo &connInfo, int) override
   {
+    removeBleHubClient(connInfo.getConnHandle());
     portENTER_CRITICAL(&stateMux);
     if (bleClientCount > 0) {
       bleClientCount--;
     }
     const uint8_t clients = bleClientCount;
     portEXIT_CRITICAL(&stateMux);
-    Serial.printf("BLE hub:     client disconnected, count=%u\n", clients);
+    Serial.printf("BLE hub:     client disconnected %s handle=%u count=%u\n",
+                  connInfo.getAddress().toString().c_str(),
+                  connInfo.getConnHandle(),
+                  clients);
     if (bleAdvertisingStarted) {
       NimBLEDevice::startAdvertising();
     }
@@ -1085,6 +1251,7 @@ class TuneScanCallbacks : public NimBLEScanCallbacks {
     const bool savedAddressMatches = tuneSavedAddress.length() > 0 && address == tuneSavedAddress;
     const bool advertisesNus = device->isAdvertisingService(NimBLEUUID(kTuneNusServiceUuid));
     const bool nameLooksLikeTune = name.indexOf("123") >= 0 || name.indexOf("tune") >= 0 || name.indexOf("raytac") >= 0;
+    recordBleScanDevice(device, advertisesNus || nameLooksLikeTune || addressMatches || savedAddressMatches, false);
     if (!addressMatches && !savedAddressMatches && !(advertisesNus && nameLooksLikeTune)) {
       return;
     }
@@ -1390,6 +1557,11 @@ class Bm6ScanCallbacks : public NimBLEScanCallbacks {
   {
     String addr = device->getAddress().toString().c_str();
     addr.toLowerCase();
+    String name = device->getName().c_str();
+    name.toLowerCase();
+    const bool bm6Like = addr == bm6SavedAddress || addr == kBm6TargetAddress ||
+                         name.indexOf("bm6") >= 0 || name.indexOf("battery") >= 0;
+    recordBleScanDevice(device, false, bm6Like);
     if (addr != bm6SavedAddress && addr != kBm6TargetAddress) return;
     bm6TargetAddress = device->getAddress();
     if (bm6SavedAddress != addr) {
@@ -1857,6 +2029,20 @@ details.setup > .inside { padding: 0 16px 16px; }
 <div class="row"><span>Geraet / Motor / Sonde</span><strong id="liveHoursMeta">0 / 0 / 0 h</strong></div>
 </div>
 </details>
+<details class="setup" open>
+<summary>BLE Hub Clients</summary>
+<div class="inside">
+<p class="hint">Geraete, die sich mit dem ESP32-S3 als Spartan3-Hub verbinden, z.B. M5 Dial oder Waveshare-Display.</p>
+<div class="row"><span>Status</span><strong id="bleenabled">-</strong></div>
+<div class="row"><span>Name</span><strong id="blename" class="mono">-</strong></div>
+<div class="row"><span>Adresse</span><strong id="bleaddr" class="mono">-</strong></div>
+<div class="row"><span>Clients</span><strong id="bleclients">0</strong></div>
+<div class="row"><span>Client-Liste</span><strong id="blehubclients" class="mono">-</strong></div>
+<div class="row"><span>Service</span><strong class="mono">7f510001-5a6b-4d2a-9f20-14a7f3e20000</strong></div>
+<div class="row"><span>Status Notify</span><strong class="mono">7f510002-5a6b-4d2a-9f20-14a7f3e20000</strong></div>
+<div class="row"><span>Command Write</span><strong class="mono">7f510003-5a6b-4d2a-9f20-14a7f3e20000</strong></div>
+</div>
+</details>
 </div><!-- /tab diag -->
 <div class="tab-section" data-tab="log" hidden>
 <details class="setup" open>
@@ -1925,20 +2111,6 @@ details.setup > .inside { padding: 0 16px 16px; }
 </form>
 </div>
 </details>
-<details class="setup">
-<summary>BLE Hub / Gateway</summary>
-<div class="inside">
-<p class="hint">Fuer M5/Waveshare Gateway-Modus. Der M5 scannt nach Name + Service UUID; die Adresse ist nur Debug/Fast-Reconnect.</p>
-<p class="hint">Road-AP: Handy mit <span class="mono">Spartan3-Setup</span> verbinden. Spartan ist <a class="mono" href="http://192.168.4.1/">192.168.4.1</a>, M5 Dial ist <a class="mono" href="http://192.168.4.2/">192.168.4.2</a>.</p>
-<div class="row"><span>Status</span><strong id="bleenabled">-</strong></div>
-<div class="row"><span>Name</span><strong id="blename" class="mono">-</strong></div>
-<div class="row"><span>Adresse</span><strong id="bleaddr" class="mono">-</strong></div>
-<div class="row"><span>Clients</span><strong id="bleclients">0</strong></div>
-<div class="row"><span>Service</span><strong class="mono">7f510001-5a6b-4d2a-9f20-14a7f3e20000</strong></div>
-<div class="row"><span>Status Notify</span><strong class="mono">7f510002-5a6b-4d2a-9f20-14a7f3e20000</strong></div>
-<div class="row"><span>Command Write</span><strong class="mono">7f510003-5a6b-4d2a-9f20-14a7f3e20000</strong></div>
-</div>
-</details>
 <details class="setup" open>
 <summary>WLAN / Hotspot</summary>
 <div class="inside">
@@ -1976,11 +2148,14 @@ details.setup > .inside { padding: 0 16px 16px; }
 <form action="/bm6_target" method="post">
 <label for="bm6Preset">BM6 Profil</label><select id="bm6Preset">
 <option value="">Manuell</option>
+<option value="3c:ab:72:7f:d0:bc">BM6 #1 3c:ab:72:7f:d0:bc</option>
 <option value="3c:ab:72:80:06:6a">BM6 #1 3c:ab:72:80:06:6a</option>
 </select>
 <label for="bm6_mac">BM6 BLE-Adresse</label><input id="bm6_mac" name="bm6_mac" placeholder="aa:bb:cc:dd:ee:ff">
 <button type="submit">BM6 Ziel speichern</button>
 </form>
+<div class="row"><span>Scanliste</span><strong id="blescancount">-</strong></div>
+<div id="blescan" class="mono"></div>
 </div>
 </details>
 <details class="setup">
@@ -2045,6 +2220,25 @@ document.getElementById('tunePreset').addEventListener('change', (e) => {
 document.getElementById('bm6Preset').addEventListener('change', (e) => {
   document.getElementById('bm6_mac').value = e.target.value || '';
 });
+async function saveBleTarget(kind, addr) {
+  const isBm6 = kind === 'bm6';
+  const target = isBm6 ? 'bm6_mac' : 'tune_mac';
+  const endpoint = isBm6 ? '/bm6_target' : '/ble_target';
+  const field = isBm6 ? 'bm6_mac' : 'tune_mac';
+  const input = document.getElementById(target);
+  input.value = addr;
+  try {
+    const fd = new FormData();
+    fd.set(field, addr);
+    await fetch(endpoint, { method: 'POST', body: fd, cache: 'no-store' });
+    await refresh();
+  } catch (err) {}
+}
+document.getElementById('blescan').addEventListener('click', (e) => {
+  const btn = e.target.closest('button[data-addr]');
+  if (!btn) return;
+  saveBleTarget(btn.dataset.kind, btn.dataset.addr);
+});
 document.getElementById('wifiPreset').addEventListener('change', (e) => {
   const option = e.target.selectedOptions[0];
   const ssid = option.value || '';
@@ -2074,6 +2268,32 @@ function fmtBytes(n) {
   if (n < 1048576) return (n / 1024).toFixed(1) + ' KB';
   return (n / 1048576).toFixed(2) + ' MB';
 }
+function escHtml(v) {
+  return String(v ?? '').replace(/[&<>"']/g, c => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  }[c]));
+}
+function syncBlePresetOptions(selectId, devices, kind, savedAddr) {
+  const sel = document.getElementById(selectId);
+  if (!sel) return;
+  sel.querySelectorAll('option[data-scan=\"1\"]').forEach(o => o.remove());
+  const seen = new Set(Array.from(sel.options).map(o => String(o.value || '').toLowerCase()));
+  devices.forEach(x => {
+    const addr = String(x.addr || '').toLowerCase();
+    if (!addr || seen.has(addr)) return;
+    if (kind === 'bm6' && !x.bm6 && addr !== String(savedAddr || '').toLowerCase()) return;
+    if (kind === 'tune' && !x.tune && addr !== String(savedAddr || '').toLowerCase()) return;
+    const opt = document.createElement('option');
+    opt.value = addr;
+    opt.dataset.scan = '1';
+    const name = x.name ? ' ' + x.name : '';
+    opt.textContent = (kind === 'bm6' ? 'Scan BM6' : 'Scan 123') + name + ' ' + addr + ' ' + (x.rssi ?? 0) + ' dBm';
+    sel.appendChild(opt);
+    seen.add(addr);
+  });
+  const current = String(savedAddr || '').toLowerCase();
+  if (current) sel.value = current;
+}
 async function copyJson() {
   try { await navigator.clipboard.writeText(JSON.stringify(lastJson, null, 2)); } catch(e) {}
 }
@@ -2096,6 +2316,24 @@ async function refresh() {
     document.getElementById('blename').textContent = d.ble_name || '-';
     document.getElementById('bleaddr').textContent = d.ble_address || '-';
     document.getElementById('bleclients').textContent = d.ble_clients ?? '0';
+    const hubClients = Array.isArray(d.ble_hub_clients) ? d.ble_hub_clients : [];
+    document.getElementById('blehubclients').innerHTML = hubClients.length ? hubClients.map(c =>
+      escHtml(c.addr || '-') + '<br>h' + (c.handle ?? '-') + ' / MTU ' + (c.mtu ?? '-') +
+      ' / ' + Number(c.interval_ms ?? 0).toFixed(1) + ' ms / ' + Math.round((c.age_ms ?? 0) / 1000) + ' s'
+    ).join('<br><br>') : '-';
+    const scan = Array.isArray(d.ble_scan) ? d.ble_scan : [];
+    syncBlePresetOptions('tunePreset', scan, 'tune', d.tune_saved_address);
+    syncBlePresetOptions('bm6Preset', scan, 'bm6', d.bm6_saved_address);
+    document.getElementById('blescancount').textContent = scan.length + ' Geraete';
+    document.getElementById('blescan').innerHTML = scan.map(x => {
+      const name = escHtml(x.name || '-');
+      const addr = escHtml(x.addr || '');
+      const tag = x.bm6 ? 'BM6' : (x.tune ? '123?' : 'BLE');
+      return '<div class="row"><span>' + tag + ' ' + name + '<br>' + addr + '</span><strong>' +
+             (x.rssi ?? 0) + ' dBm<br><button type="button" data-kind="tune" data-addr="' +
+             addr + '">123</button> <button type="button" data-kind="bm6" data-addr="' +
+             addr + '">BM6</button></strong></div>';
+    }).join('');
     document.getElementById('wifi').textContent = d.wifi_connected ? d.wifi_ssid : (d.wifi_saved ? 'verbindet...' : 'nicht eingerichtet');
     document.getElementById('lanip').textContent = d.wifi_connected ? d.wifi_ip : '-';
     document.getElementById('wifisaved').textContent = d.wifi_saved_ssid || '-';
@@ -2607,6 +2845,7 @@ void updateSpeedReed() {}
 void setupUart()
 {
 #if ENABLE_SPARTAN_UART
+  pinMode(SPARTAN_UART_RX_PIN, INPUT_PULLUP);
   Serial2.begin(9600, SERIAL_8N1, SPARTAN_UART_RX_PIN, SPARTAN_UART_TX_PIN);
   Serial.printf(
       "UART:        9600 8N1 RX=%u TX=%u (configuration only; level shift Spartan TX)\n",
@@ -2625,12 +2864,15 @@ void updateUart()
   }
   while (Serial2.available()) {
     const char c = static_cast<char>(Serial2.read());
-    Serial.write(c);
+    if (lastUartCommandMs == 0) {
+      continue;
+    }
     if (c == '\r' || c == '\n') {
       lastUartResponse.trim();
       if (lastUartResponse.length() > 0) {
         lastUartState = "Antwort empfangen";
         lastUartResponseMs = millis();
+        Serial.printf("UART RX:     %s\n", lastUartResponse.c_str());
       }
     } else if (lastUartResponse.length() < 96 && isPrintable(c)) {
       lastUartResponse += c;
