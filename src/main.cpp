@@ -19,6 +19,8 @@
 #include <SPIFFS.h>
 #include <WebServer.h>
 #include <WiFi.h>
+#include <esp_netif.h>
+#include <esp_wifi.h>
 #endif
 
 #if ENABLE_BLE_HUB
@@ -215,6 +217,9 @@ constexpr char kBm6NotifyUuid[] = "0000fff4-0000-1000-8000-00805f9b34fb";
 constexpr uint32_t kBm6ScanWindowMs = 10000;
 constexpr uint32_t kBm6ReconnectDelayMs = 8000;
 constexpr uint32_t kBm6TriggerIntervalMs = 2000;
+constexpr uint32_t kBm6MainSlotMs = 45000;   // Batterie (main)
+constexpr uint32_t kBm6AuxSlotMs = 15000;    // Zusatzbatterie poll window
+constexpr uint32_t kBm6CacheMaxAgeMs = 120000;
 const uint8_t kBm6AesKey[16] = {
     0x6C, 0x65, 0x61, 0x67, 0x65, 0x6E, 0x64, 0xFF,
     0xFE, 0x30, 0x31, 0x30, 0x30, 0x30, 0x30, 0x39};
@@ -336,6 +341,9 @@ NimBLEClient *bm6Client = nullptr;
 NimBLERemoteCharacteristic *bm6WriteChar = nullptr;
 NimBLEAddress bm6TargetAddress;
 String bm6SavedAddress = "";
+String bm6AuxSavedAddress = "";
+uint8_t bm6ActiveSlot = 0;  // 0=main (Batterie), 1=aux (Zusatzbatterie)
+uint32_t bm6SlotStartedMs = 0;
 bool bm6DoConnect = false;
 bool bm6Connected = false;
 uint32_t bm6NextScanMs = 0;
@@ -345,6 +353,10 @@ uint32_t bm6RxCount = 0;
 uint32_t bm6DecodeFailCount = 0;
 float bm6Voltage = 0.0f;
 int8_t bm6Temperature = 0;
+uint32_t bm6AuxLastRxMs = 0;
+uint32_t bm6AuxRxCount = 0;
+float bm6AuxVoltage = 0.0f;
+int8_t bm6AuxTemperature = 0;
 #endif
 #endif
 #if ENABLE_WEB_GUI
@@ -373,6 +385,29 @@ const uint16_t kLogColHours = 0x0020;
 const uint16_t kLogColDefault = kLogColSpartan | kLogColTune | kLogColBm6 |
                                 kLogColSpeed | kLogColHeater | kLogColHours;
 uint16_t logColumnMask = kLogColDefault;
+struct WifiApStation {
+  String mac;
+  String ip;
+  int8_t rssi = 0;
+  uint32_t firstSeenMs = 0;
+  uint32_t lastSeenMs = 0;
+};
+constexpr uint8_t kWifiApStationMax = 4;
+WifiApStation wifiApStations[kWifiApStationMax];
+uint8_t wifiApStationCount = 0;
+struct WifiHttpPoller {
+  String ip;
+  String mac;
+  String deviceId;
+  String userAgent;
+  String via;
+  uint32_t firstPollMs = 0;
+  uint32_t lastPollMs = 0;
+  uint32_t pollCount = 0;
+};
+constexpr uint8_t kWifiHttpPollerMax = 8;
+WifiHttpPoller wifiHttpPollers[kWifiHttpPollerMax];
+uint8_t wifiHttpPollerCount = 0;
 #endif
 
 void ensurePreferences()
@@ -583,6 +618,10 @@ bool systemTimeValid();
 String csvTimeText(uint32_t ms);
 void ensureLogHeader();
 void sendLogFile(const char *path, const char *downloadName);
+void refreshWifiApStations();
+void recordWifiHttpPoller();
+String formatMacLower(const uint8_t mac[6]);
+String apStationIpFromMac(const uint8_t mac[6]);
 #endif
 
 #if ENABLE_BLE_HUB
@@ -679,6 +718,132 @@ void sendSpartanUartCommand(const String &command)
 #endif
 }
 
+#if ENABLE_WEB_GUI
+String formatMacLower(const uint8_t mac[6])
+{
+  char buf[18];
+  snprintf(buf, sizeof(buf), "%02x:%02x:%02x:%02x:%02x:%02x",
+           mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+  return String(buf);
+}
+
+String apStationIpFromMac(const uint8_t mac[6])
+{
+  esp_netif_t *netif = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
+  if (!netif) return "";
+  esp_netif_pair_mac_ip_t macIp = {};
+  memcpy(macIp.mac, mac, 6);
+  if (esp_netif_dhcps_get_clients_by_mac(netif, 1, &macIp) != ESP_OK) return "";
+  return IPAddress(macIp.ip.addr).toString();
+}
+
+void refreshWifiApStations()
+{
+  wifi_sta_list_t list = {};
+  if (esp_wifi_ap_get_sta_list(&list) != ESP_OK) return;
+  const uint32_t now = millis();
+  bool seen[kWifiApStationMax] = {};
+
+  for (int i = 0; i < list.num && i < kWifiApStationMax; i++) {
+    const String mac = formatMacLower(list.sta[i].mac);
+    uint8_t slot = wifiApStationCount;
+    for (uint8_t j = 0; j < wifiApStationCount; j++) {
+      if (wifiApStations[j].mac == mac) {
+        slot = j;
+        break;
+      }
+    }
+    if (slot == wifiApStationCount && slot < kWifiApStationMax) {
+      wifiApStations[slot].mac = mac;
+      wifiApStations[slot].firstSeenMs = now;
+      wifiApStationCount++;
+    }
+    if (slot >= kWifiApStationMax) continue;
+    seen[slot] = true;
+    wifiApStations[slot].rssi = list.sta[i].rssi;
+    wifiApStations[slot].lastSeenMs = now;
+    const String ip = apStationIpFromMac(list.sta[i].mac);
+    if (ip.length() > 0) wifiApStations[slot].ip = ip;
+  }
+
+  for (int8_t i = static_cast<int8_t>(wifiApStationCount) - 1; i >= 0; i--) {
+    if (seen[i]) continue;
+    if (now - wifiApStations[i].lastSeenMs < 15000) continue;
+    for (uint8_t j = i + 1; j < wifiApStationCount; j++) {
+      wifiApStations[j - 1] = wifiApStations[j];
+    }
+    wifiApStationCount--;
+  }
+}
+
+void recordWifiHttpPoller()
+{
+  refreshWifiApStations();
+  WiFiClient client = server.client();
+  if (!client || !client.connected()) return;
+  const IPAddress ip = client.remoteIP();
+  if (ip == IPAddress(0, 0, 0, 0)) return;
+
+  String deviceId;
+  if (server.hasHeader("X-Device")) {
+    deviceId = server.header("X-Device");
+  } else if (server.hasArg("client")) {
+    deviceId = server.arg("client");
+  }
+  deviceId.trim();
+
+  String userAgent;
+  if (server.hasHeader("User-Agent")) userAgent = server.header("User-Agent");
+  userAgent.trim();
+  if (userAgent.length() > 96) userAgent = userAgent.substring(0, 96);
+
+  String via = "lan";
+  if (ip[0] == 192 && ip[1] == 168 && ip[2] == 4) via = "ap";
+
+  const String ipText = ip.toString();
+  const uint32_t now = millis();
+  uint8_t slot = wifiHttpPollerCount;
+  for (uint8_t i = 0; i < wifiHttpPollerCount; i++) {
+    if (wifiHttpPollers[i].ip == ipText) {
+      slot = i;
+      break;
+    }
+  }
+  if (slot == wifiHttpPollerCount) {
+    if (slot >= kWifiHttpPollerMax) {
+      uint8_t oldest = 0;
+      uint32_t oldestMs = wifiHttpPollers[0].lastPollMs;
+      for (uint8_t i = 1; i < wifiHttpPollerCount; i++) {
+        if (wifiHttpPollers[i].lastPollMs < oldestMs) {
+          oldestMs = wifiHttpPollers[i].lastPollMs;
+          oldest = i;
+        }
+      }
+      slot = oldest;
+    } else {
+      wifiHttpPollers[slot].ip = ipText;
+      wifiHttpPollers[slot].firstPollMs = now;
+      wifiHttpPollerCount++;
+    }
+  }
+
+  wifiHttpPollers[slot].via = via;
+  wifiHttpPollers[slot].lastPollMs = now;
+  wifiHttpPollers[slot].pollCount++;
+  if (deviceId.length() > 0) wifiHttpPollers[slot].deviceId = deviceId;
+  if (userAgent.length() > 0) wifiHttpPollers[slot].userAgent = userAgent;
+
+  if (via == "ap") {
+    for (uint8_t i = 0; i < wifiApStationCount; i++) {
+      if (wifiApStations[i].ip == ipText) {
+        wifiHttpPollers[slot].mac = wifiApStations[i].mac;
+        break;
+      }
+    }
+  }
+}
+#endif
+
 String statusJson()
 {
   const SpartanReading snapshot = readingSnapshot();
@@ -688,7 +853,7 @@ String statusJson()
 #endif
   const uint32_t now = millis();
   String json;
-  json.reserve(2200);  // verhindert wiederholte Heap-Reallokationen
+  json.reserve(3600);  // verhindert wiederholte Heap-Reallokationen
   json += "{\"valid\":";
   json += snapshot.valid ? "true" : "false";
   json += ",\"lambda\":";
@@ -801,6 +966,48 @@ String statusJson()
   json += ",\"time_text\":\"";
   json += csvTimeText(now);
   json += "\"";
+  refreshWifiApStations();
+  json += ",\"wifi_ap_ssid\":\"";
+  json += WEB_AP_SSID;
+  json += "\",\"wifi_ap_station_count\":";
+  json += String(wifiApStationCount);
+  json += ",\"wifi_ap_stations\":[";
+  for (uint8_t i = 0; i < wifiApStationCount; i++) {
+    if (i > 0) json += ",";
+    json += "{\"mac\":\"";
+    json += wifiApStations[i].mac;
+    json += "\",\"ip\":\"";
+    json += wifiApStations[i].ip.length() ? wifiApStations[i].ip : "-";
+    json += "\",\"rssi\":";
+    json += String(wifiApStations[i].rssi);
+    json += ",\"age_ms\":";
+    json += String(now - wifiApStations[i].firstSeenMs);
+    json += ",\"last_seen_ms\":";
+    json += String(now - wifiApStations[i].lastSeenMs);
+    json += "}";
+  }
+  json += "],\"wifi_http_pollers\":[";
+  for (uint8_t i = 0; i < wifiHttpPollerCount; i++) {
+    if (i > 0) json += ",";
+    json += "{\"ip\":\"";
+    json += wifiHttpPollers[i].ip;
+    json += "\",\"mac\":\"";
+    json += wifiHttpPollers[i].mac.length() ? wifiHttpPollers[i].mac : "-";
+    json += "\",\"via\":\"";
+    json += wifiHttpPollers[i].via;
+    json += "\",\"device\":\"";
+    json += jsonEscape(wifiHttpPollers[i].deviceId.length() ? wifiHttpPollers[i].deviceId : "-");
+    json += "\",\"user_agent\":\"";
+    json += jsonEscape(wifiHttpPollers[i].userAgent.length() ? wifiHttpPollers[i].userAgent : "-");
+    json += "\",\"poll_count\":";
+    json += String(wifiHttpPollers[i].pollCount);
+    json += ",\"age_ms\":";
+    json += String(now - wifiHttpPollers[i].lastPollMs);
+    json += ",\"first_poll_age_ms\":";
+    json += String(now - wifiHttpPollers[i].firstPollMs);
+    json += "}";
+  }
+  json += "]";
 #endif
   json += ",\"uart_command\":\"";
   json += lastUartCommand;
@@ -855,7 +1062,18 @@ String statusJson()
   json += String(bm6LastRxMs == 0 ? 0UL : static_cast<unsigned long>(now - bm6LastRxMs));
   json += ",\"bm6_saved_address\":\"";
   json += bm6SavedAddress;
-  json += "\"";
+  json += "\",\"bm6_aux_saved_address\":\"";
+  json += bm6AuxSavedAddress;
+  json += "\",\"bm6_active_slot\":\"";
+  json += bm6ActiveSlot == 0 ? "main" : "aux";
+  json += "\",\"bm6_aux_voltage\":";
+  json += String(bm6AuxVoltage, 2);
+  json += ",\"bm6_aux_temperature\":";
+  json += String(static_cast<int>(bm6AuxTemperature));
+  json += ",\"bm6_aux_rx_count\":";
+  json += String(static_cast<unsigned long>(bm6AuxRxCount));
+  json += ",\"bm6_aux_age_ms\":";
+  json += String(bm6AuxLastRxMs == 0 ? 0UL : static_cast<unsigned long>(now - bm6AuxLastRxMs));
 #endif
 #endif
 #if SPEED_REED_PIN >= 0
@@ -1125,7 +1343,8 @@ String bleStatusPayload()
   const TuneSnapshot tune = tuneSnapshot();
   // Kompakt-Format fuer M5 Gateway:
   //   L<lambda>R<rpm>A<adv>M<map>  (Basis)
-  //   V<bm6_volt>                  (BM6 Batterie)
+  //   V<bm6_volt>                  (BM6 Batterie main)
+  //   W<bm6_aux_volt>              (BM6 Zusatzbatterie, time-sliced)
   //   S<speed_kmh>                 (Reed)
   //   I<123_volt>                  (123 interne Spannung)
   //   T<123_temp>                  (123 interne Temp)
@@ -1137,8 +1356,15 @@ String bleStatusPayload()
                    static_cast<int>(tune.advance),
                    static_cast<int>(tune.map));
 #if ENABLE_BM6
-  if (n > 0 && n < static_cast<int>(sizeof(payload)))
+  const uint32_t nowMs = millis();
+  if (n > 0 && n < static_cast<int>(sizeof(payload)) &&
+      bm6LastRxMs != 0 && (nowMs - bm6LastRxMs) < kBm6CacheMaxAgeMs) {
     n += snprintf(payload + n, sizeof(payload) - n, "V%.2f", bm6Voltage);
+  }
+  if (n > 0 && n < static_cast<int>(sizeof(payload)) &&
+      bm6AuxLastRxMs != 0 && (nowMs - bm6AuxLastRxMs) < kBm6CacheMaxAgeMs) {
+    n += snprintf(payload + n, sizeof(payload) - n, "W%.2f", bm6AuxVoltage);
+  }
 #endif
 #if SPEED_REED_PIN >= 0
   if (n > 0 && n < static_cast<int>(sizeof(payload)))
@@ -1170,6 +1396,13 @@ class BleServerCallbacks : public NimBLEServerCallbacks {
                   connInfo.getConnHandle(),
                   connInfo.getMTU(),
                   clients);
+    // NimBLE stops advertising after the first connect — restart so more
+    // cockpit displays (M5 + Waveshare) can join while slots remain.
+    if (bleAdvertisingStarted && clients < kBleHubClientMax) {
+      NimBLEDevice::startAdvertising();
+      Serial.printf("BLE hub:     re-advertising for client %u/%u\n",
+                    clients, kBleHubClientMax);
+    }
   }
 
   void onDisconnect(NimBLEServer *, NimBLEConnInfo &connInfo, int) override
@@ -1473,6 +1706,43 @@ void scheduleBm6Scan()
   bm6NextScanMs = millis() + kBm6ReconnectDelayMs;
 }
 
+void resetBm6Client();
+
+bool bm6AuxConfigured()
+{
+  return looksLikeMacAddress(bm6AuxSavedAddress);
+}
+
+const String &bm6ActiveSavedMac()
+{
+  return (bm6ActiveSlot == 0) ? bm6SavedAddress : bm6AuxSavedAddress;
+}
+
+void rotateBm6Slot()
+{
+  if (!bm6AuxConfigured()) return;
+  bm6ActiveSlot = bm6ActiveSlot == 0 ? 1 : 0;
+  bm6SlotStartedMs = millis();
+  resetBm6Client();
+  bm6DoConnect = false;
+  scheduleBm6Scan();
+  Serial.printf("BM6 BLE:     rotate -> %s addr=%s\n",
+                bm6ActiveSlot == 0 ? "main" : "aux",
+                bm6ActiveSavedMac().c_str());
+}
+
+void maybeRotateBm6Slot()
+{
+  if (!bm6AuxConfigured()) return;
+  const uint32_t slotMs = bm6ActiveSlot == 0 ? kBm6MainSlotMs : kBm6AuxSlotMs;
+  if (bm6SlotStartedMs == 0) {
+    bm6SlotStartedMs = millis();
+    return;
+  }
+  if (millis() - bm6SlotStartedMs < slotMs) return;
+  rotateBm6Slot();
+}
+
 void resetBm6Client()
 {
   if (bm6Client == nullptr) return;
@@ -1518,14 +1788,28 @@ void decodeBm6Notify(const uint8_t *data, size_t length)
     const bool tempNeg = plain[3] != 0;
     const int8_t tempVal = static_cast<int8_t>(plain[4]);
     const uint16_t voltRaw = (static_cast<uint16_t>(plain[7]) << 8) | plain[8];
-    bm6Voltage = static_cast<float>(voltRaw) / 100.0f;
-    bm6Temperature = tempNeg ? -tempVal : tempVal;
-    bm6LastRxMs = millis();
-    bm6RxCount++;
-    Serial.printf("BM6 BLE:     V=%.2fV T=%d C rx=%lu\n",
-                  bm6Voltage,
-                  static_cast<int>(bm6Temperature),
-                  static_cast<unsigned long>(bm6RxCount));
+    const float volt = static_cast<float>(voltRaw) / 100.0f;
+    const int8_t temp = tempNeg ? -tempVal : tempVal;
+    const uint32_t now = millis();
+    if (bm6ActiveSlot == 0) {
+      bm6Voltage = volt;
+      bm6Temperature = temp;
+      bm6LastRxMs = now;
+      bm6RxCount++;
+      Serial.printf("BM6 BLE:     main V=%.2fV T=%d C rx=%lu\n",
+                    bm6Voltage,
+                    static_cast<int>(bm6Temperature),
+                    static_cast<unsigned long>(bm6RxCount));
+    } else {
+      bm6AuxVoltage = volt;
+      bm6AuxTemperature = temp;
+      bm6AuxLastRxMs = now;
+      bm6AuxRxCount++;
+      Serial.printf("BM6 BLE:     aux  V=%.2fV T=%d C rx=%lu\n",
+                    bm6AuxVoltage,
+                    static_cast<int>(bm6AuxTemperature),
+                    static_cast<unsigned long>(bm6AuxRxCount));
+    }
   } else {
     bm6DecodeFailCount++;
     Serial.printf("BM6 BLE:     unknown frame %02X %02X %02X\n", plain[0], plain[1], plain[2]);
@@ -1559,18 +1843,19 @@ class Bm6ScanCallbacks : public NimBLEScanCallbacks {
     addr.toLowerCase();
     String name = device->getName().c_str();
     name.toLowerCase();
-    const bool bm6Like = addr == bm6SavedAddress || addr == kBm6TargetAddress ||
+    const bool bm6Like = addr == bm6SavedAddress || addr == bm6AuxSavedAddress ||
+                         addr == kBm6TargetAddress ||
                          name.indexOf("bm6") >= 0 || name.indexOf("battery") >= 0;
     recordBleScanDevice(device, false, bm6Like);
-    if (addr != bm6SavedAddress && addr != kBm6TargetAddress) return;
+    if (addr != bm6ActiveSavedMac()) return;
     bm6TargetAddress = device->getAddress();
-    if (bm6SavedAddress != addr) {
+    if (bm6ActiveSlot == 0 && bm6SavedAddress != addr) {
       bm6SavedAddress = addr;
 #if ENABLE_WEB_GUI
       ensurePreferences();
       networkPreferences.putString("bm6_mac", bm6SavedAddress);
 #endif
-      Serial.printf("BM6 BLE:     saved address %s\n", bm6SavedAddress.c_str());
+      Serial.printf("BM6 BLE:     saved main address %s\n", bm6SavedAddress.c_str());
     }
     bm6DoConnect = true;
     bm6NextScanMs = 0;
@@ -1617,7 +1902,13 @@ void connectBm6()
   }
 
   bm6Client->setConnectionParams(6, 12, 0, 150);
-  Serial.println("BM6 BLE:     connecting...");
+  const String &targetMac = bm6ActiveSavedMac();
+  if (looksLikeMacAddress(targetMac)) {
+    bm6TargetAddress = NimBLEAddress(std::string(targetMac.c_str()), BLE_ADDR_PUBLIC);
+  }
+  Serial.printf("BM6 BLE:     connecting %s (%s)...\n",
+                targetMac.c_str(),
+                bm6ActiveSlot == 0 ? "main" : "aux");
   if (!bm6Client->connect(bm6TargetAddress, true, false, false)) {
     Serial.println("BM6 BLE:     connect failed");
     resetBm6Client();
@@ -1650,11 +1941,13 @@ void connectBm6()
     return;
   }
   bm6Connected = true;
+  bm6SlotStartedMs = millis();
   bm6SendTrigger();
 }
 
 void updateBm6Ble()
 {
+  maybeRotateBm6Slot();
   if (bm6DoConnect) {
     connectBm6();
     return;
@@ -1727,6 +2020,11 @@ void setupBleHub()
       ? networkPreferences.getString("bm6_mac", kBm6TargetAddress)
       : String(kBm6TargetAddress);
   bm6SavedAddress.toLowerCase();
+  bm6AuxSavedAddress = networkPreferences.isKey("bm6_aux_mac")
+      ? networkPreferences.getString("bm6_aux_mac", "")
+      : String("");
+  bm6AuxSavedAddress.toLowerCase();
+  bm6SlotStartedMs = millis();
 #endif
 #else
   tuneSavedAddress = kTuneTargetAddress;
@@ -2043,6 +2341,24 @@ details.setup > .inside { padding: 0 16px 16px; }
 <div class="row"><span>Command Write</span><strong class="mono">7f510003-5a6b-4d2a-9f20-14a7f3e20000</strong></div>
 </div>
 </details>
+<details class="setup" open>
+<summary>WiFi AP Clients</summary>
+<div class="inside">
+<p class="hint">Stationen am Hub-Hotspot Spartan3-Setup (192.168.4.x). MAC und RSSI kommen vom ESP32 AP, IP aus DHCP falls verfuegbar.</p>
+<div class="row"><span>AP SSID</span><strong id="wifiApSsid" class="mono">-</strong></div>
+<div class="row"><span>AP IP</span><strong id="wifiApIp" class="mono">-</strong></div>
+<div class="row"><span>Stationen</span><strong id="wifiApCount">0</strong></div>
+<div id="wifiApTable" class="mono">-</div>
+</div>
+</details>
+<details class="setup" open>
+<summary>WiFi HTTP Poll Clients</summary>
+<div class="inside">
+<p class="hint">Geraete, die /state oder /api/status pollen (Browser, Waveshare 2.8, Skripte). Device-ID aus X-Device Header oder ?client= Query.</p>
+<div class="row"><span>Poll Clients</span><strong id="wifiHttpCount">0</strong></div>
+<div id="wifiHttpTable" class="mono">-</div>
+</div>
+</details>
 </div><!-- /tab diag -->
 <div class="tab-section" data-tab="log" hidden>
 <details class="setup" open>
@@ -2153,6 +2469,10 @@ details.setup > .inside { padding: 0 16px 16px; }
 </select>
 <label for="bm6_mac">BM6 BLE-Adresse</label><input id="bm6_mac" name="bm6_mac" placeholder="aa:bb:cc:dd:ee:ff">
 <button type="submit">BM6 Ziel speichern</button>
+</form>
+<form action="/bm6_aux_target" method="post">
+<label for="bm6_aux_mac">BM6 Zusatzbatterie (Aux)</label><input id="bm6_aux_mac" name="bm6_aux_mac" placeholder="aa:bb:cc:dd:ee:ff (leer=aus)">
+<button type="submit">BM6 Aux speichern</button>
 </form>
 <div class="row"><span>Scanliste</span><strong id="blescancount">-</strong></div>
 <div id="blescan" class="mono"></div>
@@ -2321,6 +2641,22 @@ async function refresh() {
       escHtml(c.addr || '-') + '<br>h' + (c.handle ?? '-') + ' / MTU ' + (c.mtu ?? '-') +
       ' / ' + Number(c.interval_ms ?? 0).toFixed(1) + ' ms / ' + Math.round((c.age_ms ?? 0) / 1000) + ' s'
     ).join('<br><br>') : '-';
+    const apStations = Array.isArray(d.wifi_ap_stations) ? d.wifi_ap_stations : [];
+    document.getElementById('wifiApSsid').textContent = d.wifi_ap_ssid || '-';
+    document.getElementById('wifiApIp').textContent = d.ap_ip || '-';
+    document.getElementById('wifiApCount').textContent = d.wifi_ap_station_count ?? apStations.length;
+    document.getElementById('wifiApTable').innerHTML = apStations.length ? apStations.map(s =>
+      escHtml(s.ip || '-') + ' / ' + escHtml(s.mac || '-') + '<br>' +
+      (s.rssi ?? 0) + ' dBm / seit ' + Math.round((s.age_ms ?? 0) / 1000) + ' s / zuletzt ' +
+      Math.round((s.last_seen_ms ?? 0) / 1000) + ' s'
+    ).join('<br><br>') : '-';
+    const httpPollers = Array.isArray(d.wifi_http_pollers) ? d.wifi_http_pollers : [];
+    document.getElementById('wifiHttpCount').textContent = httpPollers.length;
+    document.getElementById('wifiHttpTable').innerHTML = httpPollers.length ? httpPollers.map(p =>
+      escHtml(p.device || '-') + ' / ' + escHtml(p.ip || '-') + ' (' + escHtml(p.via || '-') + ')<br>' +
+      escHtml(p.mac || '-') + ' / polls ' + (p.poll_count ?? 0) + ' / zuletzt ' +
+      Math.round((p.age_ms ?? 0) / 1000) + ' s<br>' + escHtml(p.user_agent || '-')
+    ).join('<br><br>') : '-';
     const scan = Array.isArray(d.ble_scan) ? d.ble_scan : [];
     syncBlePresetOptions('tunePreset', scan, 'tune', d.tune_saved_address);
     syncBlePresetOptions('bm6Preset', scan, 'bm6', d.bm6_saved_address);
@@ -2420,6 +2756,7 @@ setInterval(() => { if (!document.hidden) refresh(); }, 750);
   });
 
   const auto sendStatus = []() {
+    recordWifiHttpPoller();
     server.send(200, "application/json", statusJson());
   };
   server.on("/state", sendStatus);
@@ -2548,10 +2885,33 @@ setInterval(() => { if (!document.hidden) refresh(); }, 750);
     ensurePreferences();
     bm6SavedAddress = mac;
     networkPreferences.putString("bm6_mac", bm6SavedAddress);
+    bm6ActiveSlot = 0;
     resetBm6Client();
     bm6DoConnect = false;
     scheduleBm6Scan();
     Serial.printf("BM6 BLE:     target override %s\n", bm6SavedAddress.c_str());
+    server.sendHeader("Location", "/", true);
+    server.send(303, "text/plain", "");
+#else
+    server.send(400, "text/plain", "BM6 nicht aktiv");
+#endif
+  });
+  server.on("/bm6_aux_target", HTTP_POST, []() {
+#if ENABLE_BLE_HUB && ENABLE_BM6
+    const String mac = normalizeMacInput(server.arg("bm6_aux_mac"));
+    if (mac.length() > 0 && !looksLikeMacAddress(mac)) {
+      server.send(400, "text/plain", "BM6 Aux-Adresse ungueltig. Format aa:bb:cc:dd:ee:ff");
+      return;
+    }
+    ensurePreferences();
+    bm6AuxSavedAddress = mac;
+    networkPreferences.putString("bm6_aux_mac", bm6AuxSavedAddress);
+    bm6ActiveSlot = 0;
+    resetBm6Client();
+    bm6DoConnect = false;
+    scheduleBm6Scan();
+    Serial.printf("BM6 BLE:     aux target %s\n",
+                  bm6AuxSavedAddress.length() ? bm6AuxSavedAddress.c_str() : "(disabled)");
     server.sendHeader("Location", "/", true);
     server.send(303, "text/plain", "");
 #else
