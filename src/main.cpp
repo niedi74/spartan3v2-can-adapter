@@ -11,6 +11,19 @@
 #define ENABLE_BLE_HUB 0
 #endif
 
+#ifndef ENABLE_BLE_DISPLAY
+#define ENABLE_BLE_DISPLAY ENABLE_BLE_HUB
+#endif
+
+#ifndef ENABLE_ESP_NOW_HUB
+#define ENABLE_ESP_NOW_HUB 0
+#endif
+
+#if ENABLE_ESP_NOW_HUB
+#include <esp_now.h>
+#include "spartan_cockpit_frame.h"
+#endif
+
 #if ENABLE_WEB_GUI
 #include <DNSServer.h>
 #include <Preferences.h>
@@ -144,6 +157,12 @@ constexpr uint32_t kTuneReconnectDelayMs = 5000;
 constexpr uint32_t kTunePingIntervalMs = 1650;
 constexpr uint32_t kBleHubAdvertiseFallbackMs = 30000;
 #endif
+#if ENABLE_ESP_NOW_HUB
+#ifndef ESP_NOW_WIFI_CHANNEL
+#define ESP_NOW_WIFI_CHANNEL 6
+#endif
+constexpr uint8_t kEspNowBroadcastAddr[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+#endif
 
 struct SpartanReading {
   float lambda = 0.0f;
@@ -191,11 +210,13 @@ String uartLine;
 String lastUartCommand = "";
 String lastUartResponse = "";
 #if ENABLE_BLE_HUB
+#if ENABLE_BLE_DISPLAY
 NimBLECharacteristic *bleStatusCharacteristic = nullptr;
 volatile uint8_t bleClientCount = 0;
-String bleAddress = "";
 bool bleAdvertisingStarted = false;
 uint32_t bleHubSetupMs = 0;
+#endif
+String bleAddress = "";
 NimBLEClient *tuneClient = nullptr;
 NimBLERemoteCharacteristic *tuneNusRx = nullptr;
 NimBLEAddress tuneTargetAddress;
@@ -206,6 +227,13 @@ uint32_t tuneLastPingMs = 0;
 uint32_t tuneScanSeen = 0;
 uint32_t tuneScanCandidates = 0;
 String tuneSavedAddress = "";
+#endif
+#if ENABLE_ESP_NOW_HUB
+volatile uint32_t espNowTxCount = 0;
+volatile uint32_t espNowTxFailCount = 0;
+uint16_t espNowSeq = 0;
+bool espNowReady = false;
+uint32_t lastEspNowSendMs = 0;
 #endif
 #if ENABLE_WEB_GUI
 WebServer server(80);
@@ -372,6 +400,7 @@ TuneSnapshot tuneSnapshot()
   return snapshot;
 }
 
+#if ENABLE_BLE_DISPLAY
 uint8_t getBleClientCount()
 {
   portENTER_CRITICAL(&stateMux);
@@ -379,6 +408,7 @@ uint8_t getBleClientCount()
   portEXIT_CRITICAL(&stateMux);
   return count;
 }
+#endif
 #endif
 
 void sendSpartanUartCommand(const String &command)
@@ -412,6 +442,8 @@ String statusJson()
   const SpartanReading snapshot = readingSnapshot();
 #if ENABLE_BLE_HUB
   const TuneSnapshot tune = tuneSnapshot();
+#endif
+#if ENABLE_BLE_DISPLAY
   const uint8_t clients = getBleClientCount();
 #endif
   const uint32_t now = millis();
@@ -441,14 +473,29 @@ String statusJson()
   json += String(canStatusErrors);
   json += ",\"heap_free\":";
   json += String(heap_caps_get_free_size(MALLOC_CAP_8BIT));
-#if ENABLE_BLE_HUB
+#if ENABLE_BLE_DISPLAY
   json += ",\"ble_clients\":";
   json += String(clients);
+#endif
+#if ENABLE_BLE_HUB
   json += ",\"ble_name\":\"";
   json += BLE_HUB_NAME;
   json += "\",\"ble_address\":\"";
   json += bleAddress;
-  json += "\"";
+  json += "\",\"ble_display\":";
+  json += ENABLE_BLE_DISPLAY ? "true" : "false";
+#endif
+#if ENABLE_ESP_NOW_HUB
+  json += ",\"esp_now_ready\":";
+  json += espNowReady ? "true" : "false";
+  json += ",\"esp_now_channel\":";
+  json += String(ESP_NOW_WIFI_CHANNEL);
+  json += ",\"esp_now_tx\":";
+  json += String(espNowTxCount);
+  json += ",\"esp_now_tx_fail\":";
+  json += String(espNowTxFailCount);
+  json += ",\"esp_now_seq\":";
+  json += String(espNowSeq);
 #endif
 #if ENABLE_WEB_GUI
   json += ",\"wifi_saved\":";
@@ -552,6 +599,7 @@ void decodeTuneFrame(const uint8_t *data, size_t length)
   portEXIT_CRITICAL(&stateMux);
 }
 
+#if ENABLE_BLE_DISPLAY
 String bleStatusPayload()
 {
   const SpartanReading snapshot = readingSnapshot();
@@ -600,6 +648,7 @@ class BleCommandCallbacks : public NimBLECharacteristicCallbacks {
     sendSpartanUartCommand(characteristic->getValue().c_str());
   }
 };
+#endif
 
 void scheduleTuneScan()
 {
@@ -868,6 +917,7 @@ void updateTuneDebug()
                 tune.lastRxMs == 0 ? 0UL : static_cast<unsigned long>(now - tune.lastRxMs));
 }
 
+#if ENABLE_BLE_DISPLAY
 void startBleHubAdvertising()
 {
   if (bleAdvertisingStarted) return;
@@ -875,6 +925,7 @@ void startBleHubAdvertising()
   bleAdvertisingStarted = true;
   Serial.println("BLE hub:     advertising started");
 }
+#endif
 
 void setupBleHub()
 {
@@ -882,7 +933,9 @@ void setupBleHub()
   NimBLEDevice::setPower(ESP_PWR_LVL_P9);
   NimBLEDevice::setMTU(23);
   bleAddress = NimBLEDevice::getAddress().toString().c_str();
+#if ENABLE_BLE_DISPLAY
   bleHubSetupMs = millis();
+#endif
 #if ENABLE_WEB_GUI
   ensurePreferences();
   tuneSavedAddress = networkPreferences.isKey("tune_mac")
@@ -893,6 +946,7 @@ void setupBleHub()
   tuneSavedAddress = kTuneTargetAddress;
 #endif
 
+#if ENABLE_BLE_DISPLAY
   NimBLEServer *bleServer = NimBLEDevice::createServer();
   bleServer->setCallbacks(new BleServerCallbacks());
 
@@ -910,13 +964,16 @@ void setupBleHub()
   NimBLEAdvertising *advertising = NimBLEDevice::getAdvertising();
   advertising->addServiceUUID(kBleServiceUuid);
   advertising->setName(BLE_HUB_NAME);
+#else
+  Serial.println("BLE display: disabled, cockpit uses ESP-NOW broadcast");
+#endif
 
-  Serial.printf("BLE hub:     '%s' addr=%s service=%s\n",
-                BLE_HUB_NAME,
-                bleAddress.c_str(),
-                kBleServiceUuid);
-  Serial.printf("123TUNE BLE: target %s\n", tuneSavedAddress.c_str());
+  Serial.printf("BLE stack:   '%s' addr=%s\n", BLE_HUB_NAME, bleAddress.c_str());
+#if ENABLE_BLE_DISPLAY
+  Serial.printf("BLE hub:     service=%s\n", kBleServiceUuid);
   Serial.println("BLE hub:     advertising waits for 123TUNE or 30s fallback");
+#endif
+  Serial.printf("123TUNE BLE: target %s\n", tuneSavedAddress.c_str());
   startTuneScan();
 }
 
@@ -924,6 +981,7 @@ void updateBleHub()
 {
   updateTuneBle();
   updateTuneDebug();
+#if ENABLE_BLE_DISPLAY
   const uint32_t now = millis();
   if (!bleAdvertisingStarted &&
       (tuneConnected || static_cast<int32_t>(now - bleHubSetupMs - kBleHubAdvertiseFallbackMs) >= 0)) {
@@ -939,10 +997,95 @@ void updateBleHub()
   if (getBleClientCount() > 0) {
     bleStatusCharacteristic->notify();
   }
+#endif
 }
 #else
 void setupBleHub() {}
 void updateBleHub() {}
+#endif
+
+#if ENABLE_ESP_NOW_HUB
+void onEspNowSend(const uint8_t *mac, esp_now_send_status_t status)
+{
+  (void)mac;
+  if (status == ESP_NOW_SEND_SUCCESS) {
+    if (espNowTxCount < UINT32_MAX) {
+      espNowTxCount++;
+    }
+  } else if (espNowTxFailCount < UINT32_MAX) {
+    espNowTxFailCount++;
+  }
+}
+
+void setupEspNowHub()
+{
+#if ENABLE_WEB_GUI
+  if (WiFi.getMode() == WIFI_OFF) {
+    Serial.println("ESP-NOW:     WiFi not ready yet");
+    return;
+  }
+  if (WiFi.softAPgetStationNum() >= 0) {
+    const uint8_t channel = WiFi.channel();
+    if (channel > 0 && channel != ESP_NOW_WIFI_CHANNEL) {
+      Serial.printf("ESP-NOW:     AP channel %u, expected %d\n", channel, ESP_NOW_WIFI_CHANNEL);
+    }
+  }
+#endif
+
+  if (esp_now_init() != ESP_OK) {
+    Serial.println("ESP-NOW:     init failed");
+    return;
+  }
+  esp_now_register_send_cb(onEspNowSend);
+
+  esp_now_peer_info_t peer = {};
+  memcpy(peer.peer_addr, kEspNowBroadcastAddr, sizeof(kEspNowBroadcastAddr));
+  peer.channel = ESP_NOW_WIFI_CHANNEL;
+  peer.encrypt = false;
+  if (esp_now_add_peer(&peer) != ESP_OK) {
+    Serial.println("ESP-NOW:     broadcast peer add failed");
+    esp_now_deinit();
+    return;
+  }
+
+  espNowReady = true;
+  Serial.printf("ESP-NOW:     cockpit broadcast ready on channel %d\n", ESP_NOW_WIFI_CHANNEL);
+}
+
+void updateEspNowHub()
+{
+  if (!espNowReady) {
+    return;
+  }
+
+  const uint32_t now = millis();
+  if (now - lastEspNowSendMs < kBleNotifyIntervalMs) {
+    return;
+  }
+  lastEspNowSendMs = now;
+
+#if ENABLE_BLE_HUB
+  const SpartanReading snapshot = readingSnapshot();
+  const TuneSnapshot tune = tuneSnapshot();
+  const bool tuneFresh = tune.lastRxMs != 0 && (now - tune.lastRxMs) <= 3000;
+
+  SpartanCockpitFrame frame;
+  spartanCockpitEncode(&frame,
+                       espNowSeq++,
+                       snapshot.lambda,
+                       snapshot.valid,
+                       static_cast<uint16_t>(tune.rpm),
+                       tune.advance,
+                       static_cast<uint8_t>(tune.map),
+                       snapshot.status,
+                       tuneFresh,
+                       tuneConnected);
+  esp_now_send(kEspNowBroadcastAddr, reinterpret_cast<uint8_t *>(&frame), sizeof(frame));
+#endif
+}
+#else
+void setupEspNowHub() {}
+void updateEspNowHub() {}
 #endif
 
 void setupWebGui()
@@ -1049,16 +1192,20 @@ pre { white-space: pre-wrap; max-height: 220px; overflow: auto; padding: 12px; b
 <pre id="jsondump">{}</pre>
 </div>
 <div class="setup">
-<strong>BLE Hub / Gateway</strong>
-<p class="hint">Fuer M5/Waveshare Gateway-Modus. Der M5 soll per Name plus Service UUID scannen; die Adresse ist nur Debug/Fast-Reconnect.</p>
-<p class="hint">Road-AP: Handy mit <span class="mono">Spartan3-Setup</span> verbinden. Spartan ist <a class="mono" href="http://192.168.4.1/">192.168.4.1</a>, M5 Dial ist <a class="mono" href="http://192.168.4.2/">192.168.4.2</a>, wenn dort der Spartan-AP-Preset aktiv ist.</p>
-<div class="row"><span>Status</span><strong id="bleenabled">-</strong></div>
+<strong>Cockpit Link (ESP-NOW)</strong>
+<p class="hint">M5/Waveshare im Gateway-Modus hoeren auf ESP-NOW Broadcast (kein BLE-Connect noetig). WiFi-Kanal muss mit dem Hub uebereinstimmen.</p>
+<div class="row"><span>Status</span><strong id="espnowready">-</strong></div>
+<div class="row"><span>Kanal</span><strong id="espnowch">-</strong></div>
+<div class="row"><span>Frames gesendet / Fehler</span><strong id="espnowtx">0 / 0</strong></div>
+<div class="row"><span>Sequenz</span><strong id="espnowseq">0</strong></div>
+</div>
+<div class="setup">
+<strong>BLE (123TUNE + optional Display)</strong>
+<p class="hint">123TUNE BLE bleibt aktiv. BLE-Display ist im ESP-NOW-Build aus, damit das Funkmodul nicht mehrere GATT-Clients bedienen muss.</p>
+<div class="row"><span>Display per BLE</span><strong id="bledisplay">-</strong></div>
 <div class="row"><span>Name</span><strong id="blename" class="mono">-</strong></div>
 <div class="row"><span>Adresse</span><strong id="bleaddr" class="mono">-</strong></div>
-<div class="row"><span>Clients</span><strong id="bleclients">0</strong></div>
-<div class="row"><span>Service</span><strong class="mono">7f510001-5a6b-4d2a-9f20-14a7f3e20000</strong></div>
-<div class="row"><span>Status Notify</span><strong class="mono">7f510002-5a6b-4d2a-9f20-14a7f3e20000</strong></div>
-<div class="row"><span>Command Write</span><strong class="mono">7f510003-5a6b-4d2a-9f20-14a7f3e20000</strong></div>
+<div class="row"><span>BLE Display Clients</span><strong id="bleclients">0</strong></div>
 </div>
 <div class="setup">
 <strong>Heim-WLAN</strong>
@@ -1148,7 +1295,12 @@ async function refresh() {
     cls(document.getElementById('source'), d.source === 'CAN' ? 'tag ok' : (d.source === 'DEMO' ? 'tag warn' : 'tag bad'));
     cls(document.getElementById('status'), d.status === 'OK' ? 'ok' : (d.status === 'HEAT' || d.source === 'DEMO' ? 'warn' : 'bad'));
     cls(document.getElementById('can'), d.can_ready && d.can_state === 1 ? 'ok' : 'bad');
-    document.getElementById('bleenabled').textContent = d.ble_name ? 'aktiv' : 'nicht im Build';
+    document.getElementById('espnowready').textContent = d.esp_now_ready ? 'broadcast aktiv' : (d.esp_now_channel ? 'initialisiert' : 'nicht im Build');
+    cls(document.getElementById('espnowready'), d.esp_now_ready ? 'ok' : 'warn');
+    document.getElementById('espnowch').textContent = d.esp_now_channel ?? '-';
+    document.getElementById('espnowtx').textContent = (d.esp_now_tx ?? 0) + ' / ' + (d.esp_now_tx_fail ?? 0);
+    document.getElementById('espnowseq').textContent = d.esp_now_seq ?? 0;
+    document.getElementById('bledisplay').textContent = d.ble_display ? 'aktiv' : 'aus (ESP-NOW)';
     document.getElementById('blename').textContent = d.ble_name || '-';
     document.getElementById('bleaddr').textContent = d.ble_address || '-';
     document.getElementById('bleclients').textContent = d.ble_clients ?? '0';
@@ -1560,9 +1712,18 @@ void printBootDetails()
   Serial.println("Web GUI:     disabled");
 #endif
 #if ENABLE_BLE_HUB
-  Serial.println("BLE hub:     enabled as GATT peripheral");
+#if ENABLE_BLE_DISPLAY
+  Serial.println("BLE display: enabled as GATT peripheral");
 #else
-  Serial.println("BLE hub:     disabled");
+  Serial.println("BLE display: disabled (123TUNE central only)");
+#endif
+#else
+  Serial.println("BLE stack:   disabled");
+#endif
+#if ENABLE_ESP_NOW_HUB
+  Serial.printf("ESP-NOW:     cockpit broadcast on channel %d\n", ESP_NOW_WIFI_CHANNEL);
+#else
+  Serial.println("ESP-NOW:     disabled");
 #endif
 }
 
@@ -1580,6 +1741,7 @@ void setup()
   printBootDetails();
   setupBleHub();
   setupWebGui();
+  setupEspNowHub();
   setupCan();
   setupUart();
 #if ENABLE_SPARTAN_ANALOG
@@ -1598,6 +1760,7 @@ void loop()
   updateUart();
   updateWebGui();
   updateBleHub();
+  updateEspNowHub();
   updateDisplay();
   delay(10);
 }

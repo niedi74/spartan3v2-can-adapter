@@ -104,7 +104,7 @@ Because this will be mounted in a vehicle, add input protection before connectin
 For setup, WiFi AP + Web GUI is very useful. For cockpit operation, keep WiFi quiet when possible:
 
 - Use WiFi mostly for setup and diagnostics.
-- Let BLE carry the live cockpit data.
-- Test with two display subscribers before relying on it in the car.
+- **Preferred (2026-06):** ESP-NOW broadcast for cockpit displays — see `docs/espnow-gateway-architecture.md`.
+- BLE GATT notify remains available when `ENABLE_BLE_DISPLAY=1`, but multi-client BLE was unreliable in the car.
 
-If BLE reliability is not good enough in the engine bay, CAN remains the fallback for the wired sensor side and the M5 can still use the gateway as a nearby BLE display bridge.
+If wireless reliability is still not good enough, CAN remains the fallback for the wired sensor side.
