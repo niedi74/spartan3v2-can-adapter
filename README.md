@@ -224,6 +224,18 @@ Two-tab layout: **Live** and **Setup**.
 | WiFi AP | `Spartan3-Setup` / `lambda123` |
 | AP address | `http://192.168.4.1/` |
 | Road hotspot | `Android-AP1` / `Frankfurt1` |
+
+## Time master (until RTC battery)
+
+Until a backup RTC battery is fitted on the hub board, wall-clock time comes from NTP over the phone hotspot:
+
+1. Phone joins hub WiFi AP (`Spartan3-Setup`) or hub STA joins phone AP (`Android-AP1`)
+2. Hub runs SNTP and becomes the **time master**
+3. Cockpit displays (Waveshare 2.8, optional M5) poll `GET /api/status` and copy `time_epoch` when `ntp_synced:true`
+
+`/api/status` fields: `ntp_synced`, `time_epoch` (Unix seconds, only when synced), `ntp_time` (ISO-like local string), `time_valid`, `timezone`.
+
+Future: hub RTC battery holds time across power loss; displays may still follow hub time when linked.
 | JSON endpoint | `/state` (also `/api/status`) |
 
 ### Live tab

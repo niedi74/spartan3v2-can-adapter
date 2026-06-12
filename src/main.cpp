@@ -20,6 +20,7 @@
 #include <WebServer.h>
 #include <WiFi.h>
 #include <esp_netif.h>
+#include <esp_sntp.h>
 #include <esp_wifi.h>
 #endif
 
@@ -371,7 +372,29 @@ uint32_t lastApRetryMs = 0;
 uint32_t apRetryCount = 0;
 bool logFsReady = false;
 uint32_t lastCsvAppendMs = 0;
-bool ntpConfigured = false;
+struct TimezoneEntry {
+  const char *label;
+  const char *posix;
+};
+const TimezoneEntry kTimezones[] = {
+    {"Europe/Berlin (CET/CEST)", "CET-1CEST,M3.5.0,M10.5.0/3"},
+    {"UTC", "UTC0"},
+    {"Europe/London (GMT/BST)", "GMT0BST,M3.5.0/1,M10.5.0"},
+    {"America/New_York (EST/EDT)", "EST5EDT,M3.2.0,M11.1.0"},
+    {"America/Los_Angeles (PST/PDT)", "PST8PDT,M3.2.0,M11.1.0"},
+    {"Asia/Tokyo (JST)", "JST-9"},
+};
+const uint8_t kTimezoneCount = static_cast<uint8_t>(sizeof(kTimezones) / sizeof(kTimezones[0]));
+const uint8_t kTimezoneDefault = 0;
+const char *kNtpServerPrimary = "pool.ntp.org";
+const char *kNtpServerSecondary = "time.nist.gov";
+const char *kNtpServerTertiary = "de.pool.ntp.org";
+constexpr uint32_t kNtpResyncIntervalMs = 15UL * 60UL * 1000UL;
+uint8_t timezoneIdx = kTimezoneDefault;
+bool ntpStarted = false;
+bool ntpSynced = false;
+bool ntpResyncRequested = false;
+uint32_t lastNtpSyncMs = 0;
 const char *kLogFile = "/drive.csv";
 const char *kOldLogFile = "/drive_old.csv";
 const size_t kMaxLogBytes = 1200000;
@@ -616,6 +639,13 @@ String humanBytes(size_t bytes);
 size_t logFileSize(const char *path);
 bool systemTimeValid();
 String csvTimeText(uint32_t ms);
+const char *timezoneLabel(uint8_t idx);
+const char *timezonePosix(uint8_t idx);
+void applyTimezone();
+void startNtpIfNeeded();
+void updateNtp(uint32_t now);
+void requestNtpResync();
+void saveTimezone(uint8_t idx);
 void ensureLogHeader();
 void sendLogFile(const char *path, const char *downloadName);
 void refreshWifiApStations();
@@ -966,6 +996,27 @@ String statusJson()
   json += ",\"time_text\":\"";
   json += csvTimeText(now);
   json += "\"";
+  json += ",\"ntp_synced\":";
+  json += ntpSynced ? "true" : "false";
+  if (ntpSynced && systemTimeValid()) {
+    json += ",\"time_epoch\":";
+    json += String(static_cast<unsigned long>(time(nullptr)));
+  }
+  json += ",\"ntp_time\":\"";
+  json += ntpSynced && systemTimeValid() ? csvTimeText(now) : String("-");
+  json += "\"";
+  json += ",\"timezone\":\"";
+  json += jsonEscape(timezoneLabel(timezoneIdx));
+  json += "\"";
+  json += ",\"timezone_idx\":";
+  json += String(timezoneIdx);
+  json += ",\"ntp_server\":\"";
+  json += kNtpServerPrimary;
+  json += "\"";
+  json += ",\"ntp_last_sync_ms\":";
+  json += String(lastNtpSyncMs);
+  json += ",\"ntp_last_sync_age_s\":";
+  json += lastNtpSyncMs == 0 ? "0" : String((now - lastNtpSyncMs) / 1000UL);
   refreshWifiApStations();
   json += ",\"wifi_ap_ssid\":\"";
   json += WEB_AP_SSID;
@@ -1127,6 +1178,84 @@ String logHeader()
   if (logCol(kLogColHeater)) header += ";heater_v";
   if (logCol(kLogColHours)) header += ";device_h;engine_h;sensor_h";
   return header;
+}
+
+void onNtpSyncNotification(struct timeval *tv)
+{
+  (void)tv;
+  lastNtpSyncMs = millis();
+  ntpSynced = true;
+  ntpResyncRequested = false;
+  Serial.println("Time:        NTP synchronized");
+}
+
+const char *timezoneLabel(uint8_t idx)
+{
+  if (idx >= kTimezoneCount) idx = kTimezoneDefault;
+  return kTimezones[idx].label;
+}
+
+const char *timezonePosix(uint8_t idx)
+{
+  if (idx >= kTimezoneCount) idx = kTimezoneDefault;
+  return kTimezones[idx].posix;
+}
+
+void applyTimezone()
+{
+  const char *tz = timezonePosix(timezoneIdx);
+  setenv("TZ", tz, 1);
+  tzset();
+  configTzTime(tz, kNtpServerPrimary, kNtpServerSecondary, kNtpServerTertiary);
+  esp_sntp_set_sync_mode(SNTP_SYNC_MODE_IMMED);
+  esp_sntp_set_sync_interval(kNtpResyncIntervalMs);
+}
+
+void startNtpIfNeeded()
+{
+  if (ntpStarted || WiFi.status() != WL_CONNECTED) return;
+  applyTimezone();
+  sntp_set_time_sync_notification_cb(onNtpSyncNotification);
+  ntpStarted = true;
+  Serial.printf("Time:        NTP started (TZ %s)\n", timezoneLabel(timezoneIdx));
+}
+
+void requestNtpResync()
+{
+  ntpResyncRequested = true;
+  if (ntpStarted && esp_sntp_enabled()) {
+    sntp_restart();
+    Serial.println("Time:        NTP resync requested");
+  }
+}
+
+void saveTimezone(uint8_t idx)
+{
+  if (idx >= kTimezoneCount) idx = kTimezoneDefault;
+  if (idx == timezoneIdx) return;
+  timezoneIdx = idx;
+  ensurePreferences();
+  networkPreferences.putUChar("tz_idx", timezoneIdx);
+  applyTimezone();
+  requestNtpResync();
+  Serial.printf("Time:        timezone %s (%s)\n", timezoneLabel(timezoneIdx), timezonePosix(timezoneIdx));
+}
+
+void updateNtp(uint32_t now)
+{
+  if (WiFi.status() != WL_CONNECTED) return;
+  startNtpIfNeeded();
+  if (!ntpStarted) return;
+
+  if (systemTimeValid()) {
+    if (!ntpSynced) ntpSynced = true;
+    if (lastNtpSyncMs == 0) lastNtpSyncMs = now;
+    const bool resyncDue = lastNtpSyncMs != 0 && (now - lastNtpSyncMs) >= kNtpResyncIntervalMs;
+    if ((ntpResyncRequested || resyncDue) && esp_sntp_enabled()) {
+      sntp_restart();
+      if (ntpResyncRequested) Serial.println("Time:        NTP resync in progress");
+    }
+  }
 }
 
 bool systemTimeValid()
@@ -2160,6 +2289,8 @@ void setupWebGui()
 {
 #if ENABLE_WEB_GUI
   ensurePreferences();
+  timezoneIdx = networkPreferences.getUChar("tz_idx", kTimezoneDefault);
+  if (timezoneIdx >= kTimezoneCount) timezoneIdx = kTimezoneDefault;
   logColumnMask = networkPreferences.getUShort("log_cols", kLogColDefault);
   logFsReady = SPIFFS.begin(true);
   Serial.printf("Logs:        SPIFFS %s, current=%s, old=%s\n",
@@ -2328,6 +2459,18 @@ details.setup > .inside { padding: 0 16px 16px; }
 </div>
 </details>
 <details class="setup" open>
+<summary>Zeit / NTP</summary>
+<div class="inside">
+<p class="hint">NTP startet automatisch, wenn der Hub per STA (Z00-Station oder Handy-Hotspot) Internet hat. AP-only bleibt auf Bootzeit.</p>
+<div class="row"><span>Sync</span><strong id="ntpSynced">-</strong></div>
+<div class="row"><span>Aktuelle Zeit</span><strong id="ntpTime">-</strong></div>
+<div class="row"><span>Zeitzone</span><strong id="ntpTz">-</strong></div>
+<div class="row"><span>Server</span><strong id="ntpServer" class="mono">-</strong></div>
+<div class="row"><span>Letzter Sync</span><strong id="ntpLastSync">-</strong></div>
+<button type="button" class="secondary" id="ntpSyncBtn" onclick="ntpSyncNow()">Jetzt synchronisieren</button>
+</div>
+</details>
+<details class="setup" open>
 <summary>BLE Hub Clients</summary>
 <div class="inside">
 <p class="hint">Geraete, die sich mit dem ESP32-S3 als Spartan3-Hub verbinden, z.B. M5 Dial oder Waveshare-Display.</p>
@@ -2445,6 +2588,24 @@ details.setup > .inside { padding: 0 16px 16px; }
 </form>
 <p class="hint">Im Auto am einfachsten Handy-Hotspot starten und Laptop, M5 und ESP32 in dasselbe Netz lassen. Die ESP32-IP steht oben und im USB-Log.</p>
 <form action="/wifi_clear" method="post" style="margin-top:12px"><button class="secondary" type="submit">Gespeichertes WLAN loeschen</button></form>
+</div>
+</details>
+<details class="setup" open>
+<summary>Zeitzone</summary>
+<div class="inside">
+<p class="hint">Standard ist Europe/Berlin (CET/CEST). Aenderung speichert in NVS und fordert einen NTP-Neusync an.</p>
+<form action="/timezone" method="post">
+<label for="tzSelect">Zeitzone</label>
+<select id="tzSelect" name="tz_idx">
+<option value="0">Europe/Berlin (CET/CEST)</option>
+<option value="1">UTC</option>
+<option value="2">Europe/London (GMT/BST)</option>
+<option value="3">America/New_York (EST/EDT)</option>
+<option value="4">America/Los_Angeles (PST/PDT)</option>
+<option value="5">Asia/Tokyo (JST)</option>
+</select>
+<button type="submit">Speichern</button>
+</form>
 </div>
 </details>
 <details class="setup" open>
@@ -2617,6 +2778,12 @@ function syncBlePresetOptions(selectId, devices, kind, savedAddr) {
 async function copyJson() {
   try { await navigator.clipboard.writeText(JSON.stringify(lastJson, null, 2)); } catch(e) {}
 }
+async function ntpSyncNow() {
+  try {
+    await fetch('/ntp_sync', { method: 'POST', cache: 'no-store' });
+    await refresh();
+  } catch (e) {}
+}
 async function refresh() {
   try {
     const r = await fetch('/state', {cache:'no-store'});
@@ -2678,6 +2845,17 @@ async function refresh() {
     document.getElementById('logcurrent').textContent = fmtBytes(d.log_current_bytes);
     document.getElementById('logold').textContent = fmtBytes(d.log_old_bytes);
     document.getElementById('logtime').textContent = (d.time_valid ? 'NTP ' : 'Bootzeit ') + (d.time_text || '-');
+    document.getElementById('ntpSynced').textContent = d.ntp_synced ? 'ja' : 'nein';
+    cls(document.getElementById('ntpSynced'), d.ntp_synced ? 'ok' : 'warn');
+    document.getElementById('ntpTime').textContent = d.ntp_time || d.time_text || '-';
+    document.getElementById('ntpTz').textContent = d.timezone || '-';
+    document.getElementById('ntpServer').textContent = d.ntp_server || '-';
+    const ntpAge = Number(d.ntp_last_sync_age_s ?? 0);
+    document.getElementById('ntpLastSync').textContent = d.ntp_synced
+      ? (ntpAge > 0 ? 'vor ' + ntpAge + ' s' : 'gerade eben')
+      : '-';
+    const tzSel = document.getElementById('tzSelect');
+    if (tzSel && document.activeElement !== tzSel) tzSel.value = String(d.timezone_idx ?? 0);
     const cols = Number(d.log_columns ?? 63);
     document.getElementById('colSpartan').checked = !!(cols & 1);
     document.getElementById('colTune').checked = !!(cols & 2);
@@ -2775,6 +2953,19 @@ setInterval(() => { if (!document.hidden) refresh(); }, 750);
     }
     server.sendHeader("Location", "/", true);
     server.send(303, "text/plain", "");
+  });
+  server.on("/timezone", HTTP_POST, []() {
+    int idx = server.arg("tz_idx").toInt();
+    saveTimezone(static_cast<uint8_t>(idx));
+    server.sendHeader("Location", "/", true);
+    server.send(303, "text/plain", "");
+  });
+  server.on("/ntp_sync", HTTP_POST, []() {
+    if (WiFi.status() == WL_CONNECTED) {
+      startNtpIfNeeded();
+      requestNtpResync();
+    }
+    server.send(200, "application/json", "{\"ok\":true}");
   });
   server.on("/log_columns", HTTP_POST, []() {
     uint16_t mask = 0;
@@ -2987,13 +3178,10 @@ void updateWebGui()
       homeWifiDisabledForRoadAp = false;
       homeWifiConnectStartedMs = 0;
       Serial.printf("Home WiFi:   connected to '%s', http://%s/\n", WiFi.SSID().c_str(), WiFi.localIP().toString().c_str());
-      if (!ntpConfigured) {
-        configTzTime("CET-1CEST,M3.5.0,M10.5.0/3", "pool.ntp.org", "time.nist.gov");
-        ntpConfigured = true;
-        Serial.println("Time:        NTP requested");
-      }
+      startNtpIfNeeded();
     }
   }
+  updateNtp(now);
   if (haveSavedWifi && !homeWifiDisabledForRoadAp && wifiStatus != WL_CONNECTED &&
       homeWifiConnectStartedMs != 0 && now - homeWifiConnectStartedMs >= kHomeWifiConnectWindowMs) {
     WiFi.disconnect(false, false);
