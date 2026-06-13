@@ -12,6 +12,19 @@
 #define ENABLE_BLE_HUB 0
 #endif
 
+#ifndef ENABLE_BLE_DISPLAY
+#define ENABLE_BLE_DISPLAY ENABLE_BLE_HUB
+#endif
+
+#ifndef ENABLE_ESP_NOW_HUB
+#define ENABLE_ESP_NOW_HUB 0
+#endif
+
+#if ENABLE_ESP_NOW_HUB
+#include <esp_now.h>
+#include "spartan_cockpit_frame.h"
+#endif
+
 #if ENABLE_WEB_GUI
 #include <DNSServer.h>
 #include <FS.h>
@@ -206,6 +219,16 @@ constexpr uint32_t kTuneScanWindowMs = 10000;
 constexpr uint32_t kTuneReconnectDelayMs = 5000;
 constexpr uint32_t kTunePingIntervalMs = 1650;
 constexpr uint32_t kBleHubAdvertiseFallbackMs = 30000;
+constexpr uint32_t kTuneStaleRxMs = 3000;
+constexpr uint32_t kTuneReconnectBackoffMaxMs = 30000;
+
+enum class TuneLinkState : uint8_t {
+  Idle = 0,
+  Scanning,
+  Connecting,
+  Subscribed,
+  Streaming,
+};
 
 #ifndef ENABLE_BM6
 #define ENABLE_BM6 1
@@ -227,6 +250,12 @@ const uint8_t kBm6AesKey[16] = {
 const uint8_t kBm6TriggerPlain[16] = {
     0xD1, 0x55, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+#endif
+#if ENABLE_ESP_NOW_HUB
+#ifndef ESP_NOW_WIFI_CHANNEL
+#define ESP_NOW_WIFI_CHANNEL 6
+#endif
+constexpr uint8_t kEspNowBroadcastAddr[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 #endif
 
 struct SpartanReading {
@@ -300,11 +329,18 @@ uint32_t lastUartCommandMs = 0;
 uint32_t lastUartResponseMs = 0;
 String savedWifiSsid = "";
 #if ENABLE_BLE_HUB
+#if ENABLE_BLE_DISPLAY
 NimBLECharacteristic *bleStatusCharacteristic = nullptr;
 volatile uint8_t bleClientCount = 0;
-String bleAddress = "";
 bool bleAdvertisingStarted = false;
+bool bleAdvPausedForRadio = false;
 uint32_t bleHubSetupMs = 0;
+#endif
+String bleAddress = "";
+TuneLinkState tuneLinkState = TuneLinkState::Idle;
+uint8_t tuneFailStreak = 0;
+volatile bool bleCentralScanActive = false;
+uint32_t tuneStaleReconnectMs = 0;
 struct BleHubClient {
   String address;
   String idAddress;
@@ -359,6 +395,13 @@ uint32_t bm6AuxRxCount = 0;
 float bm6AuxVoltage = 0.0f;
 int8_t bm6AuxTemperature = 0;
 #endif
+#endif
+#if ENABLE_ESP_NOW_HUB
+volatile uint32_t espNowTxCount = 0;
+volatile uint32_t espNowTxFailCount = 0;
+uint16_t espNowSeq = 0;
+bool espNowReady = false;
+uint32_t lastEspNowSendMs = 0;
 #endif
 #if ENABLE_WEB_GUI
 WebServer server(80);
@@ -431,6 +474,17 @@ struct WifiHttpPoller {
 constexpr uint8_t kWifiHttpPollerMax = 8;
 WifiHttpPoller wifiHttpPollers[kWifiHttpPollerMax];
 uint8_t wifiHttpPollerCount = 0;
+struct HubEvent {
+  uint32_t ms = 0;
+  uint32_t epoch = 0;
+  char type[12] = {};
+  char detail[72] = {};
+};
+constexpr uint16_t kHubEventMax = 200;
+HubEvent hubEvents[kHubEventMax];
+uint16_t hubEventHead = 0;
+uint16_t hubEventCount = 0;
+portMUX_TYPE hubEventMux = portMUX_INITIALIZER_UNLOCKED;
 #endif
 
 void ensurePreferences()
@@ -652,6 +706,75 @@ void refreshWifiApStations();
 void recordWifiHttpPoller();
 String formatMacLower(const uint8_t mac[6]);
 String apStationIpFromMac(const uint8_t mac[6]);
+void logHubEvent(const char *type, const char *detail);
+String hubEventsJson(uint16_t limit = 100);
+void clearHubEvents();
+#endif
+
+#if !ENABLE_WEB_GUI
+void logHubEvent(const char *, const char *) {}
+#endif
+
+#if ENABLE_BLE_HUB
+const char *tuneLinkStateText(TuneLinkState state)
+{
+  switch (state) {
+    case TuneLinkState::Scanning: return "scanning";
+    case TuneLinkState::Connecting: return "connecting";
+    case TuneLinkState::Subscribed: return "subscribed";
+    case TuneLinkState::Streaming: return "streaming";
+    default: return "idle";
+  }
+}
+
+void setTuneLinkState(TuneLinkState state, const char *detail)
+{
+  if (tuneLinkState == state) return;
+  tuneLinkState = state;
+  char buf[96];
+  if (detail != nullptr && detail[0] != '\0') {
+    snprintf(buf, sizeof(buf), "%s|%s", tuneLinkStateText(state), detail);
+  } else {
+    snprintf(buf, sizeof(buf), "%s", tuneLinkStateText(state));
+  }
+  logHubEvent("tune_state", buf);
+}
+
+#if ENABLE_BLE_DISPLAY
+void pauseBleDisplayAdvertising()
+{
+  if (!bleAdvertisingStarted || bleAdvPausedForRadio) return;
+  NimBLEDevice::getAdvertising()->stop();
+  bleAdvPausedForRadio = true;
+}
+
+void resumeBleDisplayAdvertising()
+{
+  if (!bleAdvPausedForRadio) return;
+  bleAdvPausedForRadio = false;
+  if (bleAdvertisingStarted) {
+    NimBLEDevice::startAdvertising();
+  }
+}
+#else
+void pauseBleDisplayAdvertising() {}
+void resumeBleDisplayAdvertising() {}
+#endif
+
+bool bleRadioFreeForBm6Scan()
+{
+  if (bleCentralScanActive || tuneDoConnect) return false;
+  if (tuneLinkState == TuneLinkState::Scanning || tuneLinkState == TuneLinkState::Connecting) {
+    return false;
+  }
+  return true;
+}
+
+void markBleCentralScanEnded()
+{
+  bleCentralScanActive = false;
+  resumeBleDisplayAdvertising();
+}
 #endif
 
 #if ENABLE_BLE_HUB
@@ -675,10 +798,14 @@ TuneSnapshot tuneSnapshot()
 
 uint8_t getBleClientCount()
 {
+#if ENABLE_BLE_DISPLAY
   portENTER_CRITICAL(&stateMux);
   const uint8_t count = bleClientCount;
   portEXIT_CRITICAL(&stateMux);
   return count;
+#else
+  return 0;
+#endif
 }
 
 void addBleHubClient(const NimBLEConnInfo &connInfo)
@@ -863,6 +990,13 @@ void recordWifiHttpPoller()
   if (deviceId.length() > 0) wifiHttpPollers[slot].deviceId = deviceId;
   if (userAgent.length() > 0) wifiHttpPollers[slot].userAgent = userAgent;
 
+  if (wifiHttpPollers[slot].pollCount == 1) {
+    char detail[80];
+    snprintf(detail, sizeof(detail), "poll|%s|%s", ipText.c_str(),
+             deviceId.length() ? deviceId.c_str() : "-");
+    logHubEvent("wifi_http", detail);
+  }
+
   if (via == "ap") {
     for (uint8_t i = 0; i < wifiApStationCount; i++) {
       if (wifiApStations[i].ip == ipText) {
@@ -879,7 +1013,9 @@ String statusJson()
   const SpartanReading snapshot = readingSnapshot();
 #if ENABLE_BLE_HUB
   const TuneSnapshot tune = tuneSnapshot();
+#if ENABLE_BLE_DISPLAY
   const uint8_t clients = getBleClientCount();
+#endif
 #endif
   const uint32_t now = millis();
   String json;
@@ -925,13 +1061,31 @@ String statusJson()
   json += String(heaterStatusCode);
 #endif
 #if ENABLE_BLE_HUB
+#if ENABLE_BLE_DISPLAY
   json += ",\"ble_clients\":";
   json += String(clients);
+#endif
   json += ",\"ble_name\":\"";
   json += BLE_HUB_NAME;
   json += "\",\"ble_address\":\"";
   json += bleAddress;
-  json += "\",\"ble_hub_clients\":[";
+  json += "\",\"ble_display\":";
+  json += ENABLE_BLE_DISPLAY ? "true" : "false";
+#endif
+#if ENABLE_ESP_NOW_HUB
+  json += ",\"esp_now_ready\":";
+  json += espNowReady ? "true" : "false";
+  json += ",\"esp_now_channel\":";
+  json += String(ESP_NOW_WIFI_CHANNEL);
+  json += ",\"esp_now_tx\":";
+  json += String(espNowTxCount);
+  json += ",\"esp_now_tx_fail\":";
+  json += String(espNowTxFailCount);
+  json += ",\"esp_now_seq\":";
+  json += String(espNowSeq);
+#endif
+#if ENABLE_BLE_HUB
+  json += ",\"ble_hub_clients\":[";
   for (uint8_t i = 0; i < bleHubClientCount; i++) {
     if (i > 0) json += ",";
     json += "{\"addr\":\"";
@@ -1058,7 +1212,8 @@ String statusJson()
     json += String(now - wifiHttpPollers[i].firstPollMs);
     json += "}";
   }
-  json += "]";
+  json += "],\"hub_event_count\":";
+  json += String(hubEventCount);
 #endif
   json += ",\"uart_command\":\"";
   json += lastUartCommand;
@@ -1073,6 +1228,10 @@ String statusJson()
 #if ENABLE_BLE_HUB
   json += ",\"tune_connected\":";
   json += tuneConnected ? "true" : "false";
+  json += ",\"tune_link_state\":\"";
+  json += tuneLinkStateText(tuneLinkState);
+  json += "\",\"tune_fail_streak\":";
+  json += String(tuneFailStreak);
   json += ",\"tune_rx\":";
   json += String(tune.rxCount);
   json += ",\"tune_age_ms\":";
@@ -1262,6 +1421,64 @@ bool systemTimeValid()
 {
   time_t now = time(nullptr);
   return now > 1700000000;
+}
+
+void logHubEvent(const char *type, const char *detail)
+{
+  if (type == nullptr) return;
+  HubEvent ev = {};
+  ev.ms = millis();
+  if (systemTimeValid()) {
+    ev.epoch = static_cast<uint32_t>(time(nullptr));
+  }
+  strncpy(ev.type, type, sizeof(ev.type) - 1);
+  strncpy(ev.detail, detail ? detail : "", sizeof(ev.detail) - 1);
+  portENTER_CRITICAL(&hubEventMux);
+  hubEvents[hubEventHead] = ev;
+  hubEventHead = static_cast<uint16_t>((hubEventHead + 1) % kHubEventMax);
+  if (hubEventCount < kHubEventMax) {
+    hubEventCount++;
+  }
+  portEXIT_CRITICAL(&hubEventMux);
+}
+
+String hubEventsJson(uint16_t limit)
+{
+  if (limit == 0 || limit > kHubEventMax) {
+    limit = 100;
+  }
+  String json = "[";
+  portENTER_CRITICAL(&hubEventMux);
+  const uint16_t count = hubEventCount;
+  const uint16_t start = count <= kHubEventMax ? static_cast<uint16_t>((hubEventHead + kHubEventMax - count) % kHubEventMax) : 0;
+  uint16_t emitted = 0;
+  for (uint16_t i = 0; i < count && emitted < limit; i++) {
+    const uint16_t idx = static_cast<uint16_t>((start + count - 1 - i) % kHubEventMax);
+    const HubEvent &ev = hubEvents[idx];
+    if (emitted > 0) json += ",";
+    json += "{\"ms\":";
+    json += String(ev.ms);
+    json += ",\"epoch\":";
+    json += String(ev.epoch);
+    json += ",\"type\":\"";
+    json += jsonEscape(String(ev.type));
+    json += "\",\"detail\":\"";
+    json += jsonEscape(String(ev.detail));
+    json += "\"}";
+    emitted++;
+  }
+  portEXIT_CRITICAL(&hubEventMux);
+  json += "]";
+  return json;
+}
+
+void clearHubEvents()
+{
+  portENTER_CRITICAL(&hubEventMux);
+  hubEventHead = 0;
+  hubEventCount = 0;
+  portEXIT_CRITICAL(&hubEventMux);
+  logHubEvent("system", "events_cleared");
 }
 
 String csvTimeText(uint32_t ms)
@@ -1468,6 +1685,7 @@ void decodeTuneFrame(const uint8_t *data, size_t length)
 
 String bleStatusPayload()
 {
+#if ENABLE_BLE_DISPLAY
   const SpartanReading snapshot = readingSnapshot();
   const TuneSnapshot tune = tuneSnapshot();
   // Kompakt-Format fuer M5 Gateway:
@@ -1507,8 +1725,12 @@ String bleStatusPayload()
              tune.coilCurrent);
   }
   return String(payload);
+#else
+  return String("");
+#endif
 }
 
+#if ENABLE_BLE_DISPLAY
 class BleServerCallbacks : public NimBLEServerCallbacks {
  public:
   void onConnect(NimBLEServer *, NimBLEConnInfo &connInfo) override
@@ -1525,6 +1747,10 @@ class BleServerCallbacks : public NimBLEServerCallbacks {
                   connInfo.getConnHandle(),
                   connInfo.getMTU(),
                   clients);
+    char detail[48];
+    snprintf(detail, sizeof(detail), "connect|%s|h%u", connInfo.getAddress().toString().c_str(),
+             connInfo.getConnHandle());
+    logHubEvent("ble_client", detail);
     // NimBLE stops advertising after the first connect — restart so more
     // cockpit displays (M5 + Waveshare) can join while slots remain.
     if (bleAdvertisingStarted && clients < kBleHubClientMax) {
@@ -1547,6 +1773,10 @@ class BleServerCallbacks : public NimBLEServerCallbacks {
                   connInfo.getAddress().toString().c_str(),
                   connInfo.getConnHandle(),
                   clients);
+    char detail[48];
+    snprintf(detail, sizeof(detail), "disconnect|%s|h%u", connInfo.getAddress().toString().c_str(),
+             connInfo.getConnHandle());
+    logHubEvent("ble_client", detail);
     if (bleAdvertisingStarted) {
       NimBLEDevice::startAdvertising();
     }
@@ -1560,10 +1790,22 @@ class BleCommandCallbacks : public NimBLECharacteristicCallbacks {
     sendSpartanUartCommand(characteristic->getValue().c_str());
   }
 };
+#endif
 
-void scheduleTuneScan()
+void scheduleTuneScan(bool fastRetry = false)
 {
-  tuneNextScanMs = millis() + kTuneReconnectDelayMs;
+  if (!fastRetry) {
+    tuneFailStreak++;
+  }
+  uint32_t delayMs = fastRetry ? 500UL : kTuneReconnectDelayMs;
+  if (!fastRetry && tuneFailStreak > 1) {
+    delayMs = kTuneReconnectDelayMs * tuneFailStreak;
+    if (delayMs > kTuneReconnectBackoffMaxMs) {
+      delayMs = kTuneReconnectBackoffMaxMs;
+    }
+  }
+  tuneNextScanMs = millis() + delayMs;
+  setTuneLinkState(TuneLinkState::Idle, fastRetry ? "retry_fast" : "retry_scheduled");
 }
 
 void resetTuneClient()
@@ -1577,6 +1819,7 @@ void resetTuneClient()
   tuneNusRx = nullptr;
   tuneConnected = false;
   tuneLastPingMs = 0;
+  setTuneLinkState(TuneLinkState::Idle, "reset");
 }
 
 class TuneClientCallbacks : public NimBLEClientCallbacks {
@@ -1585,8 +1828,12 @@ class TuneClientCallbacks : public NimBLEClientCallbacks {
   {
     tuneConnected = false;
     tuneNusRx = nullptr;
+    char detail[24];
+    snprintf(detail, sizeof(detail), "disconnect|r%d", reason);
     Serial.printf("123TUNE BLE: disconnected reason=%d\n", reason);
-    scheduleTuneScan();
+    logHubEvent("tune_state", detail);
+    tuneFailStreak = 0;
+    scheduleTuneScan(true);
   }
 };
 
@@ -1598,6 +1845,9 @@ void onTuneNotify(NimBLERemoteCharacteristic *, uint8_t *data, size_t length, bo
   }
   Serial.println();
   decodeTuneFrame(data, length);
+  if (tuneLinkState == TuneLinkState::Subscribed) {
+    setTuneLinkState(TuneLinkState::Streaming, "notify");
+  }
 }
 
 class TuneScanCallbacks : public NimBLEScanCallbacks {
@@ -1631,6 +1881,7 @@ class TuneScanCallbacks : public NimBLEScanCallbacks {
     tuneNextScanMs = 0;
     tuneScanCandidates++;
     NimBLEDevice::getScan()->stop();
+    markBleCentralScanEnded();
     Serial.printf("123TUNE BLE: found %s name='%s' nus=%d addrMatch=%d\n",
                   address.c_str(),
                   name.c_str(),
@@ -1641,11 +1892,14 @@ class TuneScanCallbacks : public NimBLEScanCallbacks {
   void onScanEnd(const NimBLEScanResults &, int reason) override
   {
     if (!tuneConnected && !tuneDoConnect) {
+      markBleCentralScanEnded();
       Serial.printf("123TUNE BLE: scan end reason=%d seen=%lu candidates=%lu\n",
                     reason,
                     static_cast<unsigned long>(tuneScanSeen),
                     static_cast<unsigned long>(tuneScanCandidates));
-      scheduleTuneScan();
+      scheduleTuneScan(false);
+    } else {
+      markBleCentralScanEnded();
     }
   }
 };
@@ -1655,18 +1909,26 @@ TuneScanCallbacks tuneScanCallbacks;
 
 void startTuneScan()
 {
-  if (tuneConnected || tuneDoConnect) return;
+  if (tuneConnected || tuneDoConnect || bleCentralScanActive) return;
+  pauseBleDisplayAdvertising();
   NimBLEScan *scan = NimBLEDevice::getScan();
+  if (scan->isScanning()) {
+    scan->stop();
+    delay(50);
+  }
   scan->setScanCallbacks(&tuneScanCallbacks, false);
   scan->setActiveScan(true);
   scan->setInterval(100);
   scan->setWindow(99);
   tuneScanSeen = 0;
   tuneScanCandidates = 0;
+  bleCentralScanActive = true;
+  setTuneLinkState(TuneLinkState::Scanning, "start");
   Serial.println("123TUNE BLE: scan 10s...");
   if (!scan->start(kTuneScanWindowMs, false)) {
     Serial.println("123TUNE BLE: scan start failed");
-    scheduleTuneScan();
+    markBleCentralScanEnded();
+    scheduleTuneScan(false);
   }
 }
 
@@ -1674,6 +1936,9 @@ void connectTune()
 {
   tuneDoConnect = false;
   if (tuneConnected) return;
+  markBleCentralScanEnded();
+  pauseBleDisplayAdvertising();
+  setTuneLinkState(TuneLinkState::Connecting, tuneTargetAddress.toString().c_str());
   if (tuneClient != nullptr && !tuneClient->isConnected()) {
     resetTuneClient();
   }
@@ -1686,7 +1951,7 @@ void connectTune()
   if (!tuneClient->connect(tuneTargetAddress, true, false, false)) {
     Serial.println("123TUNE BLE: connect failed");
     resetTuneClient();
-    scheduleTuneScan();
+    scheduleTuneScan(false);
     return;
   }
   delay(750);
@@ -1695,7 +1960,7 @@ void connectTune()
   if (service == nullptr) {
     Serial.println("123TUNE BLE: NUS service missing");
     tuneClient->disconnect();
-    scheduleTuneScan();
+    scheduleTuneScan(false);
     return;
   }
   NimBLERemoteCharacteristic *tx = service->getCharacteristic(kTuneNusTxUuid);
@@ -1703,7 +1968,7 @@ void connectTune()
   if (tx == nullptr || !tx->canNotify()) {
     Serial.println("123TUNE BLE: NUS TX notify missing");
     tuneClient->disconnect();
-    scheduleTuneScan();
+    scheduleTuneScan(false);
     return;
   }
   if (tuneNusRx == nullptr) {
@@ -1734,9 +1999,14 @@ void connectTune()
   Serial.printf("123TUNE BLE: subscribe %s\n", ok ? "OK" : "FAIL");
   if (!ok) {
     tuneClient->disconnect();
-    scheduleTuneScan();
+    scheduleTuneScan(false);
     return;
   }
+
+  tuneFailStreak = 0;
+  tuneStaleReconnectMs = 0;
+  setTuneLinkState(TuneLinkState::Subscribed, "ok");
+  resumeBleDisplayAdvertising();
 
   if (cccd != nullptr) {
     NimBLEAttValue value = cccd->readValue();
@@ -1892,6 +2162,9 @@ class Bm6ClientCallbacks : public NimBLEClientCallbacks {
     bm6Connected = false;
     bm6WriteChar = nullptr;
     Serial.printf("BM6 BLE:     disconnected reason=%d\n", reason);
+    char detail[24];
+    snprintf(detail, sizeof(detail), "disconnect|r%d", reason);
+    logHubEvent("bm6_state", detail);
     scheduleBm6Scan();
   }
 };
@@ -1989,14 +2262,18 @@ class Bm6ScanCallbacks : public NimBLEScanCallbacks {
     bm6DoConnect = true;
     bm6NextScanMs = 0;
     NimBLEDevice::getScan()->stop();
+    markBleCentralScanEnded();
     Serial.printf("BM6 BLE:     found %s\n", addr.c_str());
   }
 
   void onScanEnd(const NimBLEScanResults &, int reason) override
   {
     if (!bm6Connected && !bm6DoConnect) {
+      markBleCentralScanEnded();
       Serial.printf("BM6 BLE:     scan end reason=%d\n", reason);
       scheduleBm6Scan();
+    } else {
+      markBleCentralScanEnded();
     }
   }
 };
@@ -2006,14 +2283,26 @@ Bm6ScanCallbacks bm6ScanCallbacks;
 void startBm6Scan()
 {
   if (bm6Connected || bm6DoConnect) return;
+  if (!bleRadioFreeForBm6Scan()) {
+    scheduleBm6Scan();
+    return;
+  }
+  pauseBleDisplayAdvertising();
   NimBLEScan *scan = NimBLEDevice::getScan();
+  if (scan->isScanning()) {
+    scan->stop();
+    delay(50);
+  }
   scan->setScanCallbacks(&bm6ScanCallbacks, false);
   scan->setActiveScan(true);
   scan->setInterval(100);
   scan->setWindow(99);
+  bleCentralScanActive = true;
+  logHubEvent("bm6_state", "scan|start");
   Serial.println("BM6 BLE:     scan 10s...");
   if (!scan->start(kBm6ScanWindowMs, false)) {
     Serial.println("BM6 BLE:     scan start failed");
+    markBleCentralScanEnded();
     scheduleBm6Scan();
   }
 }
@@ -2071,6 +2360,7 @@ void connectBm6()
   }
   bm6Connected = true;
   bm6SlotStartedMs = millis();
+  logHubEvent("bm6_state", bm6ActiveSlot == 0 ? "connect|main" : "connect|aux");
   bm6SendTrigger();
 }
 
@@ -2097,12 +2387,27 @@ void updateBm6Ble()
 
 void updateTuneBle()
 {
+  const uint32_t now = millis();
   if (tuneDoConnect) {
     connectTune();
     return;
   }
   sendTunePing();
-  if (!tuneConnected && tuneNextScanMs != 0 && static_cast<int32_t>(millis() - tuneNextScanMs) >= 0) {
+  if (tuneConnected) {
+    const TuneSnapshot tune = tuneSnapshot();
+    if (tune.lastRxMs != 0 && (now - tune.lastRxMs) > kTuneStaleRxMs &&
+        tune.rpm >= ENGINE_RUNNING_RPM_THRESHOLD) {
+      if (tuneStaleReconnectMs == 0 || (now - tuneStaleReconnectMs) > 5000) {
+        tuneStaleReconnectMs = now;
+        logHubEvent("tune_state", "stale|rx_timeout");
+        resetTuneClient();
+        scheduleTuneScan(true);
+        return;
+      }
+    }
+    return;
+  }
+  if (tuneNextScanMs != 0 && static_cast<int32_t>(now - tuneNextScanMs) >= 0) {
     tuneNextScanMs = 0;
     startTuneScan();
   }
@@ -2125,10 +2430,15 @@ void updateTuneDebug()
 
 void startBleHubAdvertising()
 {
-  if (bleAdvertisingStarted) return;
+#if ENABLE_BLE_DISPLAY
+  if (bleAdvertisingStarted || bleCentralScanActive || tuneDoConnect) return;
+  if (tuneLinkState == TuneLinkState::Scanning || tuneLinkState == TuneLinkState::Connecting) return;
   NimBLEDevice::startAdvertising();
   bleAdvertisingStarted = true;
+  bleAdvPausedForRadio = false;
   Serial.println("BLE hub:     advertising started");
+  logHubEvent("ble_client", "advertising|start");
+#endif
 }
 
 void setupBleHub()
@@ -2137,7 +2447,9 @@ void setupBleHub()
   NimBLEDevice::setPower(ESP_PWR_LVL_P9);
   NimBLEDevice::setMTU(23);
   bleAddress = NimBLEDevice::getAddress().toString().c_str();
+#if ENABLE_BLE_DISPLAY
   bleHubSetupMs = millis();
+#endif
 #if ENABLE_WEB_GUI
   ensurePreferences();
   tuneSavedAddress = networkPreferences.isKey("tune_mac")
@@ -2162,6 +2474,7 @@ void setupBleHub()
 #endif
 #endif
 
+#if ENABLE_BLE_DISPLAY
   NimBLEServer *bleServer = NimBLEDevice::createServer();
   bleServer->setCallbacks(new BleServerCallbacks());
 
@@ -2179,13 +2492,17 @@ void setupBleHub()
   NimBLEAdvertising *advertising = NimBLEDevice::getAdvertising();
   advertising->addServiceUUID(kBleServiceUuid);
   advertising->setName(BLE_HUB_NAME);
+#else
+  Serial.println("BLE display: disabled, cockpit uses ESP-NOW broadcast");
+#endif
 
-  Serial.printf("BLE hub:     '%s' addr=%s service=%s\n",
-                BLE_HUB_NAME,
-                bleAddress.c_str(),
-                kBleServiceUuid);
-  Serial.printf("123TUNE BLE: target %s\n", tuneSavedAddress.c_str());
+  Serial.printf("BLE stack:   '%s' addr=%s\n", BLE_HUB_NAME, bleAddress.c_str());
+#if ENABLE_BLE_DISPLAY
+  Serial.printf("BLE hub:     service=%s\n", kBleServiceUuid);
   Serial.println("BLE hub:     advertising waits for 123TUNE or 30s fallback");
+#endif
+  Serial.printf("123TUNE BLE: target %s\n", tuneSavedAddress.c_str());
+  logHubEvent("tune_state", "boot|target_saved");
   startTuneScan();
 #if ENABLE_BM6
   Serial.printf("BM6 BLE:     target %s\n", bm6SavedAddress.c_str());
@@ -2200,6 +2517,7 @@ void updateBleHub()
   updateBm6Ble();
 #endif
   updateTuneDebug();
+#if ENABLE_BLE_DISPLAY
   const uint32_t now = millis();
   if (!bleAdvertisingStarted &&
       (tuneConnected || static_cast<int32_t>(now - bleHubSetupMs - kBleHubAdvertiseFallbackMs) >= 0)) {
@@ -2215,10 +2533,96 @@ void updateBleHub()
   if (getBleClientCount() > 0) {
     bleStatusCharacteristic->notify();
   }
+#endif
 }
 #else
 void setupBleHub() {}
 void updateBleHub() {}
+#endif
+
+#if ENABLE_ESP_NOW_HUB
+void onEspNowSend(const uint8_t *mac, esp_now_send_status_t status)
+{
+  (void)mac;
+  if (status == ESP_NOW_SEND_SUCCESS) {
+    if (espNowTxCount < UINT32_MAX) {
+      espNowTxCount++;
+    }
+  } else if (espNowTxFailCount < UINT32_MAX) {
+    espNowTxFailCount++;
+  }
+}
+
+void setupEspNowHub()
+{
+#if ENABLE_WEB_GUI
+  if (WiFi.getMode() == WIFI_OFF) {
+    Serial.println("ESP-NOW:     WiFi not ready yet");
+    return;
+  }
+  const uint8_t channel = WiFi.channel();
+  if (channel > 0 && channel != ESP_NOW_WIFI_CHANNEL) {
+    Serial.printf("ESP-NOW:     WiFi channel %u, expected %d\n", channel, ESP_NOW_WIFI_CHANNEL);
+  }
+#endif
+
+  if (esp_now_init() != ESP_OK) {
+    Serial.println("ESP-NOW:     init failed");
+    logHubEvent("espnow_tx", "init|fail");
+    return;
+  }
+  esp_now_register_send_cb(onEspNowSend);
+
+  esp_now_peer_info_t peer = {};
+  memcpy(peer.peer_addr, kEspNowBroadcastAddr, sizeof(kEspNowBroadcastAddr));
+  peer.channel = ESP_NOW_WIFI_CHANNEL;
+  peer.encrypt = false;
+  if (esp_now_add_peer(&peer) != ESP_OK) {
+    Serial.println("ESP-NOW:     broadcast peer add failed");
+    esp_now_deinit();
+    logHubEvent("espnow_tx", "peer|fail");
+    return;
+  }
+
+  espNowReady = true;
+  Serial.printf("ESP-NOW:     cockpit broadcast ready on channel %d\n", ESP_NOW_WIFI_CHANNEL);
+  logHubEvent("espnow_tx", "ready|broadcast");
+}
+
+void updateEspNowHub()
+{
+  if (!espNowReady) {
+    return;
+  }
+
+  const uint32_t now = millis();
+  if (now - lastEspNowSendMs < kBleNotifyIntervalMs) {
+    return;
+  }
+  lastEspNowSendMs = now;
+
+#if ENABLE_BLE_HUB
+  const SpartanReading snapshot = readingSnapshot();
+  const TuneSnapshot tune = tuneSnapshot();
+  const bool tuneFresh = tune.lastRxMs != 0 && (now - tune.lastRxMs) <= 3000;
+
+  SpartanCockpitFrame frame;
+  spartanCockpitEncode(&frame,
+                       espNowSeq++,
+                       snapshot.lambda,
+                       snapshot.valid,
+                       static_cast<uint16_t>(tune.rpm),
+                       tune.advance,
+                       static_cast<uint8_t>(tune.map),
+                       snapshot.status,
+                       tuneFresh,
+                       tuneConnected);
+  esp_now_send(kEspNowBroadcastAddr, reinterpret_cast<uint8_t *>(&frame), sizeof(frame));
+#endif
+}
+#else
+void setupEspNowHub() {}
+void updateEspNowHub() {}
 #endif
 
 void setupHourmeters()
@@ -2471,9 +2875,20 @@ details.setup > .inside { padding: 0 16px 16px; }
 </div>
 </details>
 <details class="setup" open>
+<summary>Cockpit Link (ESP-NOW)</summary>
+<div class="inside">
+<p class="hint">M5/Waveshare im Gateway-Modus hoeren auf ESP-NOW Broadcast (kein BLE-Connect noetig). Kanal muss mit Hub-AP uebereinstimmen (6).</p>
+<div class="row"><span>Status</span><strong id="espnowready">-</strong></div>
+<div class="row"><span>Kanal</span><strong id="espnowch">-</strong></div>
+<div class="row"><span>Frames gesendet / Fehler</span><strong id="espnowtx">0 / 0</strong></div>
+<div class="row"><span>Sequenz</span><strong id="espnowseq">0</strong></div>
+</div>
+</details>
+<details class="setup" open>
 <summary>BLE Hub Clients</summary>
 <div class="inside">
-<p class="hint">Geraete, die sich mit dem ESP32-S3 als Spartan3-Hub verbinden, z.B. M5 Dial oder Waveshare-Display.</p>
+<p class="hint">Geraete per BLE-GATT (nur wenn ENABLE_BLE_DISPLAY=1). Im ESP-NOW-Build aus — Cockpit hoert per Broadcast.</p>
+<div class="row"><span>Display per BLE</span><strong id="bledisplay">-</strong></div>
 <div class="row"><span>Status</span><strong id="bleenabled">-</strong></div>
 <div class="row"><span>Name</span><strong id="blename" class="mono">-</strong></div>
 <div class="row"><span>Adresse</span><strong id="bleaddr" class="mono">-</strong></div>
@@ -2500,6 +2915,16 @@ details.setup > .inside { padding: 0 16px 16px; }
 <p class="hint">Geraete, die /state oder /api/status pollen (Browser, Waveshare 2.8, Skripte). Device-ID aus X-Device Header oder ?client= Query.</p>
 <div class="row"><span>Poll Clients</span><strong id="wifiHttpCount">0</strong></div>
 <div id="wifiHttpTable" class="mono">-</div>
+</div>
+</details>
+<details class="setup" open>
+<summary>Event-Log (Ringbuffer)</summary>
+<div class="inside">
+<p class="hint">State-Transitions fuer 123TUNE, BLE, BM6, WiFi/HTTP und ESP-NOW. Auto-Refresh alle 2 s.</p>
+<div class="row"><span>Events</span><strong id="eventCount">0</strong></div>
+<div class="row"><span>123 State</span><strong id="tuneLinkState">-</strong></div>
+<form action="/log/events_clear" method="post" style="margin-top:8px"><button class="secondary" type="submit">Event-Log leeren</button></form>
+<pre id="eventLog" style="max-height:280px;margin-top:12px">-</pre>
 </div>
 </details>
 </div><!-- /tab diag -->
@@ -2784,6 +3209,17 @@ async function ntpSyncNow() {
     await refresh();
   } catch (e) {}
 }
+async function refreshEvents() {
+  try {
+    const r = await fetch('/log/events?limit=40', { cache: 'no-store' });
+    const events = await r.json();
+    document.getElementById('eventCount').textContent = events.length;
+    document.getElementById('eventLog').textContent = events.length ? events.map(ev => {
+      const ts = ev.epoch ? new Date(ev.epoch * 1000).toISOString().slice(11, 19) : ('+' + ev.ms + 'ms');
+      return ts + '  ' + (ev.type || '-') + '  ' + (ev.detail || '');
+    }).join('\n') : '-';
+  } catch (e) {}
+}
 async function refresh() {
   try {
     const r = await fetch('/state', {cache:'no-store'});
@@ -2800,6 +3236,13 @@ async function refresh() {
     cls(document.getElementById('status'), d.status === 'OK' ? 'ok' : (d.status === 'HEAT' || d.source === 'DEMO' ? 'warn' : 'bad'));
     cls(document.getElementById('can'), d.can_ready && d.can_state === 1 ? 'ok' : 'bad');
     document.getElementById('bleenabled').textContent = d.ble_name ? 'aktiv' : 'nicht im Build';
+    document.getElementById('bledisplay').textContent = d.ble_display ? 'aktiv' : 'aus (ESP-NOW)';
+    document.getElementById('espnowready').textContent = d.esp_now_ready ? 'broadcast aktiv' : (d.esp_now_channel ? 'initialisiert' : 'nicht im Build');
+    cls(document.getElementById('espnowready'), d.esp_now_ready ? 'ok' : 'warn');
+    document.getElementById('espnowch').textContent = d.esp_now_channel ?? '-';
+    document.getElementById('espnowtx').textContent = (d.esp_now_tx ?? 0) + ' / ' + (d.esp_now_tx_fail ?? 0);
+    document.getElementById('espnowseq').textContent = d.esp_now_seq ?? 0;
+    document.getElementById('tuneLinkState').textContent = d.tune_link_state ?? '-';
     document.getElementById('blename').textContent = d.ble_name || '-';
     document.getElementById('bleaddr').textContent = d.ble_address || '-';
     document.getElementById('bleclients').textContent = d.ble_clients ?? '0';
@@ -2930,6 +3373,9 @@ async function refresh() {
 }
 refresh();
 setInterval(() => { if (!document.hidden) refresh(); }, 750);
+setInterval(() => {
+  if (!document.hidden && !document.querySelector('[data-tab=\"diag\"]').hidden) refreshEvents();
+}, 2000);
 </script></main></body></html>)HTML");
   });
 
@@ -2946,6 +3392,44 @@ setInterval(() => { if (!document.hidden) refresh(); }, 750);
   server.on("/connecttest.txt", []() { server.send(200, "text/plain", "Microsoft Connect Test"); });
   server.on("/download", HTTP_GET, []() { sendLogFile(kLogFile, "spartan_hub_drive.csv"); });
   server.on("/download_old", HTTP_GET, []() { sendLogFile(kOldLogFile, "spartan_hub_drive_old.csv"); });
+  server.on("/log/events", HTTP_GET, []() {
+    uint16_t limit = 100;
+    if (server.hasArg("limit")) {
+      const int requested = server.arg("limit").toInt();
+      if (requested > 0 && requested <= kHubEventMax) {
+        limit = static_cast<uint16_t>(requested);
+      }
+    }
+    server.send(200, "application/json", hubEventsJson(limit));
+  });
+  server.on("/log/events.csv", HTTP_GET, []() {
+    String csv = "ms,epoch,type,detail\n";
+    portENTER_CRITICAL(&hubEventMux);
+    const uint16_t count = hubEventCount;
+    const uint16_t start = count <= kHubEventMax
+        ? static_cast<uint16_t>((hubEventHead + kHubEventMax - count) % kHubEventMax)
+        : 0;
+    for (uint16_t i = 0; i < count; i++) {
+      const uint16_t idx = static_cast<uint16_t>((start + i) % kHubEventMax);
+      const HubEvent &ev = hubEvents[idx];
+      csv += String(ev.ms);
+      csv += ",";
+      csv += String(ev.epoch);
+      csv += ",";
+      csv += String(ev.type);
+      csv += ",\"";
+      csv += jsonEscape(String(ev.detail));
+      csv += "\"\n";
+    }
+    portEXIT_CRITICAL(&hubEventMux);
+    server.sendHeader("Content-Disposition", "attachment; filename=hub_events.csv");
+    server.send(200, "text/csv", csv);
+  });
+  server.on("/log/events_clear", HTTP_POST, []() {
+    clearHubEvents();
+    server.sendHeader("Location", "/", true);
+    server.send(303, "text/plain", "");
+  });
   server.on("/clear", HTTP_POST, []() {
     if (logFsReady) {
       SPIFFS.remove(kLogFile);
@@ -3543,9 +4027,18 @@ void printBootDetails()
   Serial.println("Web GUI:     disabled");
 #endif
 #if ENABLE_BLE_HUB
-  Serial.println("BLE hub:     enabled as GATT peripheral");
+#if ENABLE_BLE_DISPLAY
+  Serial.println("BLE display: enabled as GATT peripheral");
 #else
-  Serial.println("BLE hub:     disabled");
+  Serial.println("BLE display: disabled (123TUNE central only)");
+#endif
+#else
+  Serial.println("BLE stack:   disabled");
+#endif
+#if ENABLE_ESP_NOW_HUB
+  Serial.printf("ESP-NOW:     cockpit broadcast on channel %d\n", ESP_NOW_WIFI_CHANNEL);
+#else
+  Serial.println("ESP-NOW:     disabled");
 #endif
 }
 
@@ -3563,6 +4056,7 @@ void setup()
   printBootDetails();
   setupBleHub();
   setupWebGui();
+  setupEspNowHub();
   setupHourmeters();
   setupCan();
   setupUart();
@@ -3590,6 +4084,7 @@ void loop()
   appendLiveCsv();
   updateWebGui();
   updateBleHub();
+  updateEspNowHub();
   updateDisplay();
   delay(10);
 }
