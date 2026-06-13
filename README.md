@@ -1,12 +1,14 @@
 # Spartan 3 v2 Motorraum Display
 
+> **Entwicklungsstand:** [`docs/STATUS_2026-06-13.md`](docs/STATUS_2026-06-13.md) · Branch: **`main`**
+
 Display firmware for a dedicated ESP32 Dev adapter board connected to a 14Point7 Spartan 3 v2. The primary measurement input is CAN. UART is available for Spartan configuration, and the analog output is prepared as an optional fallback.
 
 ## Hardware targets
 
 ### Dedicated ESP32 Dev adapter
 
-- Port: `COM9`
+- Port: `COM16` (default in `platformio.ini`)
 - USB bridge: Silicon Labs CP210x USB to UART Bridge
 - Chip: ESP32-D0WD-V3, revision 3.1
 - MAC: `6C:C8:40:06:73:58`
@@ -16,7 +18,8 @@ Display firmware for a dedicated ESP32 Dev adapter board connected to a 14Point7
 - Current bring-up mode: simulated Spartan readings until the CAN module arrives
 - Setup Web GUI: ESP32 access point `Spartan3-Setup`, password `lambda123`
 - Road hotspot default: `Android-AP1` / `Frankfurt1` (2.4 GHz)
-- BLE gateway prototype: advertises `Spartan3-Hub` for M5/Waveshare cockpit clients
+- Cockpit link: **ESP-NOW broadcast** to M5/Waveshare (BLE display server disabled in `motorraum` build)
+- BLE: 123TUNE+ central + optional BM6; setup name `Spartan3-Hub` for diagnostics only
 
 ### M5
 
