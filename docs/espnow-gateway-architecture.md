@@ -48,11 +48,13 @@ Frame size: **14 bytes**. Validate with `spartanCockpitFrameValid()`.
 
 ## Display client checklist (M5 / Waveshare)
 
-1. Add `spartan_cockpit_frame.h` to the cockpit project.
-2. `WiFi.mode(WIFI_STA)` and fix channel: `esp_wifi_set_channel(ESP_NOW_WIFI_CHANNEL, WIFI_SECOND_CHAN_NONE)` (or connect briefly to `Spartan3-Setup` AP on channel 6).
-3. `esp_now_init()` + `esp_now_register_recv_cb(...)`.
-4. In recv callback: if `len == kSpartanCockpitFrameSize` and `spartanCockpitFrameValid(frame)`, update UI.
-5. Remove BLE scan/connect/subscribe for `Spartan3-Hub` in gateway mode (keep direct 123TUNE mode unchanged).
+**Status 2026-06-13:** Implemented on both clients (`c3189c2` M5, `554b30a` Waveshare). ESP-NOW recv is active in Bus profile (`Spartan3-Setup`, channel 6); HTTP `/api/status` remains for NTP, BM6, and speed.
+
+1. Add `spartan_cockpit_frame.h` to the cockpit project. ✓
+2. `WiFi.mode(WIFI_STA)` and fix channel: `esp_wifi_set_channel(ESP_NOW_WIFI_CHANNEL, WIFI_SECOND_CHAN_NONE)` (or connect briefly to `Spartan3-Setup` AP on channel 6). ✓
+3. `esp_now_init()` + `esp_now_register_recv_cb(...)`. ✓
+4. In recv callback: if `len == kSpartanCockpitFrameSize` and `spartanCockpitFrameValid(frame)`, update UI. ✓
+5. Remove BLE scan/connect/subscribe for `Spartan3-Hub` in gateway mode (keep direct 123TUNE mode unchanged). ✓
 6. Optional: show `seq` gaps as link quality hint.
 
 ## Hub diagnostics

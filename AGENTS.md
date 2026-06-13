@@ -34,5 +34,5 @@ pio device monitor --port COM16 --baud 115200
 
 | Repo | Branch |
 |------|--------|
-| `m5stack-123` | `feature/spartan-live-display` |
-| `waveshare-vdo-clock` | `cursor/webgui-ota-c56e` |
+| `m5stack-123` | `feature/spartan-live-display` @ `c3189c2` (ESP-NOW recv) |
+| `-ESP32-S3-2-8-Zoll-IPS-Touchscreen-VDO-Copit-T2B` | `cursor/webgui-ota-c56e` @ `554b30a` (ESP-NOW recv) |
