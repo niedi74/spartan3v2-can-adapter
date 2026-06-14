@@ -17,7 +17,7 @@ Display firmware for a dedicated ESP32 Dev adapter board connected to a 14Point7
 - Optional interfaces: protected UART and scaled analog input
 - Current bring-up mode: simulated Spartan readings until the CAN module arrives
 - Setup Web GUI: ESP32 access point `Spartan3-Setup`, password `lambda123`
-- Road hotspot default: `Android-AP1` / `Frankfurt1` (2.4 GHz)
+- Road hotspot default: `Android-AP1` / `REDACTED` (2.4 GHz)
 - Cockpit link: **ESP-NOW broadcast** to M5/Waveshare (BLE display server disabled in `motorraum` build)
 - BLE: 123TUNE+ central + optional BM6; setup name `Spartan3-Hub` for diagnostics only
 
@@ -226,7 +226,7 @@ Two-tab layout: **Live** and **Setup**.
 | --- | --- |
 | WiFi AP | `Spartan3-Setup` / `lambda123` |
 | AP address | `http://192.168.4.1/` |
-| Road hotspot | `Android-AP1` / `Frankfurt1` |
+| Road hotspot | `Android-AP1` / `REDACTED` |
 
 ## Time master (until RTC battery)
 

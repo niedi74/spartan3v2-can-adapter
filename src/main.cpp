@@ -401,6 +401,7 @@ volatile uint32_t espNowTxCount = 0;
 volatile uint32_t espNowTxFailCount = 0;
 uint16_t espNowSeq = 0;
 bool espNowReady = false;
+uint8_t espNowActiveChannel = 0;
 uint32_t lastEspNowSendMs = 0;
 #endif
 #if ENABLE_WEB_GUI
@@ -408,12 +409,21 @@ WebServer server(80);
 DNSServer dns;
 Preferences networkPreferences;
 bool networkPreferencesReady = false;
+bool hubFeatEspNow = true;
+bool hubFeatAp = true;
+bool hubFeatWifi = true;
+bool hubFeatLog = true;
+bool hubFeatBle123 = false;
+bool hubFeatBleBm6 = false;
+uint8_t hubEspNowChannelPref = 0;  // 0=auto/follow STA, otherwise fixed 1..14
 bool haveSavedWifi = false;
 uint32_t homeWifiConnectStartedMs = 0;
 bool homeWifiDisabledForRoadAp = false;
 uint32_t lastApRetryMs = 0;
 uint32_t apRetryCount = 0;
 bool logFsReady = false;
+size_t logCurrentBytes = 0;
+size_t logOldBytes = 0;
 uint32_t lastCsvAppendMs = 0;
 struct TimezoneEntry {
   const char *label;
@@ -493,6 +503,72 @@ void ensurePreferences()
   if (!networkPreferencesReady) {
     networkPreferences.begin("net", false);
     networkPreferencesReady = true;
+  }
+#endif
+}
+
+void saveHubFeatures()
+{
+  ensurePreferences();
+  networkPreferences.putUChar("hf_ver", 1);
+  networkPreferences.putBool("hf_espnow", hubFeatEspNow);
+  networkPreferences.putBool("hf_ap", hubFeatAp);
+  networkPreferences.putBool("hf_wifi", hubFeatWifi);
+  networkPreferences.putBool("hf_log", hubFeatLog);
+  networkPreferences.putBool("hf_ble123", hubFeatBle123);
+  networkPreferences.putBool("hf_blebm6", hubFeatBleBm6);
+  networkPreferences.putUChar("espnow_ch", hubEspNowChannelPref);
+}
+
+void loadHubFeatures()
+{
+  ensurePreferences();
+  if (!networkPreferences.isKey("hf_ver")) {
+    hubFeatEspNow = true;
+    hubFeatAp = true;
+    hubFeatWifi = true;
+    hubFeatLog = true;
+    hubFeatBle123 = false;
+    hubFeatBleBm6 = false;
+    hubEspNowChannelPref = 0;
+    saveHubFeatures();
+    Serial.println("Hub feats:   Fahrt defaults (ESP-NOW/AP/WLAN/LOG on, BLE 123/BM6 off)");
+    return;
+  }
+  bool defaultWifi = strlen(HOME_WIFI_SSID) > 0;
+  if (networkPreferences.isKey("ssid")) {
+    defaultWifi = networkPreferences.getString("ssid", "").length() > 0;
+  }
+  hubFeatEspNow = networkPreferences.getBool("hf_espnow", true);
+  hubFeatAp = networkPreferences.getBool("hf_ap", true);
+  hubFeatWifi = networkPreferences.getBool("hf_wifi", defaultWifi);
+  hubFeatLog = networkPreferences.getBool("hf_log", true);
+  hubFeatBle123 = networkPreferences.getBool("hf_ble123", false);
+  hubFeatBleBm6 = networkPreferences.getBool("hf_blebm6", false);
+  hubEspNowChannelPref = networkPreferences.getUChar("espnow_ch", 0);
+  if (hubEspNowChannelPref > 14) {
+    hubEspNowChannelPref = 0;
+  }
+}
+
+void ensureHubSoftAp()
+{
+#if ENABLE_WEB_GUI
+  if (!hubFeatAp) {
+    if (WiFi.softAPIP() != IPAddress(0, 0, 0, 0)) {
+      WiFi.softAPdisconnect(true);
+    }
+    return;
+  }
+  if (WiFi.softAPIP() != IPAddress(0, 0, 0, 0)) {
+    return;
+  }
+  WiFi.softAPConfig(
+      IPAddress(192, 168, 4, 1),
+      IPAddress(192, 168, 4, 1),
+      IPAddress(255, 255, 255, 0));
+  if (WiFi.softAP(WEB_AP_SSID, WEB_AP_PASSWORD, 6, 0, 4)) {
+    Serial.printf("Web GUI:     access point OK, http://%s/\n", WiFi.softAPIP().toString().c_str());
   }
 #endif
 }
@@ -1076,7 +1152,9 @@ String statusJson()
   json += ",\"esp_now_ready\":";
   json += espNowReady ? "true" : "false";
   json += ",\"esp_now_channel\":";
-  json += String(ESP_NOW_WIFI_CHANNEL);
+  json += String(espNowActiveChannel > 0 ? espNowActiveChannel : ESP_NOW_WIFI_CHANNEL);
+  json += ",\"esp_now_channel_pref\":";
+  json += String(hubEspNowChannelPref);
   json += ",\"esp_now_tx\":";
   json += String(espNowTxCount);
   json += ",\"esp_now_tx_fail\":";
@@ -1084,6 +1162,18 @@ String statusJson()
   json += ",\"esp_now_seq\":";
   json += String(espNowSeq);
 #endif
+  json += ",\"hub_feat_espnow\":";
+  json += hubFeatEspNow ? "true" : "false";
+  json += ",\"hub_feat_ap\":";
+  json += hubFeatAp ? "true" : "false";
+  json += ",\"hub_feat_wifi\":";
+  json += hubFeatWifi ? "true" : "false";
+  json += ",\"hub_feat_log\":";
+  json += hubFeatLog ? "true" : "false";
+  json += ",\"hub_feat_ble123\":";
+  json += hubFeatBle123 ? "true" : "false";
+  json += ",\"hub_feat_blebm6\":";
+  json += hubFeatBleBm6 ? "true" : "false";
 #if ENABLE_BLE_HUB
   json += ",\"ble_hub_clients\":[";
   for (uint8_t i = 0; i < bleHubClientCount; i++) {
@@ -1314,12 +1404,25 @@ String humanBytes(size_t bytes)
 
 size_t logFileSize(const char *path)
 {
-  if (!logFsReady || !SPIFFS.exists(path)) return 0;
+  if (strcmp(path, kLogFile) == 0) return logCurrentBytes;
+  if (strcmp(path, kOldLogFile) == 0) return logOldBytes;
+  return 0;
+}
+
+size_t readLogFileSizeOnce(const char *path)
+{
+  if (!logFsReady) return 0;
   File f = SPIFFS.open(path, FILE_READ);
   if (!f) return 0;
   const size_t size = f.size();
   f.close();
   return size;
+}
+
+void refreshLogSizeCache()
+{
+  logCurrentBytes = readLogFileSizeOnce(kLogFile);
+  logOldBytes = readLogFileSizeOnce(kOldLogFile);
 }
 
 bool logCol(uint16_t flag)
@@ -1498,7 +1601,7 @@ void ensureLogHeader()
 {
   if (!logFsReady) return;
   const String expectedHeader = logHeader();
-  bool needsHeader = !SPIFFS.exists(kLogFile);
+  bool needsHeader = logCurrentBytes == 0;
   if (!needsHeader) {
     File existing = SPIFFS.open(kLogFile, FILE_READ);
     needsHeader = !existing || existing.size() == 0;
@@ -1516,20 +1619,29 @@ void ensureLogHeader()
   }
   if (!needsHeader) return;
   File f = SPIFFS.open(kLogFile, FILE_WRITE);
-  if (!f) return;
+  if (!f) {
+    logFsReady = false;
+    logCurrentBytes = 0;
+    logOldBytes = 0;
+    Serial.println("Logs:        CSV disabled, SPIFFS file open failed");
+    return;
+  }
   f.println(expectedHeader);
+  logCurrentBytes = f.size();
   f.close();
 }
 
 void rotateLogIfNeeded()
 {
-  if (!logFsReady || !SPIFFS.exists(kLogFile)) return;
+  if (!logFsReady || logCurrentBytes == 0) return;
   File f = SPIFFS.open(kLogFile, FILE_READ);
   const size_t size = f ? f.size() : 0;
   if (f) f.close();
   if (size < kMaxLogBytes) return;
   SPIFFS.remove(kOldLogFile);
   SPIFFS.rename(kLogFile, kOldLogFile);
+  logOldBytes = size;
+  logCurrentBytes = 0;
   ensureLogHeader();
 }
 
@@ -1544,7 +1656,7 @@ bool shouldLogCsv(const SpartanReading &spartan, const TuneSnapshot &tune)
 
 void appendLiveCsv()
 {
-  if (!logFsReady) return;
+  if (!hubFeatLog || !logFsReady) return;
   const uint32_t now = millis();
   if (now - lastCsvAppendMs < kLogIntervalMs) return;
   lastCsvAppendMs = now;
@@ -1559,8 +1671,15 @@ void appendLiveCsv()
 
   rotateLogIfNeeded();
   ensureLogHeader();
+  if (!logFsReady) return;
   File f = SPIFFS.open(kLogFile, FILE_APPEND);
-  if (!f) return;
+  if (!f) {
+    logFsReady = false;
+    logCurrentBytes = 0;
+    logOldBytes = 0;
+    Serial.println("Logs:        CSV disabled, SPIFFS append failed");
+    return;
+  }
 
   const time_t epoch = systemTimeValid() ? time(nullptr) : 0;
   f.printf("%lu;%lu;%s",
@@ -1609,6 +1728,7 @@ void appendLiveCsv()
              static_cast<double>(sensorSeconds) / 3600.0);
   }
   f.println();
+  logCurrentBytes = f.size();
   f.close();
 }
 
@@ -2503,18 +2623,34 @@ void setupBleHub()
 #endif
   Serial.printf("123TUNE BLE: target %s\n", tuneSavedAddress.c_str());
   logHubEvent("tune_state", "boot|target_saved");
-  startTuneScan();
+  if (hubFeatBle123) {
+    startTuneScan();
+  } else {
+    Serial.println("123TUNE BLE: disabled (Setup — Display verbindet direkt)");
+  }
 #if ENABLE_BM6
   Serial.printf("BM6 BLE:     target %s\n", bm6SavedAddress.c_str());
-  scheduleBm6Scan();
+  if (hubFeatBleBm6) {
+    scheduleBm6Scan();
+  } else {
+    Serial.println("BM6 BLE:     disabled (Setup)");
+  }
 #endif
 }
 
 void updateBleHub()
 {
-  updateTuneBle();
+  if (hubFeatBle123) {
+    updateTuneBle();
+  } else if (tuneConnected || tuneDoConnect) {
+    resetTuneClient();
+  }
 #if ENABLE_BM6
-  updateBm6Ble();
+  if (hubFeatBleBm6) {
+    updateBm6Ble();
+  } else if (bm6Connected || bm6DoConnect) {
+    resetBm6Client();
+  }
 #endif
   updateTuneDebug();
 #if ENABLE_BLE_DISPLAY
@@ -2541,6 +2677,33 @@ void updateBleHub() {}
 #endif
 
 #if ENABLE_ESP_NOW_HUB
+uint8_t espNowEffectiveChannel()
+{
+#if ENABLE_WEB_GUI
+  if (hubEspNowChannelPref >= 1 && hubEspNowChannelPref <= 14) {
+    return hubEspNowChannelPref;
+  }
+  if (WiFi.status() == WL_CONNECTED) {
+    const uint8_t channel = WiFi.channel();
+    if (channel > 0 && channel <= 14) {
+      return channel;
+    }
+  }
+#endif
+  return ESP_NOW_WIFI_CHANNEL;
+}
+
+void teardownEspNowHub()
+{
+  if (!espNowReady) {
+    return;
+  }
+  esp_now_del_peer(kEspNowBroadcastAddr);
+  esp_now_deinit();
+  espNowReady = false;
+  espNowActiveChannel = 0;
+}
+
 void onEspNowSend(const uint8_t *mac, esp_now_send_status_t status)
 {
   (void)mac;
@@ -2560,11 +2723,15 @@ void setupEspNowHub()
     Serial.println("ESP-NOW:     WiFi not ready yet");
     return;
   }
-  const uint8_t channel = WiFi.channel();
-  if (channel > 0 && channel != ESP_NOW_WIFI_CHANNEL) {
-    Serial.printf("ESP-NOW:     WiFi channel %u, expected %d\n", channel, ESP_NOW_WIFI_CHANNEL);
-  }
 #endif
+
+  const uint8_t channel = espNowEffectiveChannel();
+  if (espNowReady && espNowActiveChannel == channel) {
+    return;
+  }
+  if (espNowReady) {
+    teardownEspNowHub();
+  }
 
   if (esp_now_init() != ESP_OK) {
     Serial.println("ESP-NOW:     init failed");
@@ -2575,7 +2742,7 @@ void setupEspNowHub()
 
   esp_now_peer_info_t peer = {};
   memcpy(peer.peer_addr, kEspNowBroadcastAddr, sizeof(kEspNowBroadcastAddr));
-  peer.channel = ESP_NOW_WIFI_CHANNEL;
+  peer.channel = channel;
   peer.encrypt = false;
   if (esp_now_add_peer(&peer) != ESP_OK) {
     Serial.println("ESP-NOW:     broadcast peer add failed");
@@ -2585,12 +2752,27 @@ void setupEspNowHub()
   }
 
   espNowReady = true;
-  Serial.printf("ESP-NOW:     cockpit broadcast ready on channel %d\n", ESP_NOW_WIFI_CHANNEL);
-  logHubEvent("espnow_tx", "ready|broadcast");
+  espNowActiveChannel = channel;
+  Serial.printf("ESP-NOW:     cockpit broadcast ready on channel %u%s\n",
+                channel,
+                channel == ESP_NOW_WIFI_CHANNEL ? "" : " (STA home WiFi)");
+  char espNowDetail[16];
+  snprintf(espNowDetail, sizeof(espNowDetail), "ready|ch%u", channel);
+  logHubEvent("espnow_tx", espNowDetail);
 }
 
 void updateEspNowHub()
 {
+  if (!hubFeatEspNow) {
+    if (espNowReady) {
+      teardownEspNowHub();
+    }
+    return;
+  }
+  const uint8_t channel = espNowEffectiveChannel();
+  if (!espNowReady || espNowActiveChannel != channel) {
+    setupEspNowHub();
+  }
   if (!espNowReady) {
     return;
   }
@@ -2603,20 +2785,31 @@ void updateEspNowHub()
 
 #if ENABLE_BLE_HUB
   const SpartanReading snapshot = readingSnapshot();
-  const TuneSnapshot tune = tuneSnapshot();
-  const bool tuneFresh = tune.lastRxMs != 0 && (now - tune.lastRxMs) <= 3000;
+  uint16_t rpm = 0;
+  float advance = 0.0f;
+  uint8_t map = 0;
+  bool tuneFresh = false;
+  bool tuneConn = false;
+  if (hubFeatBle123) {
+    const TuneSnapshot tune = tuneSnapshot();
+    tuneFresh = tune.lastRxMs != 0 && (now - tune.lastRxMs) <= 3000;
+    tuneConn = tuneConnected;
+    rpm = static_cast<uint16_t>(tune.rpm);
+    advance = tune.advance;
+    map = static_cast<uint8_t>(tune.map);
+  }
 
   SpartanCockpitFrame frame;
   spartanCockpitEncode(&frame,
                        espNowSeq++,
                        snapshot.lambda,
                        snapshot.valid,
-                       static_cast<uint16_t>(tune.rpm),
-                       tune.advance,
-                       static_cast<uint8_t>(tune.map),
+                       rpm,
+                       advance,
+                       map,
                        snapshot.status,
                        tuneFresh,
-                       tuneConnected);
+                       tuneConn);
   esp_now_send(kEspNowBroadcastAddr, reinterpret_cast<uint8_t *>(&frame), sizeof(frame));
 #endif
 }
@@ -2689,6 +2882,165 @@ void updateHourmeters()
   }
 }
 
+#if ENABLE_WEB_GUI
+void printHubFeatStatus()
+{
+  Serial.printf("Hub feats:   ESP-NOW=%s AP=%s WLAN=%s LOG=%s 123=%s BM6=%s ch=%u\n",
+                hubFeatEspNow ? "on" : "off",
+                hubFeatAp ? "on" : "off",
+                hubFeatWifi ? "on" : "off",
+                hubFeatLog ? "on" : "off",
+                hubFeatBle123 ? "on" : "off",
+                hubFeatBleBm6 ? "on" : "off",
+                hubEspNowChannelPref);
+}
+
+void applyHubFeatures()
+{
+  if (!hubFeatAp) {
+    WiFi.softAPdisconnect(true);
+  } else {
+    ensureHubSoftAp();
+  }
+  if (!hubFeatWifi) {
+    if (WiFi.status() == WL_CONNECTED) {
+      WiFi.disconnect(false, false);
+    }
+    homeWifiConnectStartedMs = 0;
+    homeWifiDisabledForRoadAp = false;
+  } else if (haveSavedWifi && WiFi.status() != WL_CONNECTED &&
+             homeWifiConnectStartedMs == 0 && !homeWifiDisabledForRoadAp) {
+    String ssid = networkPreferences.getString("ssid", "");
+    String pass = networkPreferences.getString("pass", "");
+    if (ssid.length() == 0 && strlen(HOME_WIFI_SSID) > 0) {
+      ssid = HOME_WIFI_SSID;
+      pass = HOME_WIFI_PASSWORD;
+    }
+    if (ssid.length() > 0) {
+      WiFi.begin(ssid.c_str(), pass.c_str());
+      homeWifiConnectStartedMs = millis();
+      Serial.printf("Home WiFi:   reconnecting to '%s'\n", ssid.c_str());
+    }
+  }
+#if ENABLE_ESP_NOW_HUB
+  if (!hubFeatEspNow && espNowReady) {
+    teardownEspNowHub();
+  } else if (hubFeatEspNow && espNowReady &&
+             espNowActiveChannel != espNowEffectiveChannel()) {
+    teardownEspNowHub();
+  }
+#endif
+#if ENABLE_BLE_HUB
+  if (!hubFeatBle123 && tuneConnected) {
+    resetTuneClient();
+  }
+#if ENABLE_BM6
+  if (!hubFeatBleBm6 && bm6Connected) {
+    resetBm6Client();
+  }
+#endif
+#endif
+}
+
+bool handleHubFeatSerialLine(const String &line)
+{
+  if (!line.startsWith("hub feat ")) {
+    return false;
+  }
+  String rest = line.substring(9);
+  rest.trim();
+  if (rest.length() == 0) {
+    return true;
+  }
+  if (rest.equalsIgnoreCase("status")) {
+    printHubFeatStatus();
+    return true;
+  }
+
+  const int sp = rest.indexOf(' ');
+  if (sp < 0) {
+    Serial.println("Hub feats:   usage: hub feat <name> on|off | espnow ch 0|6|11 | status");
+    return true;
+  }
+  String feat = rest.substring(0, sp);
+  String arg = rest.substring(sp + 1);
+  arg.trim();
+  feat.toLowerCase();
+
+  bool changed = false;
+  if (feat == "espnow" && arg.startsWith("ch ")) {
+    int channel = arg.substring(3).toInt();
+    if (channel < 0 || channel > 14) {
+      channel = 0;
+    }
+    hubEspNowChannelPref = static_cast<uint8_t>(channel);
+    changed = true;
+  } else if (feat == "espnow") {
+    if (arg.equalsIgnoreCase("on") || arg == "1") {
+      hubFeatEspNow = true;
+      changed = true;
+    } else if (arg.equalsIgnoreCase("off") || arg == "0") {
+      hubFeatEspNow = false;
+      changed = true;
+    }
+  } else if (feat == "ap") {
+    if (arg.equalsIgnoreCase("on") || arg == "1") {
+      hubFeatAp = true;
+      changed = true;
+    } else if (arg.equalsIgnoreCase("off") || arg == "0") {
+      hubFeatAp = false;
+      changed = true;
+    }
+  } else if (feat == "wifi") {
+    if (arg.equalsIgnoreCase("on") || arg == "1") {
+      hubFeatWifi = true;
+      changed = true;
+    } else if (arg.equalsIgnoreCase("off") || arg == "0") {
+      hubFeatWifi = false;
+      changed = true;
+    }
+  } else if (feat == "log") {
+    if (arg.equalsIgnoreCase("on") || arg == "1") {
+      hubFeatLog = true;
+      changed = true;
+    } else if (arg.equalsIgnoreCase("off") || arg == "0") {
+      hubFeatLog = false;
+      changed = true;
+    }
+  } else if (feat == "ble123") {
+    if (arg.equalsIgnoreCase("on") || arg == "1") {
+      hubFeatBle123 = true;
+      changed = true;
+    } else if (arg.equalsIgnoreCase("off") || arg == "0") {
+      hubFeatBle123 = false;
+      changed = true;
+    }
+  } else if (feat == "blebm6") {
+    if (arg.equalsIgnoreCase("on") || arg == "1") {
+      hubFeatBleBm6 = true;
+      changed = true;
+    } else if (arg.equalsIgnoreCase("off") || arg == "0") {
+      hubFeatBleBm6 = false;
+      changed = true;
+    }
+  } else {
+    Serial.println("Hub feats:   unknown feature (espnow/ap/wifi/log/ble123/blebm6)");
+    return true;
+  }
+
+  if (changed) {
+    saveHubFeatures();
+    applyHubFeatures();
+    logHubEvent("hub_feat", "serial");
+    Serial.println("Hub feats:   saved");
+    printHubFeatStatus();
+  } else {
+    Serial.println("Hub feats:   use on or off");
+  }
+  return true;
+}
+#endif
+
 void setupWebGui()
 {
 #if ENABLE_WEB_GUI
@@ -2697,6 +3049,8 @@ void setupWebGui()
   if (timezoneIdx >= kTimezoneCount) timezoneIdx = kTimezoneDefault;
   logColumnMask = networkPreferences.getUShort("log_cols", kLogColDefault);
   logFsReady = SPIFFS.begin(true);
+  logCurrentBytes = 0;
+  logOldBytes = 0;
   Serial.printf("Logs:        SPIFFS %s, current=%s, old=%s\n",
                 logFsReady ? "OK" : "FAIL",
                 humanBytes(logFileSize(kLogFile)).c_str(),
@@ -2721,21 +3075,19 @@ void setupWebGui()
 #else
   WiFi.setSleep(false);
 #endif
-  WiFi.softAPConfig(
-      IPAddress(192, 168, 4, 1),
-      IPAddress(192, 168, 4, 1),
-      IPAddress(255, 255, 255, 0));
-  if (!WiFi.softAP(WEB_AP_SSID, WEB_AP_PASSWORD, 6, 0, 4)) {
-    Serial.println("Web GUI:     access point start failed");
-    return;
+  ensureHubSoftAp();
+  if (!hubFeatAp) {
+    Serial.println("Web GUI:     SoftAP Spartan3-Setup disabled (Setup)");
   }
 
-  if (haveSavedWifi) {
+  if (haveSavedWifi && hubFeatWifi) {
     WiFi.begin(stationSsid.c_str(), stationPassword.c_str());
     homeWifiConnectStartedMs = millis();
     Serial.printf("Home WiFi:   connecting to '%s'%s\n",
                   stationSsid.c_str(),
                   usingBuiltInWifi ? " (built-in)" : "");
+  } else if (haveSavedWifi && !hubFeatWifi) {
+    Serial.println("Home WiFi:   STA disabled (Setup)");
   } else {
     Serial.println("Home WiFi:   not configured");
   }
@@ -2811,6 +3163,14 @@ details.setup > .inside { padding: 0 16px 16px; }
 <div class="tab-section" data-tab="live">
 <div class="card">
 <div class="topline"><span id="source" class="tag">START</span><span id="wifiTop" class="mono">offline</span></div>
+<p class="hint" style="margin:0 0 10px;line-height:1.9">
+<span class="tag" id="featEspnow">ESP -</span>
+<span class="tag" id="featAp">AP -</span>
+<span class="tag" id="featWifi">WLAN -</span>
+<span class="tag" id="featBle123">123 -</span>
+<span class="tag" id="featBleBm6">BM6 -</span>
+<span class="tag" id="featLog">LOG -</span>
+</p>
 <div class="lambda" id="lambda">-.---</div>
 <div class="metrics">
 <div class="metric"><span>Status</span><strong id="status">warte</strong></div>
@@ -2963,6 +3323,27 @@ details.setup > .inside { padding: 0 16px 16px; }
 </div><!-- /tab log -->
 <div class="tab-section" data-tab="setup" hidden>
 <details class="setup" open>
+<summary>Funktionen An/Aus</summary>
+<div class="inside">
+<p class="hint">Fahrt-Setup: Hub = CAN/UART + ESP-NOW. Displays verbinden 123 direkt per BLE. BM6/123 am Hub nur wenn kein Display-BLE.</p>
+<form action="/hub_features" method="post">
+<label><input type="checkbox" name="espnow" value="1" id="hfEspnow"> ESP-NOW Spartan (Lambda/RPM broadcast)</label>
+<label for="espnow_ch">ESP-NOW Kanal</label>
+<select id="espnow_ch" name="espnow_ch">
+<option value="0">Auto (folgt WLAN/STA)</option>
+<option value="6">Fix 6 Bus / Spartan3-Setup</option>
+<option value="11">Fix 11 Handy / Android-AP1</option>
+</select>
+<label><input type="checkbox" name="ap" value="1" id="hfAp"> SoftAP Spartan3-Setup</label>
+<label><input type="checkbox" name="wifi" value="1" id="hfWifi"> WLAN STA (Heimnetz verbinden)</label>
+<label><input type="checkbox" name="log" value="1" id="hfLog"> CSV Fahrtlog</label>
+<label><input type="checkbox" name="ble123" value="1" id="hfBle123"> 123TUNE BLE am Hub</label>
+<label><input type="checkbox" name="blebm6" value="1" id="hfBleBm6"> BM6 BLE am Hub</label>
+<button type="submit">Speichern</button>
+</form>
+</div>
+</details>
+<details class="setup" open>
 <summary>System Diagnose</summary>
 <div class="inside">
 <div class="row"><span>CAN State / TX / RX</span><strong id="candiag">-</strong></div>
@@ -3004,7 +3385,7 @@ details.setup > .inside { padding: 0 16px 16px; }
 <form action="/wifi" method="post">
 <label for="wifiPreset">Profil</label><select id="wifiPreset">
 <option value="">Manuell</option>
-<option value="Android-AP1" data-pass="Frankfurt1">S24 Hotspot Android-AP1</option>
+<option value="Android-AP1" data-pass="REDACTED">S24 Hotspot Android-AP1</option>
 <option value="Z00-Station" data-pass="">Z00-Station</option>
 </select>
 <label for="ssid">WLAN-Name</label><input id="ssid" name="ssid" required>
@@ -3220,6 +3601,12 @@ async function refreshEvents() {
     }).join('\n') : '-';
   } catch (e) {}
 }
+function setFeatBadge(id, label, on) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.textContent = label + ' ' + (on ? 'AN' : 'AUS');
+  cls(el, on ? 'tag ok' : 'tag bad');
+}
 async function refresh() {
   try {
     const r = await fetch('/state', {cache:'no-store'});
@@ -3242,6 +3629,26 @@ async function refresh() {
     document.getElementById('espnowch').textContent = d.esp_now_channel ?? '-';
     document.getElementById('espnowtx').textContent = (d.esp_now_tx ?? 0) + ' / ' + (d.esp_now_tx_fail ?? 0);
     document.getElementById('espnowseq').textContent = d.esp_now_seq ?? 0;
+    const hfEsp = document.getElementById('hfEspnow');
+    if (hfEsp) hfEsp.checked = !!d.hub_feat_espnow;
+    const espCh = document.getElementById('espnow_ch');
+    if (espCh && document.activeElement !== espCh) espCh.value = String(d.esp_now_channel_pref ?? 0);
+    const hfAp = document.getElementById('hfAp');
+    if (hfAp) hfAp.checked = !!d.hub_feat_ap;
+    const hfWifi = document.getElementById('hfWifi');
+    if (hfWifi) hfWifi.checked = !!d.hub_feat_wifi;
+    const hfLog = document.getElementById('hfLog');
+    if (hfLog) hfLog.checked = !!d.hub_feat_log;
+    const hf123 = document.getElementById('hfBle123');
+    if (hf123) hf123.checked = !!d.hub_feat_ble123;
+    const hfBm6 = document.getElementById('hfBleBm6');
+    if (hfBm6) hfBm6.checked = !!d.hub_feat_blebm6;
+    setFeatBadge('featEspnow', 'ESP', d.hub_feat_espnow);
+    setFeatBadge('featAp', 'AP', d.hub_feat_ap);
+    setFeatBadge('featWifi', 'WLAN', d.hub_feat_wifi);
+    setFeatBadge('featBle123', '123', d.hub_feat_ble123);
+    setFeatBadge('featBleBm6', 'BM6', d.hub_feat_blebm6);
+    setFeatBadge('featLog', 'LOG', d.hub_feat_log);
     document.getElementById('tuneLinkState').textContent = d.tune_link_state ?? '-';
     document.getElementById('blename').textContent = d.ble_name || '-';
     document.getElementById('bleaddr').textContent = d.ble_address || '-';
@@ -3433,6 +3840,7 @@ setInterval(() => {
   server.on("/clear", HTTP_POST, []() {
     if (logFsReady) {
       SPIFFS.remove(kLogFile);
+      logCurrentBytes = 0;
       ensureLogHeader();
     }
     server.sendHeader("Location", "/", true);
@@ -3465,6 +3873,7 @@ setInterval(() => {
     networkPreferences.putUShort("log_cols", logColumnMask);
     if (logFsReady) {
       SPIFFS.remove(kLogFile);
+      logCurrentBytes = 0;
       ensureLogHeader();
     }
     Serial.printf("Logs:        columns mask=0x%04X\n", logColumnMask);
@@ -3514,9 +3923,17 @@ setInterval(() => {
     networkPreferences.putString("ssid", ssid);
     networkPreferences.putString("pass", password);
     haveSavedWifi = true;
+    savedWifiSsid = ssid;
     WiFi.disconnect();
-    WiFi.begin(ssid.c_str(), password.c_str());
-    Serial.printf("Home WiFi:   saved and connecting to '%s'\n", ssid.c_str());
+    if (hubFeatWifi) {
+      WiFi.begin(ssid.c_str(), password.c_str());
+      homeWifiConnectStartedMs = millis();
+      homeWifiDisabledForRoadAp = false;
+      Serial.printf("Home WiFi:   saved and connecting to '%s'\n", ssid.c_str());
+    } else {
+      homeWifiConnectStartedMs = 0;
+      Serial.printf("Home WiFi:   saved '%s' (STA off in Setup)\n", ssid.c_str());
+    }
     server.sendHeader("Location", "/", true);
     server.send(303, "text/plain", "");
   });
@@ -3622,6 +4039,26 @@ setInterval(() => {
     server.sendHeader("Location", "/", true);
     server.send(303, "text/plain", "");
   });
+  server.on("/hub_features", HTTP_POST, []() {
+    hubFeatEspNow = server.hasArg("espnow");
+    hubFeatAp = server.hasArg("ap");
+    hubFeatWifi = server.hasArg("wifi");
+    hubFeatLog = server.hasArg("log");
+    hubFeatBle123 = server.hasArg("ble123");
+    hubFeatBleBm6 = server.hasArg("blebm6");
+    if (server.hasArg("espnow_ch")) {
+      int channel = server.arg("espnow_ch").toInt();
+      if (channel < 0 || channel > 14) {
+        channel = 0;
+      }
+      hubEspNowChannelPref = static_cast<uint8_t>(channel);
+    }
+    saveHubFeatures();
+    applyHubFeatures();
+    logHubEvent("hub_feat", "saved");
+    server.sendHeader("Location", "/", true);
+    server.send(303, "text/plain", "");
+  });
   server.onNotFound([]() {
     server.sendHeader("Location", "http://192.168.4.1/", true);
     server.send(302, "text/plain", "");
@@ -3643,13 +4080,10 @@ void updateWebGui()
   const uint32_t now = millis();
   static wl_status_t lastWifiStatus = WL_IDLE_STATUS;
   const wl_status_t wifiStatus = WiFi.status();
-  if (WiFi.softAPIP() == IPAddress(0, 0, 0, 0) && now - lastApRetryMs >= 10000) {
+  if (WiFi.softAPIP() == IPAddress(0, 0, 0, 0) && hubFeatAp && now - lastApRetryMs >= 10000) {
     lastApRetryMs = now;
-    WiFi.softAPConfig(
-        IPAddress(192, 168, 4, 1),
-        IPAddress(192, 168, 4, 1),
-        IPAddress(255, 255, 255, 0));
-    if (WiFi.softAP(WEB_AP_SSID, WEB_AP_PASSWORD, 6, 0, 4)) {
+    ensureHubSoftAp();
+    if (WiFi.softAPIP() != IPAddress(0, 0, 0, 0)) {
       Serial.printf("Web GUI:     access point retry OK, http://%s/\n", WiFi.softAPIP().toString().c_str());
     } else {
       apRetryCount++;
@@ -3666,7 +4100,7 @@ void updateWebGui()
     }
   }
   updateNtp(now);
-  if (haveSavedWifi && !homeWifiDisabledForRoadAp && wifiStatus != WL_CONNECTED &&
+  if (hubFeatWifi && haveSavedWifi && !homeWifiDisabledForRoadAp && wifiStatus != WL_CONNECTED &&
       homeWifiConnectStartedMs != 0 && now - homeWifiConnectStartedMs >= kHomeWifiConnectWindowMs) {
     WiFi.disconnect(false, false);
     WiFi.mode(WIFI_AP);
@@ -3916,6 +4350,10 @@ void updateUart()
   while (Serial.available()) {
     const char c = static_cast<char>(Serial.read());
     if (c == '\r' || c == '\n') {
+#if ENABLE_WEB_GUI
+      if (handleHubFeatSerialLine(uartLine)) {
+      } else
+#endif
       if (uartLine.startsWith(">") && uartLine.length() > 1) {
         sendSpartanUartCommand(uartLine.substring(1));
 #if ENABLE_BLE_HUB
@@ -4036,7 +4474,7 @@ void printBootDetails()
   Serial.println("BLE stack:   disabled");
 #endif
 #if ENABLE_ESP_NOW_HUB
-  Serial.printf("ESP-NOW:     cockpit broadcast on channel %d\n", ESP_NOW_WIFI_CHANNEL);
+  Serial.printf("ESP-NOW:     cockpit broadcast (default ch %d, follows STA)\n", ESP_NOW_WIFI_CHANNEL);
 #else
   Serial.println("ESP-NOW:     disabled");
 #endif
@@ -4054,6 +4492,7 @@ void setup()
 
   setupDisplay();
   printBootDetails();
+  loadHubFeatures();
   setupBleHub();
   setupWebGui();
   setupEspNowHub();

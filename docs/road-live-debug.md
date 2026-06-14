@@ -4,7 +4,7 @@ Ziel: Während der Fahrt oder am Straßenrand den Spartan Motorraum-Hub per Lapt
 
 ## Netzwerk-Setup (Android-AP1)
 
-1. **Handy-Hotspot starten** — SSID `Android-AP1`, Passwort wie in `platformio.ini` (`Frankfurt1`).
+1. **Handy-Hotspot starten** — SSID `Android-AP1`, Passwort wie in `platformio.ini` (`REDACTED`).
 2. **Spartan ESP32** bootet und verbindet sich per STA zum Hotspot (eingebautes Profil oder Web-GUI Setup).
 3. **Laptop** verbindet sich mit demselben Hotspot.
 4. **Hub-IP finden:**
