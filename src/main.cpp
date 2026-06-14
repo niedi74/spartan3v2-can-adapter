@@ -30,6 +30,7 @@
 #include <FS.h>
 #include <Preferences.h>
 #include <SPIFFS.h>
+#include <Update.h>
 #include <WebServer.h>
 #include <WiFi.h>
 #include <esp_netif.h>
@@ -409,6 +410,9 @@ WebServer server(80);
 DNSServer dns;
 Preferences networkPreferences;
 bool networkPreferencesReady = false;
+bool otaBusy = false;
+size_t otaRxBytes = 0;
+uint32_t otaStartedMs = 0;
 bool hubFeatEspNow = true;
 bool hubFeatAp = true;
 bool hubFeatWifi = true;
@@ -558,10 +562,20 @@ void ensureHubSoftAp()
     if (WiFi.softAPIP() != IPAddress(0, 0, 0, 0)) {
       WiFi.softAPdisconnect(true);
     }
+    if (hubFeatWifi || WiFi.status() == WL_CONNECTED) {
+      WiFi.mode(WIFI_STA);
+    } else {
+      WiFi.mode(WIFI_OFF);
+    }
     return;
   }
   if (WiFi.softAPIP() != IPAddress(0, 0, 0, 0)) {
     return;
+  }
+  if (hubFeatWifi || WiFi.status() == WL_CONNECTED) {
+    WiFi.mode(WIFI_AP_STA);
+  } else {
+    WiFi.mode(WIFI_AP);
   }
   WiFi.softAPConfig(
       IPAddress(192, 168, 4, 1),
@@ -1122,6 +1136,14 @@ String statusJson()
   json += String(canStatusErrors);
   json += ",\"heap_free\":";
   json += String(heap_caps_get_free_size(MALLOC_CAP_8BIT));
+#if ENABLE_WEB_GUI
+  json += ",\"ota_busy\":";
+  json += otaBusy ? "true" : "false";
+  json += ",\"ota_rx\":";
+  json += String(static_cast<unsigned long>(otaRxBytes));
+  json += ",\"ota_written\":";
+  json += String(static_cast<unsigned long>(Update.progress()));
+#endif
   json += ",\"device_hours\":";
   json += String(static_cast<double>(deviceSeconds) / 3600.0, 2);
   json += ",\"engine_hours\":";
@@ -1395,6 +1417,87 @@ String statusJson()
 }
 
 #if ENABLE_WEB_GUI
+bool webOtaRejectBusy()
+{
+  if (!otaBusy) return false;
+  server.sendHeader("Connection", "close");
+  server.send(503, "text/plain", "OTA busy");
+  return true;
+}
+
+void webOtaBeginUpload(const char *filename)
+{
+  otaBusy = true;
+  otaRxBytes = 0;
+  otaStartedMs = millis();
+  WiFi.setSleep(false);
+  server.client().setNoDelay(true);
+  server.client().setTimeout(500);
+  Serial.printf("OTA:         start %s heap=%u freeSketch=%u\n",
+                filename ? filename : "?",
+                ESP.getFreeHeap(),
+                ESP.getFreeSketchSpace());
+  if (!Update.begin(UPDATE_SIZE_UNKNOWN, U_FLASH)) {
+    Update.printError(Serial);
+    otaBusy = false;
+  }
+}
+
+void webOtaWriteChunk(uint8_t *data, size_t len)
+{
+  if (!otaBusy || !data || len == 0) return;
+  otaRxBytes += len;
+  if (Update.write(data, len) != len) {
+    Update.printError(Serial);
+    Update.abort();
+    otaBusy = false;
+    return;
+  }
+  static uint32_t lastOtaLogMs = 0;
+  if (millis() - lastOtaLogMs >= 2000) {
+    lastOtaLogMs = millis();
+    Serial.printf("OTA:         %u bytes\n", static_cast<unsigned>(Update.progress()));
+  }
+  yield();
+  delay(1);
+}
+
+void webOtaFinishUpload(size_t totalSize)
+{
+  if (!otaBusy) return;
+  if (Update.end(true)) {
+    Serial.printf("OTA:         success %u bytes\n", static_cast<unsigned>(totalSize));
+  } else {
+    Update.printError(Serial);
+    otaBusy = false;
+  }
+}
+
+void webOtaAbortUpload()
+{
+  Update.abort();
+  otaBusy = false;
+  Serial.println("OTA:         aborted");
+}
+
+String otaProgressJson()
+{
+  String json;
+  json.reserve(128);
+  json += "{\"active\":";
+  json += otaBusy ? "true" : "false";
+  json += ",\"rx\":";
+  json += String(static_cast<unsigned long>(otaRxBytes));
+  json += ",\"written\":";
+  json += String(static_cast<unsigned long>(Update.progress()));
+  json += ",\"total\":";
+  json += String(static_cast<unsigned long>(Update.size()));
+  json += ",\"age_ms\":";
+  json += String(otaStartedMs == 0 ? 0UL : static_cast<unsigned long>(millis() - otaStartedMs));
+  json += "}";
+  return json;
+}
+
 String humanBytes(size_t bytes)
 {
   if (bytes < 1024) return String(bytes) + " B";
@@ -2899,6 +3002,11 @@ void applyHubFeatures()
 {
   if (!hubFeatAp) {
     WiFi.softAPdisconnect(true);
+    if (hubFeatWifi || WiFi.status() == WL_CONNECTED) {
+      WiFi.mode(WIFI_STA);
+    } else {
+      WiFi.mode(WIFI_OFF);
+    }
   } else {
     ensureHubSoftAp();
   }
@@ -3130,6 +3238,9 @@ button.danger { background: #8b3c2e; color: #ffe8dc; }
 .metric span { display: block; color: #9ca99f; font-size: .78rem; }
 .metric strong { display: block; margin-top: 5px; font-size: 1.35rem; color: #e6ede8; overflow-wrap: anywhere; }
 .metric.wide { grid-column: 1 / -1; }
+.file { width: 100%; padding: 12px; background: #0b1210; border: 1px solid #35453c; border-radius: 8px; color: #e6ede8; }
+.ota-track { height: 10px; margin-top: 10px; background: #1b2922; border: 1px solid #35453c; border-radius: 999px; overflow: hidden; }
+.ota-bar { height: 100%; width: 0; background: #9ed85b; transition: width .2s; }
 pre { white-space: pre-wrap; max-height: 220px; overflow: auto; padding: 12px; background: #08100c; border-radius: 10px; }
 .tabs { display: flex; gap: 8px; margin: 4px 0 14px; position: sticky; top: 0; padding-top: 6px; padding-bottom: 6px; background: #0b1210; z-index: 10; }
 .tab { flex: 1; padding: 14px 18px; border-radius: 10px; background: #1a2922; color: #cbeaa7; font-weight: 700; cursor: pointer; }
@@ -3237,7 +3348,7 @@ details.setup > .inside { padding: 0 16px 16px; }
 <details class="setup" open>
 <summary>Cockpit Link (ESP-NOW)</summary>
 <div class="inside">
-<p class="hint">M5/Waveshare im Gateway-Modus hoeren auf ESP-NOW Broadcast (kein BLE-Connect noetig). Kanal muss mit Hub-AP uebereinstimmen (6).</p>
+<p class="hint">M5/Waveshare hoeren auf ESP-NOW Broadcast. Alle Geraete brauchen denselben Kanal: Auto im Heimnetz, Bus auf Kanal 6, Handy-Test auf Kanal 11.</p>
 <div class="row"><span>Status</span><strong id="espnowready">-</strong></div>
 <div class="row"><span>Kanal</span><strong id="espnowch">-</strong></div>
 <div class="row"><span>Frames gesendet / Fehler</span><strong id="espnowtx">0 / 0</strong></div>
@@ -3330,9 +3441,9 @@ details.setup > .inside { padding: 0 16px 16px; }
 <label><input type="checkbox" name="espnow" value="1" id="hfEspnow"> ESP-NOW Spartan (Lambda/RPM broadcast)</label>
 <label for="espnow_ch">ESP-NOW Kanal</label>
 <select id="espnow_ch" name="espnow_ch">
-<option value="0">Auto (folgt WLAN/STA)</option>
-<option value="6">Fix 6 Bus / Spartan3-Setup</option>
-<option value="11">Fix 11 Handy / Android-AP1</option>
+<option value="0">Automatisch (folgt WLAN)</option>
+<option value="6">Bus (Kanal 6 / Spartan3-Setup)</option>
+<option value="11">Handy-Test (Kanal 11)</option>
 </select>
 <label><input type="checkbox" name="ap" value="1" id="hfAp"> SoftAP Spartan3-Setup</label>
 <label><input type="checkbox" name="wifi" value="1" id="hfWifi"> WLAN STA (Heimnetz verbinden)</label>
@@ -3358,6 +3469,20 @@ details.setup > .inside { padding: 0 16px 16px; }
 <pre id="jsondump">{}</pre>
 </div>
 </details>
+</div>
+</details>
+<details class="setup" open>
+<summary>OTA Firmware Update</summary>
+<div class="inside">
+<p class="hint">Firmware-BIN aus PlatformIO hochladen. Nach erfolgreichem Upload startet der Hub neu. Waehrend OTA sind Live-Polls kurz blockiert.</p>
+<form id="otaForm" method="POST" action="/update" enctype="multipart/form-data">
+<input class="file" type="file" name="update" accept=".bin,application/octet-stream" required>
+<button type="submit" id="otaBtn">Firmware hochladen</button>
+<div id="otaProgress" hidden>
+<div class="ota-track"><div class="ota-bar" id="otaBar"></div></div>
+<p class="hint" id="otaStatus">Upload laeuft...</p>
+</div>
+</form>
 </div>
 </details>
 <details class="setup" open>
@@ -3590,6 +3715,59 @@ async function ntpSyncNow() {
     await refresh();
   } catch (e) {}
 }
+function otaShow(pct, msg) {
+  const box = document.getElementById('otaProgress');
+  const bar = document.getElementById('otaBar');
+  const st = document.getElementById('otaStatus');
+  if (box) box.hidden = false;
+  if (bar) bar.style.width = Math.max(0, Math.min(100, pct)) + '%';
+  if (st) st.textContent = msg || 'Upload laeuft...';
+}
+const otaForm = document.getElementById('otaForm');
+if (otaForm) {
+  otaForm.addEventListener('submit', (ev) => {
+    ev.preventDefault();
+    const fd = new FormData(otaForm);
+    const file = fd.get('update');
+    if (!file || !file.size) return;
+    const btn = document.getElementById('otaBtn');
+    if (btn) btn.disabled = true;
+    otaShow(0, 'Upload laeuft...');
+    let poll = setInterval(async () => {
+      try {
+        const r = await fetch('/api/ota/progress', { cache: 'no-store' });
+        const d = await r.json();
+        if (d.active && d.total > 0) {
+          const n = Math.min(99, Math.round(100 * (d.written || d.rx) / d.total));
+          otaShow(n, 'Flash ' + n + '%');
+        }
+      } catch (e) {}
+    }, 500);
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', '/update');
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable) {
+        const n = Math.round(100 * e.loaded / e.total);
+        otaShow(Math.min(92, n), 'Upload ' + n + '%');
+      }
+    };
+    xhr.onload = () => {
+      clearInterval(poll);
+      if (xhr.status === 200 && xhr.responseText.trim() === 'OK') {
+        otaShow(100, 'Erfolg, Hub startet neu...');
+      } else {
+        otaShow(0, 'Fehler (' + xhr.status + '): ' + (xhr.responseText || 'FAIL'));
+        if (btn) btn.disabled = false;
+      }
+    };
+    xhr.onerror = () => {
+      clearInterval(poll);
+      otaShow(0, 'Netzwerkfehler');
+      if (btn) btn.disabled = false;
+    };
+    xhr.send(fd);
+  });
+}
 async function refreshEvents() {
   try {
     const r = await fetch('/log/events?limit=40', { cache: 'no-store' });
@@ -3787,11 +3965,38 @@ setInterval(() => {
   });
 
   const auto sendStatus = []() {
+    if (webOtaRejectBusy()) return;
     recordWifiHttpPoller();
     server.send(200, "application/json", statusJson());
   };
   server.on("/state", sendStatus);
   server.on("/api/status", sendStatus);
+  server.on("/api/ota/progress", HTTP_GET, []() {
+    server.sendHeader("Connection", "close");
+    server.send(200, "application/json", otaProgressJson());
+  });
+  server.on("/update", HTTP_POST, []() {
+    const bool ok = !Update.hasError() && Update.remaining() == 0;
+    server.sendHeader("Connection", "close");
+    server.send(ok ? 200 : 500, "text/plain", ok ? "OK" : "FAIL");
+    if (ok) {
+      delay(700);
+      ESP.restart();
+    } else {
+      otaBusy = false;
+    }
+  }, []() {
+    HTTPUpload &upload = server.upload();
+    if (upload.status == UPLOAD_FILE_START) {
+      webOtaBeginUpload(upload.filename.c_str());
+    } else if (upload.status == UPLOAD_FILE_WRITE) {
+      webOtaWriteChunk(upload.buf, upload.currentSize);
+    } else if (upload.status == UPLOAD_FILE_END) {
+      webOtaFinishUpload(upload.totalSize);
+    } else if (upload.status == UPLOAD_FILE_ABORTED) {
+      webOtaAbortUpload();
+    }
+  });
   server.on("/generate_204", []() { server.send(204, "text/plain", ""); });
   server.on("/gen_204", []() { server.send(204, "text/plain", ""); });
   server.on("/hotspot-detect.html", []() { server.send(200, "text/html", "<html><body>Success</body></html>"); });
@@ -4040,6 +4245,7 @@ setInterval(() => {
     server.send(303, "text/plain", "");
   });
   server.on("/hub_features", HTTP_POST, []() {
+    const bool wasApOn = hubFeatAp;
     hubFeatEspNow = server.hasArg("espnow");
     hubFeatAp = server.hasArg("ap");
     hubFeatWifi = server.hasArg("wifi");
@@ -4054,8 +4260,21 @@ setInterval(() => {
       hubEspNowChannelPref = static_cast<uint8_t>(channel);
     }
     saveHubFeatures();
-    applyHubFeatures();
     logHubEvent("hub_feat", "saved");
+    if (wasApOn && !hubFeatAp) {
+      server.send(200, "text/html",
+                  "<!doctype html><html lang='de'><head><meta charset='utf-8'>"
+                  "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+                  "<title>AP aus</title></head><body style='font-family:system-ui;background:#0b1210;color:#e6ede8;padding:20px'>"
+                  "<h1>SoftAP wird ausgeschaltet</h1>"
+                  "<p>Die Einstellung ist gespeichert. Wenn du gerade ueber Spartan3-Setup verbunden bist, bricht diese Verbindung jetzt ab.</p>"
+                  "<p>Weiterer Zugriff geht ueber Heimnetz/VPN/LAN-IP oder seriell.</p>"
+                  "</body></html>");
+      delay(900);
+      applyHubFeatures();
+      return;
+    }
+    applyHubFeatures();
     server.sendHeader("Location", "/", true);
     server.send(303, "text/plain", "");
   });
@@ -4103,17 +4322,22 @@ void updateWebGui()
   if (hubFeatWifi && haveSavedWifi && !homeWifiDisabledForRoadAp && wifiStatus != WL_CONNECTED &&
       homeWifiConnectStartedMs != 0 && now - homeWifiConnectStartedMs >= kHomeWifiConnectWindowMs) {
     WiFi.disconnect(false, false);
-    WiFi.mode(WIFI_AP);
-    WiFi.setSleep(true);
-    WiFi.softAPConfig(
-        IPAddress(192, 168, 4, 1),
-        IPAddress(192, 168, 4, 1),
-        IPAddress(255, 255, 255, 0));
-    WiFi.softAP(WEB_AP_SSID, WEB_AP_PASSWORD, 6, 0, 4);
     homeWifiDisabledForRoadAp = true;
-    Serial.printf("Home WiFi:   unavailable, road AP only '%s' http://%s/\n",
-                  WEB_AP_SSID,
-                  WiFi.softAPIP().toString().c_str());
+    if (hubFeatAp) {
+      WiFi.mode(WIFI_AP);
+      WiFi.setSleep(true);
+      WiFi.softAPConfig(
+          IPAddress(192, 168, 4, 1),
+          IPAddress(192, 168, 4, 1),
+          IPAddress(255, 255, 255, 0));
+      WiFi.softAP(WEB_AP_SSID, WEB_AP_PASSWORD, 6, 0, 4);
+      Serial.printf("Home WiFi:   unavailable, road AP only '%s' http://%s/\n",
+                    WEB_AP_SSID,
+                    WiFi.softAPIP().toString().c_str());
+    } else {
+      WiFi.mode(WIFI_STA);
+      Serial.println("Home WiFi:   unavailable, SoftAP remains disabled by Setup");
+    }
   }
   dns.processNextRequest();
   server.handleClient();
