@@ -559,9 +559,7 @@ void ensureHubSoftAp()
 {
 #if ENABLE_WEB_GUI
   if (!hubFeatAp) {
-    if (WiFi.softAPIP() != IPAddress(0, 0, 0, 0)) {
-      WiFi.softAPdisconnect(true);
-    }
+    WiFi.softAPdisconnect(true);
     if (hubFeatWifi || WiFi.status() == WL_CONNECTED) {
       WiFi.mode(WIFI_STA);
     } else {
@@ -1414,6 +1412,16 @@ String statusJson()
 #endif
   json += "}";
   return json;
+}
+
+bool hubSoftApModeActive()
+{
+#if ENABLE_WEB_GUI
+  const wifi_mode_t mode = WiFi.getMode();
+  return mode == WIFI_AP || mode == WIFI_AP_STA;
+#else
+  return false;
+#endif
 }
 
 #if ENABLE_WEB_GUI
@@ -3152,6 +3160,8 @@ bool handleHubFeatSerialLine(const String &line)
 void setupWebGui()
 {
 #if ENABLE_WEB_GUI
+  static const char* collectedHeaders[] = {"X-Device", "User-Agent"};
+  server.collectHeaders(collectedHeaders, 2);
   ensurePreferences();
   timezoneIdx = networkPreferences.getUChar("tz_idx", kTimezoneDefault);
   if (timezoneIdx >= kTimezoneCount) timezoneIdx = kTimezoneDefault;
@@ -3437,7 +3447,7 @@ details.setup > .inside { padding: 0 16px 16px; }
 <summary>Funktionen An/Aus</summary>
 <div class="inside">
 <p class="hint">Fahrt-Setup: Hub = CAN/UART + ESP-NOW. Displays verbinden 123 direkt per BLE. BM6/123 am Hub nur wenn kein Display-BLE.</p>
-<form action="/hub_features" method="post">
+<form action="/hub_features" method="post" id="hubFeaturesForm">
 <label><input type="checkbox" name="espnow" value="1" id="hfEspnow"> ESP-NOW Spartan (Lambda/RPM broadcast)</label>
 <label for="espnow_ch">ESP-NOW Kanal</label>
 <select id="espnow_ch" name="espnow_ch">
@@ -3446,10 +3456,12 @@ details.setup > .inside { padding: 0 16px 16px; }
 <option value="11">Handy-Test (Kanal 11)</option>
 </select>
 <label><input type="checkbox" name="ap" value="1" id="hfAp"> SoftAP Spartan3-Setup</label>
+<p class="hint">SoftAP kann aus, solange WLAN STA aktiv ist. WLAN und SoftAP gleichzeitig aus wird blockiert.</p>
 <label><input type="checkbox" name="wifi" value="1" id="hfWifi"> WLAN STA (Heimnetz verbinden)</label>
 <label><input type="checkbox" name="log" value="1" id="hfLog"> CSV Fahrtlog</label>
 <label><input type="checkbox" name="ble123" value="1" id="hfBle123"> 123TUNE BLE am Hub</label>
 <label><input type="checkbox" name="blebm6" value="1" id="hfBleBm6"> BM6 BLE am Hub</label>
+<p class="hint">BM6 am Hub aktiviert BLE-Scan auf dem Hub. Fuer 123TUNE bleibt empfohlen: ein Client direkt, Rest via ESP-NOW.</p>
 <button type="submit">Speichern</button>
 </form>
 </div>
@@ -3463,6 +3475,9 @@ details.setup > .inside { padding: 0 16px 16px; }
 <div class="row"><span>Geraet / Motor / Sonde</span><strong id="hours">0 / 0 / 0 h</strong></div>
 <div class="row"><span>AP IP / Retry</span><strong id="apdiag">-</strong></div>
 <button class="secondary" type="button" onclick="copyJson()">JSON kopieren</button>
+<form action="/restart" method="post" style="margin-top:10px">
+<button class="danger" type="submit">Hub neu starten</button>
+</form>
 <details class="setup">
 <summary>JSON Rohdaten</summary>
 <div class="inside">
@@ -3785,9 +3800,16 @@ function setFeatBadge(id, label, on) {
   el.textContent = label + ' ' + (on ? 'AN' : 'AUS');
   cls(el, on ? 'tag ok' : 'tag bad');
 }
+let hubFeaturesEditing = false;
+document.addEventListener('change', (ev) => {
+  if (ev.target && ev.target.closest && ev.target.closest('#hubFeaturesForm')) hubFeaturesEditing = true;
+});
+document.addEventListener('focusin', (ev) => {
+  if (ev.target && ev.target.closest && ev.target.closest('#hubFeaturesForm')) hubFeaturesEditing = true;
+});
 async function refresh() {
   try {
-    const r = await fetch('/state', {cache:'no-store'});
+    const r = await fetch('/state?client=hub-webgui', {cache:'no-store'});
     const d = await r.json();
     lastJson = d;
     document.getElementById('source').textContent = d.source;
@@ -3807,20 +3829,22 @@ async function refresh() {
     document.getElementById('espnowch').textContent = d.esp_now_channel ?? '-';
     document.getElementById('espnowtx').textContent = (d.esp_now_tx ?? 0) + ' / ' + (d.esp_now_tx_fail ?? 0);
     document.getElementById('espnowseq').textContent = d.esp_now_seq ?? 0;
-    const hfEsp = document.getElementById('hfEspnow');
-    if (hfEsp) hfEsp.checked = !!d.hub_feat_espnow;
-    const espCh = document.getElementById('espnow_ch');
-    if (espCh && document.activeElement !== espCh) espCh.value = String(d.esp_now_channel_pref ?? 0);
-    const hfAp = document.getElementById('hfAp');
-    if (hfAp) hfAp.checked = !!d.hub_feat_ap;
-    const hfWifi = document.getElementById('hfWifi');
-    if (hfWifi) hfWifi.checked = !!d.hub_feat_wifi;
-    const hfLog = document.getElementById('hfLog');
-    if (hfLog) hfLog.checked = !!d.hub_feat_log;
-    const hf123 = document.getElementById('hfBle123');
-    if (hf123) hf123.checked = !!d.hub_feat_ble123;
-    const hfBm6 = document.getElementById('hfBleBm6');
-    if (hfBm6) hfBm6.checked = !!d.hub_feat_blebm6;
+    if (!hubFeaturesEditing) {
+      const hfEsp = document.getElementById('hfEspnow');
+      if (hfEsp) hfEsp.checked = !!d.hub_feat_espnow;
+      const espCh = document.getElementById('espnow_ch');
+      if (espCh && document.activeElement !== espCh) espCh.value = String(d.esp_now_channel_pref ?? 0);
+      const hfAp = document.getElementById('hfAp');
+      if (hfAp) hfAp.checked = !!d.hub_feat_ap;
+      const hfWifi = document.getElementById('hfWifi');
+      if (hfWifi) hfWifi.checked = !!d.hub_feat_wifi;
+      const hfLog = document.getElementById('hfLog');
+      if (hfLog) hfLog.checked = !!d.hub_feat_log;
+      const hf123 = document.getElementById('hfBle123');
+      if (hf123) hf123.checked = !!d.hub_feat_ble123;
+      const hfBm6 = document.getElementById('hfBleBm6');
+      if (hfBm6) hfBm6.checked = !!d.hub_feat_blebm6;
+    }
     setFeatBadge('featEspnow', 'ESP', d.hub_feat_espnow);
     setFeatBadge('featAp', 'AP', d.hub_feat_ap);
     setFeatBadge('featWifi', 'WLAN', d.hub_feat_wifi);
@@ -3974,6 +3998,17 @@ setInterval(() => {
   server.on("/api/ota/progress", HTTP_GET, []() {
     server.sendHeader("Connection", "close");
     server.send(200, "application/json", otaProgressJson());
+  });
+  server.on("/restart", HTTP_POST, []() {
+    server.sendHeader("Connection", "close");
+    server.send(200, "text/html",
+                "<!doctype html><html lang='de'><head><meta charset='utf-8'>"
+                "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+                "<title>Restart</title></head><body style='font-family:system-ui;background:#0b1210;color:#e6ede8;padding:20px'>"
+                "<h1>Hub startet neu...</h1><p>Bitte 5-10 Sekunden warten und die Seite neu laden.</p>"
+                "</body></html>");
+    delay(700);
+    ESP.restart();
   });
   server.on("/update", HTTP_POST, []() {
     const bool ok = !Update.hasError() && Update.remaining() == 0;
@@ -4246,9 +4281,20 @@ setInterval(() => {
   });
   server.on("/hub_features", HTTP_POST, []() {
     const bool wasApOn = hubFeatAp;
-    hubFeatEspNow = server.hasArg("espnow");
-    hubFeatAp = server.hasArg("ap");
-    hubFeatWifi = server.hasArg("wifi");
+    const bool nextEspNow = server.hasArg("espnow");
+    bool nextAp = server.hasArg("ap");
+    bool nextWifi = server.hasArg("wifi");
+    String guardMessage;
+    if (!nextAp && !nextWifi) {
+      nextAp = true;
+      guardMessage = "AP bleibt an: WLAN und SoftAP duerfen nicht gleichzeitig aus sein.";
+    } else if (!nextAp && nextWifi && !haveSavedWifi && WiFi.status() != WL_CONNECTED) {
+      nextAp = true;
+      guardMessage = "AP bleibt an: erst Home-WLAN speichern/verbinden, dann SoftAP ausschalten.";
+    }
+    hubFeatEspNow = nextEspNow;
+    hubFeatAp = nextAp;
+    hubFeatWifi = nextWifi;
     hubFeatLog = server.hasArg("log");
     hubFeatBle123 = server.hasArg("ble123");
     hubFeatBleBm6 = server.hasArg("blebm6");
@@ -4260,7 +4306,17 @@ setInterval(() => {
       hubEspNowChannelPref = static_cast<uint8_t>(channel);
     }
     saveHubFeatures();
-    logHubEvent("hub_feat", "saved");
+    logHubEvent("hub_feat", guardMessage.length() ? "guarded" : "saved");
+    if (guardMessage.length() > 0) {
+      applyHubFeatures();
+      server.send(200, "text/html",
+                  "<!doctype html><html lang='de'><head><meta charset='utf-8'>"
+                  "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+                  "<title>AP bleibt an</title></head><body style='font-family:system-ui;background:#0b1210;color:#e6ede8;padding:20px'>"
+                  "<h1>SoftAP bleibt an</h1><p>" + guardMessage + "</p>"
+                  "<p><a href='/'>Zurueck</a></p></body></html>");
+      return;
+    }
     if (wasApOn && !hubFeatAp) {
       server.send(200, "text/html",
                   "<!doctype html><html lang='de'><head><meta charset='utf-8'>"
@@ -4299,6 +4355,15 @@ void updateWebGui()
   const uint32_t now = millis();
   static wl_status_t lastWifiStatus = WL_IDLE_STATUS;
   const wl_status_t wifiStatus = WiFi.status();
+  if (!hubFeatAp && hubSoftApModeActive()) {
+    WiFi.softAPdisconnect(true);
+    if (hubFeatWifi || wifiStatus == WL_CONNECTED) {
+      WiFi.mode(WIFI_STA);
+    } else {
+      WiFi.mode(WIFI_OFF);
+    }
+    Serial.println("Web GUI:     SoftAP forced off by Setup");
+  }
   if (WiFi.softAPIP() == IPAddress(0, 0, 0, 0) && hubFeatAp && now - lastApRetryMs >= 10000) {
     lastApRetryMs = now;
     ensureHubSoftAp();
