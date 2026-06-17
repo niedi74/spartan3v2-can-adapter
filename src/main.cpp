@@ -239,7 +239,7 @@ constexpr char kBm6TargetAddress[] = "3c:ab:72:80:06:6a";
 constexpr char kBm6ServiceUuid[] = "0000fff0-0000-1000-8000-00805f9b34fb";
 constexpr char kBm6WriteUuid[] = "0000fff3-0000-1000-8000-00805f9b34fb";
 constexpr char kBm6NotifyUuid[] = "0000fff4-0000-1000-8000-00805f9b34fb";
-constexpr uint32_t kBm6ScanWindowMs = 10000;
+constexpr uint32_t kBm6ScanWindowMs = 3000;   // kurz, damit die 123 (4s Timeout) den Scan ueberlebt
 constexpr uint32_t kBm6ReconnectDelayMs = 8000;
 constexpr uint32_t kBm6TriggerIntervalMs = 2000;
 constexpr uint32_t kBm6MainSlotMs = 45000;   // Batterie (main)
@@ -424,6 +424,7 @@ int   emu123ManualRpm = -1;  // -1 = Sweep, sonst feste RPM (per WebGUI)
 int   emu123CurRpm = 0;      // zuletzt gesendete Emu-Werte (fuer WebGUI/JSON)
 float emu123CurAdv = 0.0f;
 int   emu123CurMap = 0;
+String emu123Addr = "";      // gewuenschte advertised BLE-Adresse (leer=Chip-Default)
 uint8_t hubEspNowChannelPref = 0;  // 0=auto/follow STA, otherwise fixed 1..14
 bool haveSavedWifi = false;
 uint32_t homeWifiConnectStartedMs = 0;
@@ -531,6 +532,7 @@ void saveHubFeatures()
   networkPreferences.putBool("hf_ble123", hubFeatBle123);
   networkPreferences.putBool("hf_blebm6", hubFeatBleBm6);
   networkPreferences.putBool("hf_emu123", hubFeatEmu123);
+  networkPreferences.putString("emu_addr", emu123Addr);
   networkPreferences.putUChar("espnow_ch", hubEspNowChannelPref);
 }
 
@@ -567,6 +569,7 @@ void loadHubFeatures()
   hubFeatBle123 = networkPreferences.getBool("hf_ble123", false);
   hubFeatBleBm6 = networkPreferences.getBool("hf_blebm6", false);
   hubFeatEmu123 = networkPreferences.getBool("hf_emu123", false);
+  emu123Addr = networkPreferences.getString("emu_addr", "");
   hubEspNowChannelPref = networkPreferences.getUChar("espnow_ch", 0);
   if (hubEspNowChannelPref > 14) {
     hubEspNowChannelPref = 0;
@@ -2687,19 +2690,25 @@ void connectBm6()
 
 void updateBm6Ble()
 {
-  maybeRotateBm6Slot();
+  // Die 123 hat ABSOLUTEN Vorrang. BM6 ist nachrangig:
+  //  - bestehende BM6-Verbindung wird gehalten (nur Trigger),
+  //  - Slot-Rotation (disconnect+rescan) nur wenn die 123 NICHT verbunden ist,
+  //  - NEU scannen/connecten erst, wenn die 123 verbunden ist (sie connectet
+  //    zuerst ungestoert; der kurze 3s-BM6-Scan ueberlebt ihr 4s-Timeout).
+  const uint32_t now = millis();
+  if (bm6Connected) {
+    if (now - bm6LastRxMs > 5000 && now - bm6LastTriggerMs > kBm6TriggerIntervalMs) {
+      bm6SendTrigger();
+    }
+    if (!tuneConnected) maybeRotateBm6Slot();
+    return;
+  }
+  if (!tuneConnected) return;   // 123 zuerst verbinden lassen
   if (bm6DoConnect) {
     connectBm6();
     return;
   }
-  if (bm6Connected) {
-    const uint32_t now = millis();
-    if (now - bm6LastRxMs > 5000 && now - bm6LastTriggerMs > kBm6TriggerIntervalMs) {
-      bm6SendTrigger();
-    }
-    return;
-  }
-  if (bm6NextScanMs != 0 && static_cast<int32_t>(millis() - bm6NextScanMs) >= 0) {
+  if (bm6NextScanMs != 0 && static_cast<int32_t>(now - bm6NextScanMs) >= 0) {
     bm6NextScanMs = 0;
     startBm6Scan();
   }
@@ -2872,7 +2881,19 @@ void setupBleHub()
   NimBLEDevice::init(BLE_HUB_NAME);
   NimBLEDevice::setPower(ESP_PWR_LVL_P9);
   NimBLEDevice::setMTU(23);
+  // Emulator: gewuenschte 123-Adresse advertisen (static-random, Top-Bits 11),
+  // damit auch Geraete mit fester Ziel-MAC (M5) sich verbinden.
+  if (hubFeatEmu123 && emu123Addr.length() == 17) {
+    NimBLEAddress a(std::string(emu123Addr.c_str()), BLE_ADDR_RANDOM);
+    if (NimBLEDevice::setOwnAddr(a)) {
+      NimBLEDevice::setOwnAddrType(BLE_OWN_ADDR_RANDOM);
+      Serial.printf("EMU123:      advertise als BLE-Adresse %s\n", emu123Addr.c_str());
+    } else {
+      Serial.printf("EMU123:      Adresse %s ungueltig (Top-Bits muessen 11 sein)\n", emu123Addr.c_str());
+    }
+  }
   bleAddress = NimBLEDevice::getAddress().toString().c_str();
+  if (hubFeatEmu123 && emu123Addr.length() == 17) bleAddress = emu123Addr;
 #if ENABLE_BLE_DISPLAY
   bleHubSetupMs = millis();
 #endif
@@ -3531,6 +3552,7 @@ details.setup > .inside { padding: 0 16px 16px; }
 </head>
 <body><main>
 <h1>SPARTAN 3 v2 Motorraum Hub</h1>
+<p style="margin:-4px 0 12px"><a href="/emu" style="display:inline-block;background:#26372e;color:#bde87a;border-radius:8px;padding:9px 14px;text-decoration:none">&#9654; 123-Emulator (/emu)</a></p>
 <div class="tabs">
 <button type="button" id="tabLive" class="tab on" onclick="showTab('live')">Live</button>
 <button type="button" id="tabDiag" class="tab" onclick="showTab('diag')">Diagnose</button>
@@ -4484,8 +4506,19 @@ setInterval(() => {
     }
     if (server.hasArg("rpm"))   emu123ManualRpm = server.arg("rpm").toInt();
     if (server.hasArg("sweep")) emu123ManualRpm = -1;
+    if (server.hasArg("addr")) {   // advertised BLE-Adresse aendern (Reboot)
+      String na = server.arg("addr"); na.trim(); na.toLowerCase();
+      if (na == "chip") emu123Addr = "";
+      else if (na.length() == 17) emu123Addr = na;
+      saveHubFeatures();
+      server.send(200, "text/html",
+                  "<meta http-equiv='refresh' content='4;url=/emu'>BLE-Adresse gesetzt - Reboot...");
+      delay(300);
+      ESP.restart();
+      return;
+    }
     String h;
-    h.reserve(1600);
+    h.reserve(2000);
     h += F("<!doctype html><meta name=viewport content='width=device-width,initial-scale=1'>"
            "<title>123 Emulator</title><style>body{font-family:system-ui;background:#0e0e0e;color:#eee;margin:16px}"
            "a.btn{display:inline-block;padding:11px 15px;margin:5px 6px 5px 0;background:#222;color:#eee;"
@@ -4499,6 +4532,14 @@ setInterval(() => {
     h += "</b></div>";
     h += "<div class=muted>BLE-Adresse: <b style='color:#9ed85b'>" + bleAddress +
          "</b> &middot; Name <b>123&#92;TUNE+</b></div>";
+    h += "<form method=GET action=/emu style='margin:8px 0 4px'>"
+         "<input name=addr value='" + (emu123Addr.length() ? emu123Addr : bleAddress) +
+         "' style='padding:9px;border-radius:8px;border:1px solid #444;background:#1a1a1a;color:#eee;width:14em'>"
+         "<button style='padding:9px 13px;margin-left:6px;border-radius:8px;border:0;background:#2e7d32;color:#fff'>setzen</button></form>"
+         "<div><a class='btn' href='/emu?addr=ef:a8:b2:de:e0:9e'>echte 123 (ef:a8:b2)</a>"
+         "<a class='btn' href='/emu?addr=chip'>Chip-Default</a></div>"
+         "<p class=muted style='margin:4px 0'>Adresse muss static-random sein (erstes Byte Top-Bits 11, "
+         "z.B. e..&#47;f..&#47;c..&#47;d..).</p>";
     h += F("<div class=big id=live>--</div>"
            "<div><a class='btn on' href='/emu?set=on'>EMU AN</a><a class='btn' href='/emu?set=off'>EMU AUS</a></div>"
            "<div class=muted>Drehzahl:</div>"
