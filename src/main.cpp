@@ -419,6 +419,11 @@ bool hubFeatWifi = true;
 bool hubFeatLog = true;
 bool hubFeatBle123 = false;
 bool hubFeatBleBm6 = false;
+bool hubFeatEmu123 = false;  // Test: Hub spielt die 123 nach (BLE-Peripheral)
+int   emu123ManualRpm = -1;  // -1 = Sweep, sonst feste RPM (per WebGUI)
+int   emu123CurRpm = 0;      // zuletzt gesendete Emu-Werte (fuer WebGUI/JSON)
+float emu123CurAdv = 0.0f;
+int   emu123CurMap = 0;
 uint8_t hubEspNowChannelPref = 0;  // 0=auto/follow STA, otherwise fixed 1..14
 bool haveSavedWifi = false;
 uint32_t homeWifiConnectStartedMs = 0;
@@ -475,6 +480,10 @@ struct WifiApStation {
 constexpr uint8_t kWifiApStationMax = 4;
 WifiApStation wifiApStations[kWifiApStationMax];
 uint8_t wifiApStationCount = 0;
+String hubApSsid = WEB_AP_SSID;
+String hubApPassword = WEB_AP_PASSWORD;
+String hubApIp = "192.168.4.1";
+String hubApMask = "255.255.255.0";
 struct WifiHttpPoller {
   String ip;
   String mac;
@@ -521,12 +530,19 @@ void saveHubFeatures()
   networkPreferences.putBool("hf_log", hubFeatLog);
   networkPreferences.putBool("hf_ble123", hubFeatBle123);
   networkPreferences.putBool("hf_blebm6", hubFeatBleBm6);
+  networkPreferences.putBool("hf_emu123", hubFeatEmu123);
   networkPreferences.putUChar("espnow_ch", hubEspNowChannelPref);
 }
 
 void loadHubFeatures()
 {
   ensurePreferences();
+  hubApSsid = networkPreferences.getString("ap_ssid", WEB_AP_SSID);
+  hubApPassword = networkPreferences.getString("ap_pass", WEB_AP_PASSWORD);
+  hubApIp = networkPreferences.getString("ap_ip", "192.168.4.1");
+  hubApMask = networkPreferences.getString("ap_mask", "255.255.255.0");
+  if (hubApSsid.length() == 0) hubApSsid = WEB_AP_SSID;
+  if (hubApMask.length() == 0) hubApMask = "255.255.255.0";
   if (!networkPreferences.isKey("hf_ver")) {
     hubFeatEspNow = true;
     hubFeatAp = true;
@@ -534,6 +550,7 @@ void loadHubFeatures()
     hubFeatLog = true;
     hubFeatBle123 = false;
     hubFeatBleBm6 = false;
+    hubFeatEmu123 = false;
     hubEspNowChannelPref = 0;
     saveHubFeatures();
     Serial.println("Hub feats:   Fahrt defaults (ESP-NOW/AP/WLAN/LOG on, BLE 123/BM6 off)");
@@ -549,10 +566,40 @@ void loadHubFeatures()
   hubFeatLog = networkPreferences.getBool("hf_log", true);
   hubFeatBle123 = networkPreferences.getBool("hf_ble123", false);
   hubFeatBleBm6 = networkPreferences.getBool("hf_blebm6", false);
+  hubFeatEmu123 = networkPreferences.getBool("hf_emu123", false);
   hubEspNowChannelPref = networkPreferences.getUChar("espnow_ch", 0);
   if (hubEspNowChannelPref > 14) {
     hubEspNowChannelPref = 0;
   }
+}
+
+bool parseApAddress(const String &text, const char *fallback, IPAddress &out)
+{
+  String value = text;
+  value.trim();
+  if (!out.fromString(value)) {
+    out.fromString(fallback);
+    return false;
+  }
+  return true;
+}
+
+void saveHubApConfig(const String &ssid, const String &password, const String &ip, const String &mask)
+{
+  ensurePreferences();
+  hubApSsid = ssid;
+  hubApSsid.trim();
+  hubApPassword = password;
+  hubApIp = ip;
+  hubApIp.trim();
+  hubApMask = mask;
+  hubApMask.trim();
+  if (hubApSsid.length() == 0) hubApSsid = WEB_AP_SSID;
+  if (hubApMask.length() == 0) hubApMask = "255.255.255.0";
+  networkPreferences.putString("ap_ssid", hubApSsid);
+  networkPreferences.putString("ap_pass", hubApPassword);
+  networkPreferences.putString("ap_ip", hubApIp);
+  networkPreferences.putString("ap_mask", hubApMask);
 }
 
 void ensureHubSoftAp()
@@ -567,7 +614,13 @@ void ensureHubSoftAp()
     }
     return;
   }
-  if (WiFi.softAPIP() != IPAddress(0, 0, 0, 0)) {
+  // Emulator: Default-AP "123-emulator", aber per /ap_config aenderbar.
+  const bool emuDefault = hubFeatEmu123 &&
+                          (hubApSsid.length() == 0 || hubApSsid == String(WEB_AP_SSID));
+  const char *apSsid = emuDefault ? "123-emulator" : hubApSsid.c_str();
+  // Nur skippen, wenn der AP schon mit dem RICHTIGEN Namen laeuft. (WIFI_AP_STA
+  // setzt sonst eine AP-IP ohne SSID -> AP unsichtbar.)
+  if (WiFi.softAPIP() != IPAddress(0, 0, 0, 0) && WiFi.softAPSSID() == String(apSsid)) {
     return;
   }
   if (hubFeatWifi || WiFi.status() == WL_CONNECTED) {
@@ -575,12 +628,13 @@ void ensureHubSoftAp()
   } else {
     WiFi.mode(WIFI_AP);
   }
-  WiFi.softAPConfig(
-      IPAddress(192, 168, 4, 1),
-      IPAddress(192, 168, 4, 1),
-      IPAddress(255, 255, 255, 0));
-  if (WiFi.softAP(WEB_AP_SSID, WEB_AP_PASSWORD, 6, 0, 4)) {
-    Serial.printf("Web GUI:     access point OK, http://%s/\n", WiFi.softAPIP().toString().c_str());
+  IPAddress apIp, apMask;
+  parseApAddress(hubApIp, "192.168.4.1", apIp);
+  parseApAddress(hubApMask, "255.255.255.0", apMask);
+  WiFi.softAPConfig(apIp, apIp, apMask);
+  if (WiFi.softAP(apSsid, hubApPassword.c_str(), 6, 0, 4)) {
+    Serial.printf("Web GUI:     access point '%s' OK, http://%s/\n",
+                  apSsid, WiFi.softAPIP().toString().c_str());
   }
 #endif
 }
@@ -617,6 +671,22 @@ void recordBleScanDevice(const NimBLEAdvertisedDevice *device, bool tuneLike, bo
   String name = device->getName().c_str();
   const int rssi = device->getRSSI();
   const uint32_t now = millis();
+
+  // nRF-artiger Scanner-Log: Name + Hersteller(Company+Daten) + Service-Flags.
+  String mfg = "-";
+  if (device->haveManufacturerData()) {
+    std::string m = device->getManufacturerData();
+    if (m.size() >= 2) {
+      uint16_t comp = (uint8_t)m[0] | ((uint16_t)(uint8_t)m[1] << 8);
+      char cb[12]; snprintf(cb, sizeof(cb), "C%u:", comp); mfg = cb;
+      for (size_t i = 2; i < m.size() && i < 16; i++) {
+        char h[3]; snprintf(h, sizeof(h), "%02X", (uint8_t)m[i]); mfg += h;
+      }
+    }
+  }
+  Serial.printf("[BLE-SCAN] %s rssi=%d name=%s mfg=%s tune=%d bm6=%d\n",
+                address.c_str(), rssi, name.length() ? name.c_str() : "---",
+                mfg.c_str(), tuneLike ? 1 : 0, bm6Like ? 1 : 0);
 
   uint8_t slot = bleScanDeviceCount;
   for (uint8_t i = 0; i < bleScanDeviceCount; i++) {
@@ -1194,6 +1264,16 @@ String statusJson()
   json += hubFeatBle123 ? "true" : "false";
   json += ",\"hub_feat_blebm6\":";
   json += hubFeatBleBm6 ? "true" : "false";
+  json += ",\"emu123_on\":";
+  json += hubFeatEmu123 ? "true" : "false";
+  json += ",\"emu123_manual\":";
+  json += String(emu123ManualRpm);
+  json += ",\"emu123_rpm\":";
+  json += String(emu123CurRpm);
+  json += ",\"emu123_adv\":";
+  json += String(emu123CurAdv, 1);
+  json += ",\"emu123_map\":";
+  json += String(emu123CurMap);
 #if ENABLE_BLE_HUB
   json += ",\"ble_hub_clients\":[";
   for (uint8_t i = 0; i < bleHubClientCount; i++) {
@@ -1283,7 +1363,17 @@ String statusJson()
   json += lastNtpSyncMs == 0 ? "0" : String((now - lastNtpSyncMs) / 1000UL);
   refreshWifiApStations();
   json += ",\"wifi_ap_ssid\":\"";
-  json += WEB_AP_SSID;
+  json += jsonEscape(hubApSsid);
+  json += "\",\"wifi_ap_password\":\"";
+  json += jsonEscape(hubApPassword);
+  json += "\",\"wifi_ap_ip\":\"";
+  json += jsonEscape(hubApIp);
+  json += "\",\"wifi_ap_mask\":\"";
+  json += jsonEscape(hubApMask);
+  json += "\",\"wifi_ap_range\":\"";
+  json += jsonEscape(hubApIp);
+  json += "/";
+  json += jsonEscape(hubApMask);
   json += "\",\"wifi_ap_station_count\":";
   json += String(wifiApStationCount);
   json += ",\"wifi_ap_stations\":[";
@@ -2672,6 +2762,111 @@ void startBleHubAdvertising()
 #endif
 }
 
+// ===== 123\TUNE+ Emulator (Test) ==========================================
+// Hub spielt die 123 als BLE-Peripheral nach: advertised NUS-Service + Name
+// "123\TUNE+" + Hersteller Albertronic(2330), nimmt die Verbindung an und
+// streamt sweependes RPM/ADV/MAP. So testet man Touch/M5/Hub am Schreibtisch.
+static NimBLECharacteristic *emu123Tx = nullptr;
+static bool     emu123Started = false;
+static uint32_t emu123LastMs = 0;
+static float    emu123Rpm = 800.0f;
+static bool     emu123Rising = true;
+
+static inline char emu123Nib(int n) { return (n < 10) ? ('0' + n) : ('A' + n - 10); }
+
+static void emu123SendField(uint8_t field, int hi, int lo) {
+  if (!emu123Tx) return;
+  if (hi < 0) hi = 0; else if (hi > 15) hi = 15;
+  if (lo < 0) lo = 0; else if (lo > 15) lo = 15;
+  uint8_t buf[3] = { field, (uint8_t)emu123Nib(hi), (uint8_t)emu123Nib(lo) };
+  emu123Tx->setValue(buf, 3);
+  emu123Tx->notify();
+}
+
+// Nach Disconnect muss das Advertising NEU gestartet werden, sonst kann sich
+// kein Central wieder verbinden (NimBLE stoppt Advertising bei Connect).
+class Emu123ServerCB : public NimBLEServerCallbacks {
+  void onConnect(NimBLEServer *, NimBLEConnInfo &) override {
+    Serial.println("EMU123:      Central verbunden");
+  }
+  void onDisconnect(NimBLEServer *, NimBLEConnInfo &, int reason) override {
+    Serial.printf("EMU123:      Central getrennt (r=%d) -> re-advertise\n", reason);
+    NimBLEDevice::getAdvertising()->start();
+  }
+};
+static Emu123ServerCB emu123ServerCB;
+
+void startEmu123() {
+  if (emu123Started) return;
+  NimBLEDevice::getScan()->stop();
+  NimBLEServer *srv = NimBLEDevice::createServer();
+  srv->setCallbacks(&emu123ServerCB);
+  NimBLEService *nus = srv->createService(NimBLEUUID("6e400001-b5a3-f393-e0a9-e50e24dcca9e"));
+  nus->createCharacteristic(NimBLEUUID("6e400002-b5a3-f393-e0a9-e50e24dcca9e"),
+                            NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);  // RX (kick)
+  emu123Tx = nus->createCharacteristic(NimBLEUUID("6e400003-b5a3-f393-e0a9-e50e24dcca9e"),
+                                       NIMBLE_PROPERTY::NOTIFY);                  // TX (daten)
+  nus->start();
+
+  NimBLEAdvertising *adv = NimBLEDevice::getAdvertising();
+  adv->stop();
+  NimBLEAdvertisementData ad;
+  ad.setFlags(0x06);
+  ad.addServiceUUID(NimBLEUUID("6e400001-b5a3-f393-e0a9-e50e24dcca9e"));
+  NimBLEAdvertisementData sr;
+  sr.setName("123\\TUNE+");
+  std::string mfg;  // Company 2330 (0x091A, LE) + DeviceType 5 + Serial
+  mfg += (char)0x1A; mfg += (char)0x09; mfg += (char)0x00;
+  mfg += (char)0x05; mfg += (char)0x50; mfg += (char)0x6C;
+  sr.setManufacturerData(mfg);
+  adv->setAdvertisementData(ad);
+  adv->setScanResponseData(sr);
+  adv->start();
+  emu123Started = true;
+  Serial.println("EMU123:      AN — advertised als '123\\TUNE+' (NUS, Company 2330)");
+}
+
+void stopEmu123() {
+  if (!emu123Started) return;
+  NimBLEDevice::getAdvertising()->stop();
+  emu123Started = false;
+  emu123Tx = nullptr;
+  Serial.println("EMU123:      AUS");
+}
+
+void updateEmu123() {
+  if (!emu123Started) { startEmu123(); return; }
+  const uint32_t now = millis();
+  if (now - emu123LastMs < 40) return;   // ~25 Hz, EIN Frame pro Tick
+  emu123LastMs = now;
+  // Sweep/feste RPM fortschreiben
+  int rpm;
+  if (emu123ManualRpm >= 0) {
+    rpm = emu123ManualRpm;
+  } else {
+    emu123Rpm += emu123Rising ? 25.0f : -25.0f;
+    if (emu123Rpm >= 3200.0f) emu123Rising = false;
+    if (emu123Rpm <= 700.0f)  emu123Rising = true;
+    rpm = (int)emu123Rpm;
+  }
+  if (rpm < 0) rpm = 0; else if (rpm > 12000) rpm = 12000;
+  const float adv = 10.0f + (rpm - 700) * 0.011f;
+  int mapv = 40 + (rpm - 700) / 45; if (mapv > 95) mapv = 95; if (mapv < 0) mapv = 0;
+  emu123CurRpm = rpm; emu123CurAdv = adv; emu123CurMap = mapv;
+
+  // Nur EIN Notify pro Tick (sonst ueberschreibt der naechste setValue den
+  // Puffer, bevor das vorige Notify raus ist -> nur MAP kommt an).
+  static uint8_t field = 0;
+  switch (field) {
+    case 0: { const int rhi = rpm / 800; const int rlo = (rpm - rhi * 800) / 50;
+              emu123SendField(0x30, rhi, rlo); } break;                    // RPM
+    case 1: { const int ahi = (int)(adv / 3.2f); const int alo = (int)((adv - ahi * 3.2f) / 0.2f);
+              emu123SendField(0x31, ahi, alo); } break;                    // Zuendung
+    default: emu123SendField(0x32, (mapv >> 4) & 0xF, mapv & 0xF); break;  // MAP
+  }
+  field = (field + 1) % 3;
+}
+
 void setupBleHub()
 {
   NimBLEDevice::init(BLE_HUB_NAME);
@@ -2734,6 +2929,11 @@ void setupBleHub()
 #endif
   Serial.printf("123TUNE BLE: target %s\n", tuneSavedAddress.c_str());
   logHubEvent("tune_state", "boot|target_saved");
+  if (hubFeatEmu123) {
+    // Emulator-Modus: Hub IST die 123 (Peripheral). Kein Central-Scan.
+    startEmu123();
+    return;
+  }
   if (hubFeatBle123) {
     startTuneScan();
   } else {
@@ -2751,6 +2951,10 @@ void setupBleHub()
 
 void updateBleHub()
 {
+  if (hubFeatEmu123) {   // Emulator-Modus: nur die 123 nachspielen
+    updateEmu123();
+    return;
+  }
   if (hubFeatBle123) {
     updateTuneBle();
   } else if (tuneConnected || tuneDoConnect) {
@@ -2829,6 +3033,7 @@ void onEspNowSend(const uint8_t *mac, esp_now_send_status_t status)
 
 void setupEspNowHub()
 {
+  if (hubFeatEmu123) return;   // Emulator: kein ESP-NOW (sonst Funk-/AP-Konflikt)
 #if ENABLE_WEB_GUI
   if (WiFi.getMode() == WIFI_OFF) {
     Serial.println("ESP-NOW:     WiFi not ready yet");
@@ -2874,6 +3079,10 @@ void setupEspNowHub()
 
 void updateEspNowHub()
 {
+  if (hubFeatEmu123) {         // Emulator: ESP-NOW aus
+    if (espNowReady) teardownEspNowHub();
+    return;
+  }
   if (!hubFeatEspNow) {
     if (espNowReady) {
       teardownEspNowHub();
@@ -2996,13 +3205,14 @@ void updateHourmeters()
 #if ENABLE_WEB_GUI
 void printHubFeatStatus()
 {
-  Serial.printf("Hub feats:   ESP-NOW=%s AP=%s WLAN=%s LOG=%s 123=%s BM6=%s ch=%u\n",
+  Serial.printf("Hub feats:   ESP-NOW=%s AP=%s WLAN=%s LOG=%s 123=%s BM6=%s EMU123=%s ch=%u\n",
                 hubFeatEspNow ? "on" : "off",
                 hubFeatAp ? "on" : "off",
                 hubFeatWifi ? "on" : "off",
                 hubFeatLog ? "on" : "off",
                 hubFeatBle123 ? "on" : "off",
                 hubFeatBleBm6 ? "on" : "off",
+                hubFeatEmu123 ? "on" : "off",
                 hubEspNowChannelPref);
 }
 
@@ -3139,13 +3349,27 @@ bool handleHubFeatSerialLine(const String &line)
       hubFeatBleBm6 = false;
       changed = true;
     }
+  } else if (feat == "emu123") {
+    if (arg.equalsIgnoreCase("on") || arg == "1") {
+      hubFeatEmu123 = true;
+      changed = true;
+    } else if (arg.equalsIgnoreCase("off") || arg == "0") {
+      hubFeatEmu123 = false;
+      changed = true;
+    }
   } else {
-    Serial.println("Hub feats:   unknown feature (espnow/ap/wifi/log/ble123/blebm6)");
+    Serial.println("Hub feats:   unknown feature (espnow/ap/wifi/log/ble123/blebm6/emu123)");
     return true;
   }
 
   if (changed) {
     saveHubFeatures();
+    if (feat == "emu123") {
+      // Emulator <-> Central sauber per Reboot umschalten.
+      Serial.printf("Hub feats:   emu123=%s gespeichert — Reboot...\n", hubFeatEmu123 ? "on" : "off");
+      delay(300);
+      ESP.restart();
+    }
     applyHubFeatures();
     logHubEvent("hub_feat", "serial");
     Serial.println("Hub feats:   saved");
@@ -3211,6 +3435,38 @@ void setupWebGui()
   }
 
   server.on("/", []() {
+    if (hubFeatEmu123) {   // Schlanke Seite: nur AP + Heim-WLAN + /emu
+      const bool sta = (WiFi.status() == WL_CONNECTED);
+      const String apName = WiFi.softAPSSID();
+      String h; h.reserve(2800);
+      h += F("<!doctype html><html lang=de><head><meta charset=utf-8>"
+             "<meta name=viewport content='width=device-width,initial-scale=1'><title>123 Emulator</title>"
+             "<style>body{font-family:system-ui,Arial;background:#0b1210;color:#e6ede8;margin:0}"
+             "main{max-width:560px;margin:auto;padding:16px}h1{color:#9ed85b;font-size:1.25rem}"
+             "h2{color:#9ed85b;font-size:1rem;margin:22px 0 0}.card{background:#101a15;border:1px solid #26372e;"
+             "border-radius:10px;padding:14px;margin:10px 0}input{box-sizing:border-box;width:100%;min-height:42px;"
+             "margin:6px 0 12px;padding:10px;border:1px solid #35453c;border-radius:8px;background:#0b1210;color:#e6ede8;font-size:1rem}"
+             "label{font-size:.9rem;color:#bde87a}button{background:#2e7d32;color:#fff;border:0;border-radius:8px;padding:11px 16px;font-size:1rem}"
+             "a.btn{display:inline-block;background:#26372e;color:#bde87a;border-radius:8px;padding:10px 14px;text-decoration:none}.mut{color:#9ab}</style>"
+             "</head><body><main><h1>123&#92;TUNE+ Emulator</h1>"
+             "<div class=card>BLE: advertised als <b>123&#92;TUNE+</b> (Company 2330)."
+             "<br><a class=btn href='/emu'>&#9654; Emulator-Steuerung (/emu)</a></div>");
+      h += "<h2>Heim-WLAN</h2><div class=card>Status: <b>";
+      h += sta ? ("verbunden, IP " + WiFi.localIP().toString()) : String("nicht verbunden");
+      h += "</b><form method=POST action=/wifi><label>WLAN-Name (SSID)</label>"
+           "<input name=ssid value='" + savedWifiSsid + "'>"
+           "<label>Passwort</label><input name=pass type=password placeholder='leer = unveraendert'>"
+           "<button>Verbinden &amp; speichern</button></form></div>";
+      h += "<h2>Access Point</h2><div class=card>Aktiv: <b>" + apName + "</b> &middot; " + WiFi.softAPIP().toString();
+      h += "<form method=POST action=/ap_config><label>AP-Name</label><input name=ssid value='" + apName + "'>"
+           "<label>AP-Passwort (leer = offen, sonst min. 8)</label><input name=pass value='" + hubApPassword + "'>"
+           "<label>AP-IP</label><input name=ip value='" + hubApIp + "'>"
+           "<label>Netzmaske</label><input name=mask value='" + hubApMask + "'>"
+           "<button>AP speichern</button></form></div>";
+      h += F("<p class=mut>Reiner 123-BLE-Emulator &middot; kein CAN/ESP-NOW.</p></main></body></html>");
+      server.send(200, "text/html", h);
+      return;
+    }
     server.send_P(200, "text/html", R"HTML(
 <!doctype html>
 <html lang="de">
@@ -3463,6 +3719,19 @@ details.setup > .inside { padding: 0 16px 16px; }
 <label><input type="checkbox" name="blebm6" value="1" id="hfBleBm6"> BM6 BLE am Hub</label>
 <p class="hint">BM6 am Hub aktiviert BLE-Scan auf dem Hub. Fuer 123TUNE bleibt empfohlen: ein Client direkt, Rest via ESP-NOW.</p>
 <button type="submit">Speichern</button>
+</form>
+</div>
+</details>
+<details class="setup">
+<summary>SoftAP Name / Passwort / IP</summary>
+<div class="inside">
+<form action="/ap_config" method="post" id="apConfigForm">
+<label for="ap_ssid">AP Name</label><input id="ap_ssid" name="ssid" value="">
+<label for="ap_pass">AP Passwort</label><input id="ap_pass" name="pass" type="text" value="">
+<label for="ap_ip">AP IP / Gateway</label><input id="ap_ip" name="ip" value="">
+<label for="ap_mask">Netzmaske</label><input id="ap_mask" name="mask" value="">
+<p class="hint">Passwort leer = offener AP. Sonst mindestens 8 Zeichen. Nach Speichern startet der AP neu.</p>
+<button type="submit">AP speichern</button>
 </form>
 </div>
 </details>
@@ -3801,11 +4070,14 @@ function setFeatBadge(id, label, on) {
   cls(el, on ? 'tag ok' : 'tag bad');
 }
 let hubFeaturesEditing = false;
+let apConfigEditing = false;
 document.addEventListener('change', (ev) => {
   if (ev.target && ev.target.closest && ev.target.closest('#hubFeaturesForm')) hubFeaturesEditing = true;
+  if (ev.target && ev.target.closest && ev.target.closest('#apConfigForm')) apConfigEditing = true;
 });
 document.addEventListener('focusin', (ev) => {
   if (ev.target && ev.target.closest && ev.target.closest('#hubFeaturesForm')) hubFeaturesEditing = true;
+  if (ev.target && ev.target.closest && ev.target.closest('#apConfigForm')) apConfigEditing = true;
 });
 async function refresh() {
   try {
@@ -3863,6 +4135,16 @@ async function refresh() {
     const apStations = Array.isArray(d.wifi_ap_stations) ? d.wifi_ap_stations : [];
     document.getElementById('wifiApSsid').textContent = d.wifi_ap_ssid || '-';
     document.getElementById('wifiApIp').textContent = d.ap_ip || '-';
+    if (!apConfigEditing) {
+      const apSsid = document.getElementById('ap_ssid');
+      const apPass = document.getElementById('ap_pass');
+      const apIp = document.getElementById('ap_ip');
+      const apMask = document.getElementById('ap_mask');
+      if (apSsid) apSsid.value = d.wifi_ap_ssid || '';
+      if (apPass) apPass.value = d.wifi_ap_password || '';
+      if (apIp) apIp.value = d.wifi_ap_ip || '192.168.4.1';
+      if (apMask) apMask.value = d.wifi_ap_mask || '255.255.255.0';
+    }
     document.getElementById('wifiApCount').textContent = d.wifi_ap_station_count ?? apStations.length;
     document.getElementById('wifiApTable').innerHTML = apStations.length ? apStations.map(s =>
       escHtml(s.ip || '-') + ' / ' + escHtml(s.mac || '-') + '<br>' +
@@ -4187,6 +4469,49 @@ setInterval(() => {
     server.sendHeader("Location", "/", true);
     server.send(303, "text/plain", "");
   });
+  server.on("/emu", HTTP_GET, []() {
+    // An/Aus (mit Reboot), Sweep oder feste RPM.
+    if (server.hasArg("set")) {
+      const String s = server.arg("set");
+      hubFeatEmu123 = (s == "on" || s == "1");
+      saveHubFeatures();
+      server.send(200, "text/html",
+                  "<meta http-equiv='refresh' content='4;url=/emu'>Emulator " +
+                  String(hubFeatEmu123 ? "AN" : "AUS") + " — Reboot...");
+      delay(300);
+      ESP.restart();
+      return;
+    }
+    if (server.hasArg("rpm"))   emu123ManualRpm = server.arg("rpm").toInt();
+    if (server.hasArg("sweep")) emu123ManualRpm = -1;
+    String h;
+    h.reserve(1600);
+    h += F("<!doctype html><meta name=viewport content='width=device-width,initial-scale=1'>"
+           "<title>123 Emulator</title><style>body{font-family:system-ui;background:#0e0e0e;color:#eee;margin:16px}"
+           "a.btn{display:inline-block;padding:11px 15px;margin:5px 6px 5px 0;background:#222;color:#eee;"
+           "border:1px solid #444;border-radius:9px;text-decoration:none}a.on{background:#2e7d32;border-color:#2e7d32}"
+           ".big{font-size:2.1rem;font-weight:700;margin:14px 0}.muted{color:#9aa}</style>"
+           "<h2>123&#92;TUNE+ Emulator</h2>");
+    h += "<div>Status: <b style='color:";
+    h += hubFeatEmu123 ? "#54d273'>AN" : "#ff6a5a'>AUS";
+    h += "</b> &middot; Modus: <b>";
+    h += (emu123ManualRpm >= 0) ? ("fest " + String(emu123ManualRpm)) : String("Sweep 700-3200");
+    h += "</b></div>";
+    h += "<div class=muted>BLE-Adresse: <b style='color:#9ed85b'>" + bleAddress +
+         "</b> &middot; Name <b>123&#92;TUNE+</b></div>";
+    h += F("<div class=big id=live>--</div>"
+           "<div><a class='btn on' href='/emu?set=on'>EMU AN</a><a class='btn' href='/emu?set=off'>EMU AUS</a></div>"
+           "<div class=muted>Drehzahl:</div>"
+           "<div><a class='btn' href='/emu?sweep=1'>Sweep</a>"
+           "<a class='btn' href='/emu?rpm=800'>800</a><a class='btn' href='/emu?rpm=1500'>1500</a>"
+           "<a class='btn' href='/emu?rpm=2500'>2500</a><a class='btn' href='/emu?rpm=4000'>4000</a></div>"
+           "<p class=muted>Advertised als &#39;123&#92;TUNE+&#39; (NUS, Company 2330). "
+           "Touch/M5/Hub verbinden sich damit wie mit der echten 123.</p>"
+           "<script>setInterval(async()=>{try{let d=await(await fetch('/api/status')).json();"
+           "document.getElementById('live').textContent=d.emu123_on?('RPM '+d.emu123_rpm+'  ADV '+d.emu123_adv+'\\u00b0  MAP '+d.emu123_map):'Emulator aus';}catch(e){}},400);</script>");
+    server.send(200, "text/html", h);
+  });
+
   server.on("/ble_target", HTTP_POST, []() {
 #if ENABLE_BLE_HUB
     const String mac = normalizeMacInput(server.arg("tune_mac"));
@@ -4334,6 +4659,38 @@ setInterval(() => {
     server.sendHeader("Location", "/", true);
     server.send(303, "text/plain", "");
   });
+  server.on("/ap_config", HTTP_POST, []() {
+    String ssid = server.arg("ssid");
+    String password = server.arg("pass");
+    String ip = server.arg("ip");
+    String mask = server.arg("mask");
+    ssid.trim();
+    ip.trim();
+    mask.trim();
+    IPAddress parsedIp, parsedMask;
+    if (ssid.length() == 0) {
+      server.send(400, "text/plain", "AP-Name fehlt.");
+      return;
+    }
+    if (password.length() > 0 && password.length() < 8) {
+      server.send(400, "text/plain", "AP-Passwort muss leer oder mindestens 8 Zeichen lang sein.");
+      return;
+    }
+    if (!parseApAddress(ip, "192.168.4.1", parsedIp) ||
+        !parseApAddress(mask, "255.255.255.0", parsedMask)) {
+      server.send(400, "text/plain", "AP-IP oder Netzmaske ungueltig.");
+      return;
+    }
+    saveHubApConfig(ssid, password, ip, mask);
+    if (hubFeatAp) {
+      WiFi.softAPdisconnect(true);
+      delay(100);
+      ensureHubSoftAp();
+    }
+    logHubEvent("ap_config", "saved");
+    server.sendHeader("Location", "/", true);
+    server.send(303, "text/plain", "");
+  });
   server.onNotFound([]() {
     server.sendHeader("Location", "http://192.168.4.1/", true);
     server.send(302, "text/plain", "");
@@ -4343,7 +4700,7 @@ setInterval(() => {
   server.begin();
   Serial.printf(
       "Web GUI:     WiFi '%s', password '%s', http://%s/\n",
-      WEB_AP_SSID,
+      hubFeatEmu123 ? "123-emulator" : WEB_AP_SSID,
       WEB_AP_PASSWORD,
       WiFi.softAPIP().toString().c_str());
 #endif
@@ -4391,13 +4748,14 @@ void updateWebGui()
     if (hubFeatAp) {
       WiFi.mode(WIFI_AP);
       WiFi.setSleep(true);
-      WiFi.softAPConfig(
-          IPAddress(192, 168, 4, 1),
-          IPAddress(192, 168, 4, 1),
-          IPAddress(255, 255, 255, 0));
-      WiFi.softAP(WEB_AP_SSID, WEB_AP_PASSWORD, 6, 0, 4);
+      IPAddress apIp, apMask;
+      parseApAddress(hubApIp, "192.168.4.1", apIp);
+      parseApAddress(hubApMask, "255.255.255.0", apMask);
+      WiFi.softAPConfig(apIp, apIp, apMask);
+      const char *roadSsid = hubFeatEmu123 ? "123-emulator" : hubApSsid.c_str();
+      WiFi.softAP(roadSsid, hubApPassword.c_str(), 6, 0, 4);
       Serial.printf("Home WiFi:   unavailable, road AP only '%s' http://%s/\n",
-                    WEB_AP_SSID,
+                    roadSsid,
                     WiFi.softAPIP().toString().c_str());
     } else {
       WiFi.mode(WIFI_STA);
@@ -4785,10 +5143,14 @@ void setup()
   setupBleHub();
   setupWebGui();
   setupEspNowHub();
-  setupHourmeters();
-  setupCan();
-  setupUart();
-  setupSpeedReed();
+  if (!hubFeatEmu123) {   // Emulator = nur BLE(123) + WebGUI, kein CAN/UART/Speed
+    setupHourmeters();
+    setupCan();
+    setupUart();
+    setupSpeedReed();
+  } else {
+    Serial.println("EMU123:      reiner 123-Emulator (CAN/UART/Speed/ESP-NOW aus)");
+  }
 #if ENABLE_SPARTAN_ANALOG
   analogSetPinAttenuation(SPARTAN_ANALOG_PIN, ADC_11db);
 #endif
@@ -4802,14 +5164,16 @@ void loop()
 #ifdef USE_M5_DISPLAY
   M5.update();
 #endif
-  updateCan();
-  updateDemo();
-  updateAnalog();
-  updateHeaterAnalog();
-  updateUart();
-  updateSpeedReed();
-  updateHourmeters();
-  appendLiveCsv();
+  if (!hubFeatEmu123) {   // im Emulator-Modus nur BLE + WebGUI
+    updateCan();
+    updateDemo();
+    updateAnalog();
+    updateHeaterAnalog();
+    updateUart();
+    updateSpeedReed();
+    updateHourmeters();
+    appendLiveCsv();
+  }
   updateWebGui();
   updateBleHub();
   updateEspNowHub();
