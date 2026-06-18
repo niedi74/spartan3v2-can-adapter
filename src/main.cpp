@@ -219,7 +219,7 @@ constexpr uint32_t kTuneScanWindowMs = 10000;
 constexpr uint32_t kTuneReconnectDelayMs = 5000;
 constexpr uint32_t kTunePingIntervalMs = 1650;
 constexpr uint32_t kBleHubAdvertiseFallbackMs = 30000;
-constexpr uint32_t kTuneStaleRxMs = 3000;
+constexpr uint32_t kTuneStaleRxMs = 12000;
 constexpr uint32_t kTuneReconnectBackoffMaxMs = 30000;
 
 enum class TuneLinkState : uint8_t {
@@ -401,6 +401,7 @@ volatile uint32_t espNowTxCount = 0;
 volatile uint32_t espNowTxFailCount = 0;
 uint16_t espNowSeq = 0;
 bool espNowReady = false;
+uint8_t espNowChannel = ESP_NOW_WIFI_CHANNEL;
 uint32_t lastEspNowSendMs = 0;
 #endif
 #if ENABLE_WEB_GUI
@@ -413,7 +414,9 @@ uint32_t homeWifiConnectStartedMs = 0;
 bool homeWifiDisabledForRoadAp = false;
 uint32_t lastApRetryMs = 0;
 uint32_t apRetryCount = 0;
+bool wifiNatEnabled = false;
 bool logFsReady = false;
+String logLastError;
 uint32_t lastCsvAppendMs = 0;
 struct TimezoneEntry {
   const char *label;
@@ -433,6 +436,10 @@ const char *kNtpServerPrimary = "pool.ntp.org";
 const char *kNtpServerSecondary = "time.nist.gov";
 const char *kNtpServerTertiary = "de.pool.ntp.org";
 constexpr uint32_t kNtpResyncIntervalMs = 15UL * 60UL * 1000UL;
+const IPAddress kApIp(192, 168, 4, 1);
+const IPAddress kApNetmask(255, 255, 255, 0);
+const IPAddress kApLeaseStart(192, 168, 4, 2);
+const IPAddress kApDns(8, 8, 8, 8);
 uint8_t timezoneIdx = kTimezoneDefault;
 bool ntpStarted = false;
 bool ntpSynced = false;
@@ -1076,7 +1083,7 @@ String statusJson()
   json += ",\"esp_now_ready\":";
   json += espNowReady ? "true" : "false";
   json += ",\"esp_now_channel\":";
-  json += String(ESP_NOW_WIFI_CHANNEL);
+  json += String(espNowChannel);
   json += ",\"esp_now_tx\":";
   json += String(espNowTxCount);
   json += ",\"esp_now_tx_fail\":";
@@ -1137,6 +1144,8 @@ String statusJson()
   json += WiFi.softAPIP().toString();
   json += "\",\"ap_retry_count\":";
   json += String(apRetryCount);
+  json += ",\"wifi_nat\":";
+  json += wifiNatEnabled ? "true" : "false";
   json += ",\"log_ready\":";
   json += logFsReady ? "true" : "false";
   json += ",\"log_current_bytes\":";
@@ -1145,6 +1154,9 @@ String statusJson()
   json += String(static_cast<unsigned long>(logFileSize(kOldLogFile)));
   json += ",\"log_columns\":";
   json += String(logColumnMask);
+  json += ",\"log_last_error\":\"";
+  json += jsonEscape(logLastError);
+  json += "\"";
   json += ",\"time_valid\":";
   json += systemTimeValid() ? "true" : "false";
   json += ",\"time_text\":\"";
@@ -1516,9 +1528,18 @@ void ensureLogHeader()
   }
   if (!needsHeader) return;
   File f = SPIFFS.open(kLogFile, FILE_WRITE);
-  if (!f) return;
+  if (!f) {
+    logLastError = "open_write_failed";
+    Serial.println("Logs:        create failed");
+    return;
+  }
   f.println(expectedHeader);
   f.close();
+  if (SPIFFS.exists(kLogFile)) {
+    logLastError = "";
+  } else {
+    logLastError = "missing_after_write";
+  }
 }
 
 void rotateLogIfNeeded()
@@ -1839,11 +1860,6 @@ class TuneClientCallbacks : public NimBLEClientCallbacks {
 
 void onTuneNotify(NimBLERemoteCharacteristic *, uint8_t *data, size_t length, bool)
 {
-  Serial.printf("123TUNE BLE: notify len=%u :", static_cast<unsigned>(length));
-  for (size_t i = 0; i < length && i < 20; i++) {
-    Serial.printf(" %02X", data[i]);
-  }
-  Serial.println();
   decodeTuneFrame(data, length);
   if (tuneLinkState == TuneLinkState::Subscribed) {
     setTuneLinkState(TuneLinkState::Streaming, "notify");
@@ -2397,12 +2413,9 @@ void updateTuneBle()
     const TuneSnapshot tune = tuneSnapshot();
     if (tune.lastRxMs != 0 && (now - tune.lastRxMs) > kTuneStaleRxMs &&
         tune.rpm >= ENGINE_RUNNING_RPM_THRESHOLD) {
-      if (tuneStaleReconnectMs == 0 || (now - tuneStaleReconnectMs) > 5000) {
+      if (tuneStaleReconnectMs == 0 || (now - tuneStaleReconnectMs) > 10000) {
         tuneStaleReconnectMs = now;
         logHubEvent("tune_state", "stale|rx_timeout");
-        resetTuneClient();
-        scheduleTuneScan(true);
-        return;
       }
     }
     return;
@@ -2561,9 +2574,9 @@ void setupEspNowHub()
     return;
   }
   const uint8_t channel = WiFi.channel();
-  if (channel > 0 && channel != ESP_NOW_WIFI_CHANNEL) {
-    Serial.printf("ESP-NOW:     WiFi channel %u, expected %d\n", channel, ESP_NOW_WIFI_CHANNEL);
-  }
+  espNowChannel = channel > 0 ? channel : ESP_NOW_WIFI_CHANNEL;
+#else
+  espNowChannel = ESP_NOW_WIFI_CHANNEL;
 #endif
 
   if (esp_now_init() != ESP_OK) {
@@ -2575,7 +2588,7 @@ void setupEspNowHub()
 
   esp_now_peer_info_t peer = {};
   memcpy(peer.peer_addr, kEspNowBroadcastAddr, sizeof(kEspNowBroadcastAddr));
-  peer.channel = ESP_NOW_WIFI_CHANNEL;
+  peer.channel = espNowChannel;
   peer.encrypt = false;
   if (esp_now_add_peer(&peer) != ESP_OK) {
     Serial.println("ESP-NOW:     broadcast peer add failed");
@@ -2585,7 +2598,7 @@ void setupEspNowHub()
   }
 
   espNowReady = true;
-  Serial.printf("ESP-NOW:     cockpit broadcast ready on channel %d\n", ESP_NOW_WIFI_CHANNEL);
+  Serial.printf("ESP-NOW:     cockpit broadcast ready on channel %u\n", espNowChannel);
   logHubEvent("espnow_tx", "ready|broadcast");
 }
 
@@ -2689,6 +2702,31 @@ void updateHourmeters()
   }
 }
 
+#if ENABLE_WEB_GUI
+void configureHubAp()
+{
+  WiFi.softAPConfig(kApIp, kApIp, kApNetmask, kApLeaseStart, kApDns);
+}
+
+void setWifiNatEnabled(bool enable)
+{
+  if (wifiNatEnabled == enable) return;
+  if (WiFi.softAPIP() == IPAddress(0, 0, 0, 0)) return;
+  if (!WiFi.AP.enableNAPT(enable)) {
+    Serial.printf("WiFi NAT:    %s failed\n", enable ? "enable" : "disable");
+    return;
+  }
+  wifiNatEnabled = enable;
+  if (wifiNatEnabled) {
+    dns.stop();
+    Serial.println("WiFi NAT:    AP clients routed to STA internet");
+  } else {
+    dns.start(53, "*", kApIp);
+    Serial.println("WiFi NAT:    off, captive DNS active");
+  }
+}
+#endif
+
 void setupWebGui()
 {
 #if ENABLE_WEB_GUI
@@ -2721,10 +2759,7 @@ void setupWebGui()
 #else
   WiFi.setSleep(false);
 #endif
-  WiFi.softAPConfig(
-      IPAddress(192, 168, 4, 1),
-      IPAddress(192, 168, 4, 1),
-      IPAddress(255, 255, 255, 0));
+  configureHubAp();
   if (!WiFi.softAP(WEB_AP_SSID, WEB_AP_PASSWORD, 6, 0, 4)) {
     Serial.println("Web GUI:     access point start failed");
     return;
@@ -3627,7 +3662,7 @@ setInterval(() => {
     server.send(302, "text/plain", "");
   });
 
-  dns.start(53, "*", IPAddress(192, 168, 4, 1));
+  dns.start(53, "*", kApIp);
   server.begin();
   Serial.printf(
       "Web GUI:     WiFi '%s', password '%s', http://%s/\n",
@@ -3645,12 +3680,10 @@ void updateWebGui()
   const wl_status_t wifiStatus = WiFi.status();
   if (WiFi.softAPIP() == IPAddress(0, 0, 0, 0) && now - lastApRetryMs >= 10000) {
     lastApRetryMs = now;
-    WiFi.softAPConfig(
-        IPAddress(192, 168, 4, 1),
-        IPAddress(192, 168, 4, 1),
-        IPAddress(255, 255, 255, 0));
+    configureHubAp();
     if (WiFi.softAP(WEB_AP_SSID, WEB_AP_PASSWORD, 6, 0, 4)) {
       Serial.printf("Web GUI:     access point retry OK, http://%s/\n", WiFi.softAPIP().toString().c_str());
+      setWifiNatEnabled(WiFi.status() == WL_CONNECTED);
     } else {
       apRetryCount++;
       Serial.printf("Web GUI:     access point retry failed (%lu)\n", static_cast<unsigned long>(apRetryCount));
@@ -3662,7 +3695,10 @@ void updateWebGui()
       homeWifiDisabledForRoadAp = false;
       homeWifiConnectStartedMs = 0;
       Serial.printf("Home WiFi:   connected to '%s', http://%s/\n", WiFi.SSID().c_str(), WiFi.localIP().toString().c_str());
+      setWifiNatEnabled(true);
       startNtpIfNeeded();
+    } else {
+      setWifiNatEnabled(false);
     }
   }
   updateNtp(now);
@@ -3671,17 +3707,15 @@ void updateWebGui()
     WiFi.disconnect(false, false);
     WiFi.mode(WIFI_AP);
     WiFi.setSleep(true);
-    WiFi.softAPConfig(
-        IPAddress(192, 168, 4, 1),
-        IPAddress(192, 168, 4, 1),
-        IPAddress(255, 255, 255, 0));
+    configureHubAp();
     WiFi.softAP(WEB_AP_SSID, WEB_AP_PASSWORD, 6, 0, 4);
+    setWifiNatEnabled(false);
     homeWifiDisabledForRoadAp = true;
     Serial.printf("Home WiFi:   unavailable, road AP only '%s' http://%s/\n",
                   WEB_AP_SSID,
                   WiFi.softAPIP().toString().c_str());
   }
-  dns.processNextRequest();
+  if (!wifiNatEnabled) dns.processNextRequest();
   server.handleClient();
 #endif
 }
