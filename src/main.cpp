@@ -204,6 +204,10 @@ bool lcdReady = false;
 
 constexpr uint32_t kDisplayIntervalMs = 200;
 constexpr uint32_t kBleNotifyIntervalMs = 250;
+// ESP-NOW-Cockpit-Broadcast: deutlich schneller als der BLE-Status-Notify,
+// damit RPM/Advance auf M5/Touch flüssig wirken (nicht "slow motion").
+// 40 ms = 25 Hz. Frames sind winzig (17 B), das ist für ESP-NOW unkritisch.
+constexpr uint32_t kEspNowSendIntervalMs = 40;
 constexpr uint32_t kCanStaleMs = 500;
 constexpr uint32_t kHomeWifiConnectWindowMs = 15000;
 constexpr float kLambdaAtZeroVolt = 0.68f;
@@ -3151,7 +3155,7 @@ void updateEspNowHub()
   }
 
   const uint32_t now = millis();
-  if (now - lastEspNowSendMs < kBleNotifyIntervalMs) {
+  if (now - lastEspNowSendMs < kEspNowSendIntervalMs) {
     return;
   }
   lastEspNowSendMs = now;
