@@ -532,6 +532,45 @@ String jsonEscape(const String &raw)
   return out;
 }
 
+String normalizeHostnameInput(const String &raw)
+{
+  String name = raw;
+  name.trim();
+  name.toLowerCase();
+  String out;
+  out.reserve(name.length());
+  bool lastDash = false;
+  for (size_t i = 0; i < name.length() && out.length() < 31; i++) {
+    const char c = name[i];
+    const bool ok = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '.';
+    if (!ok) continue;
+    if (c == '-' || c == '.') {
+      if (out.length() == 0 || lastDash) continue;
+      lastDash = true;
+    } else {
+      lastDash = false;
+    }
+    out += c;
+  }
+  while (out.endsWith("-") || out.endsWith(".")) out.remove(out.length() - 1);
+  return out;
+}
+
+String configuredHostname()
+{
+#if ENABLE_WEB_GUI
+  ensurePreferences();
+  String name = networkPreferences.isKey("hostname")
+      ? networkPreferences.getString("hostname", DEVICE_HOSTNAME)
+      : String(DEVICE_HOSTNAME);
+  name = normalizeHostnameInput(name);
+  if (name.length() == 0) name = DEVICE_HOSTNAME;
+  return name;
+#else
+  return String(DEVICE_HOSTNAME);
+#endif
+}
+
 #if ENABLE_BLE_HUB
 void recordBleScanDevice(const NimBLEAdvertisedDevice *device, bool tuneLike, bool bm6Like)
 {
@@ -1137,6 +1176,9 @@ String statusJson()
   json += haveSavedWifi ? "true" : "false";
   json += ",\"wifi_saved_ssid\":\"";
   json += savedWifiSsid;
+  json += "\"";
+  json += ",\"hostname\":\"";
+  json += jsonEscape(configuredHostname());
   json += "\"";
   json += ",\"wifi_connected\":";
   json += WiFi.status() == WL_CONNECTED ? "true" : "false";
@@ -2757,7 +2799,8 @@ void setupWebGui()
   }
   haveSavedWifi = stationSsid.length() > 0;
 
-  WiFi.setHostname(DEVICE_HOSTNAME);
+  const String hostName = configuredHostname();
+  WiFi.setHostname(hostName.c_str());
   WiFi.mode(WIFI_AP_STA);
 #if ENABLE_BLE_HUB
   WiFi.setSleep(true);
@@ -3040,7 +3083,12 @@ details.setup > .inside { padding: 0 16px 16px; }
 <div class="inside">
 <div class="row"><span>Verbindung</span><strong id="wifi">nicht eingerichtet</strong></div>
 <div class="row"><span>ESP32 IP</span><strong id="lanip">-</strong></div>
+<div class="row"><span>DNS Name</span><strong id="hostname">-</strong></div>
 <div class="row"><span>Gespeichert</span><strong id="wifisaved">-</strong></div>
+<form action="/hostname" method="post">
+<label for="host">DNS-/Geraetename</label><input id="host" name="host" maxlength="31" pattern="[A-Za-z0-9.-]{1,31}" required>
+<button type="submit">Name speichern &amp; neu starten</button>
+</form>
 <form action="/wifi" method="post">
 <label for="wifiPreset">Profil</label><select id="wifiPreset">
 <option value="">Manuell</option>
@@ -3322,6 +3370,9 @@ async function refresh() {
     }).join('');
     document.getElementById('wifi').textContent = d.wifi_connected ? d.wifi_ssid : (d.wifi_saved ? 'verbindet...' : 'nicht eingerichtet');
     document.getElementById('lanip').textContent = d.wifi_connected ? d.wifi_ip : '-';
+    document.getElementById('hostname').textContent = d.hostname || '-';
+    var hostInput = document.getElementById('host');
+    if (hostInput && document.activeElement !== hostInput) hostInput.value = d.hostname || '';
     document.getElementById('wifisaved').textContent = d.wifi_saved_ssid || '-';
     document.getElementById('liveWifiMeta').textContent = d.wifi_connected ? ((d.wifi_ssid || '-') + ' / ' + (d.wifi_ip || '-')) : ('AP ' + (d.ap_ip || '-'));
     document.getElementById('logstatus').textContent = d.log_ready ? 'bereit' : 'Dateisystem fehlt';
@@ -3569,6 +3620,18 @@ setInterval(() => {
     Serial.println("Home WiFi:   credentials cleared");
     server.sendHeader("Location", "/", true);
     server.send(303, "text/plain", "");
+  });
+  server.on("/hostname", HTTP_POST, []() {
+    const String name = normalizeHostnameInput(server.arg("host"));
+    if (name.length() == 0) {
+      server.send(400, "text/plain", "DNS-Name ungueltig. Erlaubt: a-z, 0-9, Punkt und Bindestrich.");
+      return;
+    }
+    ensurePreferences();
+    networkPreferences.putString("hostname", name);
+    server.send(200, "text/plain", "DNS-Name gespeichert. Neustart...");
+    delay(500);
+    ESP.restart();
   });
   server.on("/ble_target", HTTP_POST, []() {
 #if ENABLE_BLE_HUB
