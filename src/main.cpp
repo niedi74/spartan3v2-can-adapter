@@ -54,7 +54,7 @@
 #endif
 
 #ifndef DEVICE_HOSTNAME
-#define DEVICE_HOSTNAME "spartan-hub"
+#define DEVICE_HOSTNAME "esp-spartan-hub"
 #endif
 
 #ifndef STATUS_LED_PIN
