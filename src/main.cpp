@@ -3139,7 +3139,12 @@ void setupEspNowHub()
 
   esp_now_peer_info_t peer = {};
   memcpy(peer.peer_addr, kEspNowBroadcastAddr, sizeof(kEspNowBroadcastAddr));
-  peer.channel = channel;
+  // channel=0 => IMMER auf dem aktuellen Funkkanal senden. Verhindert den
+  // Fehler "Peer channel is not equal to the home channel, send fail!", der
+  // ALLE Sends scheitern ließ, wenn AP/STA-Kanal vom Peer-Kanal abwich (z.B.
+  // nach Profilwechsel). Die Clients empfangen auf dem Kanal des Hub-Funks
+  // (im Bus = AP-Kanal 6).
+  peer.channel = 0;
   peer.encrypt = false;
   if (esp_now_add_peer(&peer) != ESP_OK) {
     Serial.println("ESP-NOW:     broadcast peer add failed");
