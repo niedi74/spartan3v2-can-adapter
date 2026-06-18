@@ -37,6 +37,9 @@
 #include <esp_sntp.h>
 #include <esp_wifi.h>
 #endif
+#if defined(ENABLE_BLE_HUB) && defined(ENABLE_ESP_NOW_HUB)
+#include "esp_coexist.h"   // BLE/WiFi-Funkpriorität (123-BLE-Empfang stabil halten)
+#endif
 
 #if ENABLE_BLE_HUB
 #include <NimBLEDevice.h>
@@ -5328,13 +5331,21 @@ void setup()
   setupBleHub();
   setupWebGui();
   setupEspNowHub();
+#if defined(ENABLE_BLE_HUB) && defined(ENABLE_ESP_NOW_HUB)
+  // BLE bekommt Funkvorrang vor WiFi. So bleibt der 123-BLE-Empfang (echtes 123
+  // ODER externes Emu-Board) stabil/flüssig, obwohl gleichzeitig AP + ESP-NOW
+  // laufen. Ohne das hungert die WiFi-Last den BLE-Link aus -> ruckelnde Daten.
+  if (esp_coex_preference_set(ESP_COEX_PREFER_BT) == ESP_OK) {
+    Serial.println("Coex:        BLE-Funkvorrang gesetzt (PREFER_BT)");
+  }
+#endif
   if (!hubFeatEmu123) {   // Emulator = nur BLE(123) + WebGUI, kein CAN/UART/Speed
     setupHourmeters();
     setupCan();
     setupUart();
     setupSpeedReed();
   } else {
-    Serial.println("EMU123:      reiner 123-Emulator (CAN/UART/Speed/ESP-NOW aus)");
+    Serial.println("EMU123:      123-Emulator (CAN/UART/Speed aus, ESP-NOW Fan-out an)");
   }
 #if ENABLE_SPARTAN_ANALOG
   analogSetPinAttenuation(SPARTAN_ANALOG_PIN, ADC_11db);
