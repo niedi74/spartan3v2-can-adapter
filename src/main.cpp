@@ -2810,8 +2810,10 @@ static void emu123SendField(uint8_t field, int hi, int lo) {
   if (hi < 0) hi = 0; else if (hi > 15) hi = 15;
   if (lo < 0) lo = 0; else if (lo > 15) lo = 15;
   uint8_t buf[3] = { field, (uint8_t)emu123Nib(hi), (uint8_t)emu123Nib(lo) };
-  emu123Tx->setValue(buf, 3);
-  emu123Tx->notify();
+  // notify(payload,len) sendet den Wert DIREKT — kein gemeinsamer setValue-Puffer,
+  // darum sind jetzt mehrere Notifies pro Tick zuverlässig (vorher kam nur das
+  // letzte Feld an). Das erlaubt RPM-Priorisierung für eine flüssige Drehzahl.
+  emu123Tx->notify(buf, 3);
 }
 
 // Nach Disconnect muss das Advertising NEU gestartet werden, sonst kann sich
@@ -2911,20 +2913,21 @@ void updateEmu123() {
   if (tuneRxCount < UINT32_MAX) tuneRxCount++;
   portEXIT_CRITICAL(&stateMux);
 
-  // Nur EIN Notify pro Tick (sonst ueberschreibt der naechste setValue den
-  // Puffer, bevor das vorige Notify raus ist -> nur MAP kommt an).
-  static uint8_t field = 0;
-  switch (field) {
-    case 0: { const int rhi = rpm / 800; const int rlo = (rpm - rhi * 800) / 50;
-              emu123SendField(0x30, rhi, rlo); } break;                    // RPM
-    case 1: { const int ahi = (int)(adv / 3.2f); const int alo = (int)((adv - ahi * 3.2f) / 0.2f);
+  // RPM JEDEN Tick senden (25 Hz) — das ist der Wert, der flüssig wirken muss,
+  // genau wie ein echtes 123. Die Nebenwerte rotieren je ~5 Hz. Dank
+  // notify(payload,len) sind zwei Notifies pro Tick zuverlässig.
+  { const int rhi = rpm / 800; const int rlo = (rpm - rhi * 800) / 50;
+    emu123SendField(0x30, rhi, rlo); }                                     // RPM @25Hz
+  static uint8_t sec = 0;
+  switch (sec) {
+    case 0: { const int ahi = (int)(adv / 3.2f); const int alo = (int)((adv - ahi * 3.2f) / 0.2f);
               emu123SendField(0x31, ahi, alo); } break;                    // Zuendung
-    case 2: emu123SendField(0x32, (mapv >> 4) & 0xF, mapv & 0xF); break;   // MAP
-    case 3: emu123SendField(0x33, (tempRaw >> 4) & 0xF, tempRaw & 0xF); break;  // Temp
-    case 4: emu123SendField(0x35, (coilRaw >> 4) & 0xF, coilRaw & 0xF); break;  // Coil
+    case 1: emu123SendField(0x32, (mapv >> 4) & 0xF, mapv & 0xF); break;   // MAP
+    case 2: emu123SendField(0x33, (tempRaw >> 4) & 0xF, tempRaw & 0xF); break;  // Temp
+    case 3: emu123SendField(0x35, (coilRaw >> 4) & 0xF, coilRaw & 0xF); break;  // Coil
     default: emu123SendField(0x41, (voltRaw >> 4) & 0xF, voltRaw & 0xF); break; // Volt
   }
-  field = (field + 1) % 6;
+  sec = (sec + 1) % 5;
 }
 
 void setupBleHub()
