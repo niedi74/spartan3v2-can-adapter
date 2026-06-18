@@ -53,6 +53,10 @@
 #define DEVICE_ROLE "motorraum"
 #endif
 
+#ifndef DEVICE_HOSTNAME
+#define DEVICE_HOSTNAME "spartan-hub"
+#endif
+
 #ifndef STATUS_LED_PIN
 #define STATUS_LED_PIN 2
 #endif
@@ -2753,6 +2757,7 @@ void setupWebGui()
   }
   haveSavedWifi = stationSsid.length() > 0;
 
+  WiFi.setHostname(DEVICE_HOSTNAME);
   WiFi.mode(WIFI_AP_STA);
 #if ENABLE_BLE_HUB
   WiFi.setSleep(true);
@@ -4035,6 +4040,7 @@ void printBootDetails()
   Serial.println("Motorraum Spartan 3 v2 display");
   Serial.println("-------------------------------");
   Serial.printf("Device role: %s\n", DEVICE_ROLE);
+  Serial.printf("Hostname:    %s\n", DEVICE_HOSTNAME);
 #ifdef USE_M5_DISPLAY
   Serial.println("Display:     M5Unified");
 #else
