@@ -2896,6 +2896,21 @@ void updateEmu123() {
   int coilRaw = (int)(coilA * 8.65f + 0.5f); if (coilRaw > 255) coilRaw = 255; if (coilRaw < 0) coilRaw = 0;
   int voltRaw = (int)(voltV * 4.54f + 0.5f); if (voltRaw > 255) voltRaw = 255; if (voltRaw < 0) voltRaw = 0;
 
+  // Emu-Werte ZUSÄTZLICH in den Tune-Status spiegeln. So bekommt der ESP-NOW-
+  // Fan-out (M5 + Touch gleichzeitig) im Emulator-Modus dieselben, vollständigen
+  // Daten mit 25 Hz — statt nur EIN BLE-Direkt-Display über die langsame
+  // 6-Felder-Round-Robin-Notify. Das ist das stabile, flüssige Test-Setup.
+  portENTER_CRITICAL(&stateMux);
+  tuneRpm = (float)rpm;
+  tuneAdvance = adv;
+  tuneMap = (float)mapv;
+  tuneTemperature = tempC;
+  tuneCoilCurrent = coilA;
+  tuneVoltage = voltV;
+  tuneLastRxMs = now;
+  if (tuneRxCount < UINT32_MAX) tuneRxCount++;
+  portEXIT_CRITICAL(&stateMux);
+
   // Nur EIN Notify pro Tick (sonst ueberschreibt der naechste setValue den
   // Puffer, bevor das vorige Notify raus ist -> nur MAP kommt an).
   static uint8_t field = 0;
@@ -3090,7 +3105,10 @@ void onEspNowSend(const uint8_t *mac, esp_now_send_status_t status)
 
 void setupEspNowHub()
 {
-  if (hubFeatEmu123) return;   // Emulator: kein ESP-NOW (sonst Funk-/AP-Konflikt)
+  // Emulator-Modus: ESP-NOW BLEIBT an, damit M5 und Touch die simulierten Daten
+  // per Funk bekommen (Fan-out). Der Hub ist hier BLE-Peripherie (advertised
+  // 123\TUNE+) UND ESP-NOW-Sender — die Displays nutzen ESP-NOW, niemand muss
+  // sich per BLE-Direkt mit dem Hub-Emu verbinden.
 #if ENABLE_WEB_GUI
   if (WiFi.getMode() == WIFI_OFF) {
     Serial.println("ESP-NOW:     WiFi not ready yet");
@@ -3136,10 +3154,8 @@ void setupEspNowHub()
 
 void updateEspNowHub()
 {
-  if (hubFeatEmu123) {         // Emulator: ESP-NOW aus
-    if (espNowReady) teardownEspNowHub();
-    return;
-  }
+  // Emulator-Modus: ESP-NOW BLEIBT aktiv (Fan-out der simulierten Daten an
+  // M5 + Touch). Nur wenn der Nutzer ESP-NOW bewusst abschaltet, ist es aus.
   if (!hubFeatEspNow) {
     if (espNowReady) {
       teardownEspNowHub();
@@ -3170,10 +3186,11 @@ void updateEspNowHub()
   float tuneCoil = 0.0f;
   bool tuneFresh = false;
   bool tuneConn = false;
-  if (hubFeatBle123) {
+  // Im Emulator-Modus speist updateEmu123() den Tune-Status, also auch dann lesen.
+  if (hubFeatBle123 || hubFeatEmu123) {
     const TuneSnapshot tune = tuneSnapshot();
     tuneFresh = tune.lastRxMs != 0 && (now - tune.lastRxMs) <= 3000;
-    tuneConn = tuneConnected;
+    tuneConn = tuneConnected || hubFeatEmu123;
     rpm = static_cast<uint16_t>(tune.rpm);
     advance = tune.advance;
     map = static_cast<uint8_t>(tune.map);
