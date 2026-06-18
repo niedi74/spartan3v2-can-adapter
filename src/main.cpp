@@ -636,10 +636,11 @@ void ensureHubSoftAp()
     }
     return;
   }
-  // Emulator: Default-AP "123-emulator", aber per /ap_config aenderbar.
-  const bool emuDefault = hubFeatEmu123 &&
-                          (hubApSsid.length() == 0 || hubApSsid == String(WEB_AP_SSID));
-  const char *apSsid = emuDefault ? "123-emulator" : hubApSsid.c_str();
+  // AP-Name immer einheitlich (Spartan3-Setup), auch im Emulator-Modus —
+  // sonst sucht der M5 "Spartan3-Setup", findet im Emu nur "123-emulator" und
+  // bindet sich nicht auf Kanal 6. Gleicher Name in Bus- UND Emu-Modus = M5
+  // assoziiert immer korrekt, Touch (Funk-Bus) ist ohnehin AP-unabhängig.
+  const char *apSsid = (hubApSsid.length() > 0) ? hubApSsid.c_str() : WEB_AP_SSID;
   // Nur skippen, wenn der AP schon mit dem RICHTIGEN Namen laeuft. (WIFI_AP_STA
   // setzt sonst eine AP-IP ohne SSID -> AP unsichtbar.)
   if (WiFi.softAPIP() != IPAddress(0, 0, 0, 0) && WiFi.softAPSSID() == String(apSsid)) {
