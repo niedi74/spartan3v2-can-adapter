@@ -426,6 +426,18 @@ float emu123CurAdv = 0.0f;
 int   emu123CurMap = 0;
 String emu123Addr = "";      // gewuenschte advertised BLE-Adresse (leer=Chip-Default)
 uint8_t hubEspNowChannelPref = 0;  // 0=auto/follow STA, otherwise fixed 1..14
+// WiFi-Profile: 0=Bus(AP-only), 1=Zuhause, 2=Handy
+struct HubWifiProfile {
+  char ssid[33];
+  char pass[65];
+  const char* label;
+};
+static HubWifiProfile g_hubWifiProfiles[3] = {
+  { "", "", "Bus" },        // Slot 0: AP-only, kein STA
+  { "", "", "Zuhause" },    // Slot 1: NVS p1_ssid/p1_pass
+  { "", "", "Handy"   },    // Slot 2: NVS p2_ssid/p2_pass
+};
+uint8_t hubWifiProfile = 0;  // aktiv: 0=Bus, 1=Zuhause, 2=Handy
 bool haveSavedWifi = false;
 uint32_t homeWifiConnectStartedMs = 0;
 bool homeWifiDisabledForRoadAp = false;
@@ -1320,6 +1332,12 @@ String statusJson()
   json += ",\"wifi_saved_ssid\":\"";
   json += savedWifiSsid;
   json += "\"";
+  json += ",\"wifi_prof\":";
+  json += String(hubWifiProfile);
+  json += ",\"wifi_prof_labels\":[\"Bus\",\"Zuhause\",\"Handy\"]";
+  json += ",\"wifi_prof_ssids\":[\"\"";
+  json += ",\"" + String(g_hubWifiProfiles[1].ssid) + "\"";
+  json += ",\"" + String(g_hubWifiProfiles[2].ssid) + "\"]";
   json += ",\"wifi_connected\":";
   json += WiFi.status() == WL_CONNECTED ? "true" : "false";
   json += ",\"wifi_ssid\":\"";
@@ -2863,6 +2881,17 @@ void updateEmu123() {
   int mapv = 40 + (rpm - 700) / 45; if (mapv > 95) mapv = 95; if (mapv < 0) mapv = 0;
   emu123CurRpm = rpm; emu123CurAdv = adv; emu123CurMap = mapv;
 
+  // Plausible Hilfswerte: Temperatur steigt leicht mit Drehzahl, Spulenstrom
+  // mit Last, Bordspannung leicht fallend. Encodings spiegeln die Decoder:
+  //   0x33 temp: raw = temp + 30     0x35 coil: raw = coil * 8.65
+  //   0x41 volt: raw = volt * 4.54
+  const float tempC = 75.0f + (rpm - 700) * 0.004f;          // ~75..85 C
+  const float coilA = 2.0f + (rpm - 700) * 0.0006f;          // ~2.0..3.5 A
+  const float voltV = 13.8f - (rpm - 700) * 0.0001f;         // ~13.8..13.5 V
+  int tempRaw = (int)(tempC + 30.0f + 0.5f); if (tempRaw > 255) tempRaw = 255; if (tempRaw < 0) tempRaw = 0;
+  int coilRaw = (int)(coilA * 8.65f + 0.5f); if (coilRaw > 255) coilRaw = 255; if (coilRaw < 0) coilRaw = 0;
+  int voltRaw = (int)(voltV * 4.54f + 0.5f); if (voltRaw > 255) voltRaw = 255; if (voltRaw < 0) voltRaw = 0;
+
   // Nur EIN Notify pro Tick (sonst ueberschreibt der naechste setValue den
   // Puffer, bevor das vorige Notify raus ist -> nur MAP kommt an).
   static uint8_t field = 0;
@@ -2871,9 +2900,12 @@ void updateEmu123() {
               emu123SendField(0x30, rhi, rlo); } break;                    // RPM
     case 1: { const int ahi = (int)(adv / 3.2f); const int alo = (int)((adv - ahi * 3.2f) / 0.2f);
               emu123SendField(0x31, ahi, alo); } break;                    // Zuendung
-    default: emu123SendField(0x32, (mapv >> 4) & 0xF, mapv & 0xF); break;  // MAP
+    case 2: emu123SendField(0x32, (mapv >> 4) & 0xF, mapv & 0xF); break;   // MAP
+    case 3: emu123SendField(0x33, (tempRaw >> 4) & 0xF, tempRaw & 0xF); break;  // Temp
+    case 4: emu123SendField(0x35, (coilRaw >> 4) & 0xF, coilRaw & 0xF); break;  // Coil
+    default: emu123SendField(0x41, (voltRaw >> 4) & 0xF, voltRaw & 0xF); break; // Volt
   }
-  field = (field + 1) % 3;
+  field = (field + 1) % 6;
 }
 
 void setupBleHub()
@@ -3129,6 +3161,9 @@ void updateEspNowHub()
   uint16_t rpm = 0;
   float advance = 0.0f;
   uint8_t map = 0;
+  float tuneVolt = 0.0f;
+  float tuneTemp = 0.0f;
+  float tuneCoil = 0.0f;
   bool tuneFresh = false;
   bool tuneConn = false;
   if (hubFeatBle123) {
@@ -3138,6 +3173,9 @@ void updateEspNowHub()
     rpm = static_cast<uint16_t>(tune.rpm);
     advance = tune.advance;
     map = static_cast<uint8_t>(tune.map);
+    tuneVolt = tune.voltage;
+    tuneTemp = tune.temperature;
+    tuneCoil = tune.coilCurrent;
   }
 
   SpartanCockpitFrame frame;
@@ -3150,7 +3188,10 @@ void updateEspNowHub()
                        map,
                        snapshot.status,
                        tuneFresh,
-                       tuneConn);
+                       tuneConn,
+                       tuneVolt,
+                       tuneTemp,
+                       tuneCoil);
   esp_now_send(kEspNowBroadcastAddr, reinterpret_cast<uint8_t *>(&frame), sizeof(frame));
 #endif
 }
@@ -3256,17 +3297,13 @@ void applyHubFeatures()
     homeWifiConnectStartedMs = 0;
     homeWifiDisabledForRoadAp = false;
   } else if (haveSavedWifi && WiFi.status() != WL_CONNECTED &&
-             homeWifiConnectStartedMs == 0 && !homeWifiDisabledForRoadAp) {
-    String ssid = networkPreferences.getString("ssid", "");
-    String pass = networkPreferences.getString("pass", "");
-    if (ssid.length() == 0 && strlen(HOME_WIFI_SSID) > 0) {
-      ssid = HOME_WIFI_SSID;
-      pass = HOME_WIFI_PASSWORD;
-    }
-    if (ssid.length() > 0) {
-      WiFi.begin(ssid.c_str(), pass.c_str());
+             homeWifiConnectStartedMs == 0 && !homeWifiDisabledForRoadAp && hubWifiProfile > 0) {
+    const char* ssid = g_hubWifiProfiles[hubWifiProfile].ssid;
+    const char* pass = g_hubWifiProfiles[hubWifiProfile].pass;
+    if (strlen(ssid) > 0) {
+      WiFi.begin(ssid, pass);
       homeWifiConnectStartedMs = millis();
-      Serial.printf("Home WiFi:   reconnecting to '%s'\n", ssid.c_str());
+      Serial.printf("Home WiFi:   reconnecting to '%s' (Profil %d)\n", ssid, hubWifiProfile);
     }
   }
 #if ENABLE_ESP_NOW_HUB
@@ -3419,18 +3456,37 @@ void setupWebGui()
                 humanBytes(logFileSize(kLogFile)).c_str(),
                 humanBytes(logFileSize(kOldLogFile)).c_str());
   ensureLogHeader();
-  const String savedSsid = networkPreferences.isKey("ssid") ? networkPreferences.getString("ssid", "") : "";
-  const String savedPassword = networkPreferences.isKey("pass") ? networkPreferences.getString("pass", "") : "";
-  savedWifiSsid = savedSsid;
-  String stationSsid = savedSsid;
-  String stationPassword = savedPassword;
-  const bool usingBuiltInWifi = stationSsid.length() == 0 && strlen(HOME_WIFI_SSID) > 0;
-  if (usingBuiltInWifi) {
-    stationSsid = HOME_WIFI_SSID;
-    stationPassword = HOME_WIFI_PASSWORD;
-    savedWifiSsid = stationSsid;
+  // WiFi-Profile laden
+  // Slot 0 = Bus (kein STA), Slot 1 = Zuhause, Slot 2 = Handy
+  // Migration: "ssid"/"pass" → p1_ssid/p1_pass wenn noch kein "wifi_prof" vorhanden
+  if (!networkPreferences.isKey("wifi_prof") && networkPreferences.isKey("ssid")) {
+    const String migrSsid = networkPreferences.getString("ssid", "");
+    const String migrPass = networkPreferences.getString("pass", "");
+    if (migrSsid.length() > 0) {
+      networkPreferences.putString("p1_ssid", migrSsid);
+      networkPreferences.putString("p1_pass", migrPass);
+      networkPreferences.putUChar("wifi_prof", 1);
+      Serial.printf("WiFi:        Migriert '%s' -> Zuhause-Profil\n", migrSsid.c_str());
+    }
   }
-  haveSavedWifi = stationSsid.length() > 0;
+  {
+    String p1 = networkPreferences.getString("p1_ssid", HOME_WIFI_SSID);
+    String p1p = networkPreferences.getString("p1_pass", HOME_WIFI_PASSWORD);
+    strlcpy(g_hubWifiProfiles[1].ssid, p1.c_str(), sizeof(g_hubWifiProfiles[1].ssid));
+    strlcpy(g_hubWifiProfiles[1].pass, p1p.c_str(), sizeof(g_hubWifiProfiles[1].pass));
+    String p2 = networkPreferences.getString("p2_ssid", "");
+    String p2p = networkPreferences.getString("p2_pass", "");
+    strlcpy(g_hubWifiProfiles[2].ssid, p2.c_str(), sizeof(g_hubWifiProfiles[2].ssid));
+    strlcpy(g_hubWifiProfiles[2].pass, p2p.c_str(), sizeof(g_hubWifiProfiles[2].pass));
+  }
+  hubWifiProfile = networkPreferences.getUChar("wifi_prof", 0);
+  if (hubWifiProfile > 2) hubWifiProfile = 0;
+
+  const bool busMode = (hubWifiProfile == 0);
+  const char* staSsid  = busMode ? "" : g_hubWifiProfiles[hubWifiProfile].ssid;
+  const char* staPass  = busMode ? "" : g_hubWifiProfiles[hubWifiProfile].pass;
+  savedWifiSsid = String(staSsid);
+  haveSavedWifi = !busMode && strlen(staSsid) > 0;
 
   WiFi.mode(WIFI_AP_STA);
 #if ENABLE_BLE_HUB
@@ -3443,12 +3499,12 @@ void setupWebGui()
     Serial.println("Web GUI:     SoftAP Spartan3-Setup disabled (Setup)");
   }
 
-  if (haveSavedWifi && hubFeatWifi) {
-    WiFi.begin(stationSsid.c_str(), stationPassword.c_str());
+  if (busMode) {
+    Serial.println("Home WiFi:   Bus-Modus, nur AP");
+  } else if (haveSavedWifi && hubFeatWifi) {
+    WiFi.begin(staSsid, staPass);
     homeWifiConnectStartedMs = millis();
-    Serial.printf("Home WiFi:   connecting to '%s'%s\n",
-                  stationSsid.c_str(),
-                  usingBuiltInWifi ? " (built-in)" : "");
+    Serial.printf("Home WiFi:   Profil %d '%s' verbindet\n", hubWifiProfile, staSsid);
   } else if (haveSavedWifi && !hubFeatWifi) {
     Serial.println("Home WiFi:   STA disabled (Setup)");
   } else {
@@ -3813,18 +3869,23 @@ details.setup > .inside { padding: 0 16px 16px; }
 <div class="row"><span>Verbindung</span><strong id="wifi">nicht eingerichtet</strong></div>
 <div class="row"><span>ESP32 IP</span><strong id="lanip">-</strong></div>
 <div class="row"><span>Gespeichert</span><strong id="wifisaved">-</strong></div>
-<form action="/wifi" method="post">
-<label for="wifiPreset">Profil</label><select id="wifiPreset">
-<option value="">Manuell</option>
-<option value="Android-AP1" data-pass="REDACTED">S24 Hotspot Android-AP1</option>
-<option value="Z00-Station" data-pass="">Z00-Station</option>
-</select>
-<label for="ssid">WLAN-Name</label><input id="ssid" name="ssid" required>
-<label for="pass">Passwort</label><input id="pass" name="pass" type="password" placeholder="leer lassen = vorhandenes Passwort behalten">
-<button type="submit">Speichern &amp; verbinden</button>
+<div class="row"><span>Profil</span><strong id="wifiProfLabel">-</strong></div>
+<div style="margin:8px 0" id="wifiProfBtns"></div>
+<details style="margin:8px 0"><summary>Profile bearbeiten</summary>
+<form action="/wifi_profile_save" method="post" style="margin:6px 0">
+<input type="hidden" name="slot" value="1">
+<label>Zuhause SSID</label><input name="ssid" id="profSsid1">
+<label>Zuhause Passwort</label><input name="pass" type="password" id="profPass1">
+<button type="submit">Zuhause speichern</button>
 </form>
-<p class="hint">Im Auto am einfachsten Handy-Hotspot starten und Laptop, M5 und ESP32 in dasselbe Netz lassen. Die ESP32-IP steht oben und im USB-Log.</p>
-<form action="/wifi_clear" method="post" style="margin-top:12px"><button class="secondary" type="submit">Gespeichertes WLAN loeschen</button></form>
+<form action="/wifi_profile_save" method="post" style="margin:6px 0">
+<input type="hidden" name="slot" value="2">
+<label>Handy SSID</label><input name="ssid" id="profSsid2">
+<label>Handy Passwort</label><input name="pass" type="password" id="profPass2">
+<button type="submit">Handy speichern</button>
+</form>
+</details>
+<p class="hint">Bus = nur AP (Spartan3-Setup), kein Heim-WLAN. Zuhause/Handy = STA-Verbindung zum Router/Hotspot. Alle Geraete im gleichen Netz = stabiles ESP-NOW.</p>
 </div>
 </details>
 <details class="setup" open>
@@ -4193,7 +4254,19 @@ async function refresh() {
              addr + '">123</button> <button type="button" data-kind="bm6" data-addr="' +
              addr + '">BM6</button></strong></div>';
     }).join('');
-    document.getElementById('wifi').textContent = d.wifi_connected ? d.wifi_ssid : (d.wifi_saved ? 'verbindet...' : 'nicht eingerichtet');
+    document.getElementById('wifi').textContent = d.wifi_connected ? d.wifi_ssid : (d.wifi_prof===0 ? 'Bus (AP only)' : (d.wifi_saved ? 'verbindet...' : 'nicht eingerichtet'));
+    document.getElementById('wifiProfLabel').textContent = (d.wifi_prof_labels||['Bus','Zuhause','Handy'])[d.wifi_prof||0];
+    (function(){
+      const labels = d.wifi_prof_labels||['Bus','Zuhause','Handy'];
+      const ssids = d.wifi_prof_ssids||['','',''];
+      const btns = labels.map((lbl,i)=>{
+        const s=ssids[i]&&ssids[i].length?(' ('+ssids[i]+')'):( i===0?' (Spartan3-Setup)':'');
+        return '<form action="/wifi_prof" method="post" style="display:inline"><input type="hidden" name="slot" value="'+i+'"><button type="submit"'+(d.wifi_prof===i?' style="background:#2e7d32"':'')+'>'+lbl+s+'</button></form> ';
+      });
+      document.getElementById('wifiProfBtns').innerHTML=btns.join('');
+      const e1=document.getElementById('profSsid1');if(e1&&!e1.value)e1.value=ssids[1]||'';
+      const e2=document.getElementById('profSsid2');if(e2&&!e2.value)e2.value=ssids[2]||'';
+    })();
     document.getElementById('lanip').textContent = d.wifi_connected ? d.wifi_ip : '-';
     document.getElementById('wifisaved').textContent = d.wifi_saved_ssid || '-';
     document.getElementById('liveWifiMeta').textContent = d.wifi_connected ? ((d.wifi_ssid || '-') + ' / ' + (d.wifi_ip || '-')) : ('AP ' + (d.ap_ip || '-'));
@@ -4447,6 +4520,53 @@ setInterval(() => {
     server.send(303, "text/plain", "");
   });
 #endif
+  server.on("/wifi_prof", HTTP_POST, []() {
+    int slot = server.arg("slot").toInt();
+    if (slot < 0 || slot > 2) slot = 0;
+    hubWifiProfile = (uint8_t)slot;
+    networkPreferences.putUChar("wifi_prof", hubWifiProfile);
+    WiFi.disconnect(false, false);
+    homeWifiConnectStartedMs = 0;
+    homeWifiDisabledForRoadAp = false;
+    if (slot == 0) {
+      haveSavedWifi = false;
+      savedWifiSsid = "";
+      Serial.println("WiFi Profil: Bus (AP only)");
+    } else {
+      const char* ssid = g_hubWifiProfiles[slot].ssid;
+      const char* pass = g_hubWifiProfiles[slot].pass;
+      savedWifiSsid = String(ssid);
+      haveSavedWifi = strlen(ssid) > 0;
+      if (haveSavedWifi && hubFeatWifi) {
+        WiFi.begin(ssid, pass);
+        homeWifiConnectStartedMs = millis();
+        Serial.printf("WiFi Profil: %d '%s'\n", slot, ssid);
+      } else {
+        Serial.printf("WiFi Profil: %d SSID leer oder WiFi aus\n", slot);
+      }
+    }
+    server.sendHeader("Location", "/", true);
+    server.send(303, "text/plain", "");
+  });
+  server.on("/wifi_profile_save", HTTP_POST, []() {
+    int slot = server.arg("slot").toInt();
+    if (slot < 1 || slot > 2) { server.send(400, "text/plain", "Ungültiger Slot"); return; }
+    String ssid = server.arg("ssid"); ssid.trim();
+    String pass = server.arg("pass");
+    strlcpy(g_hubWifiProfiles[slot].ssid, ssid.c_str(), sizeof(g_hubWifiProfiles[slot].ssid));
+    if (pass.length() > 0)
+      strlcpy(g_hubWifiProfiles[slot].pass, pass.c_str(), sizeof(g_hubWifiProfiles[slot].pass));
+    if (slot == 1) {
+      networkPreferences.putString("p1_ssid", ssid);
+      if (pass.length() > 0) networkPreferences.putString("p1_pass", pass);
+    } else {
+      networkPreferences.putString("p2_ssid", ssid);
+      if (pass.length() > 0) networkPreferences.putString("p2_pass", pass);
+    }
+    Serial.printf("WiFi Profil: %d gespeichert SSID='%s'\n", slot, ssid.c_str());
+    server.sendHeader("Location", "/", true);
+    server.send(303, "text/plain", "");
+  });
   server.on("/wifi", HTTP_POST, []() {
     String ssid = server.arg("ssid");
     String password = server.arg("pass");
