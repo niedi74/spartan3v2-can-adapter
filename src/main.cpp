@@ -5338,11 +5338,11 @@ void setup()
   setupWebGui();
   setupEspNowHub();
 #if defined(ENABLE_BLE_HUB) && defined(ENABLE_ESP_NOW_HUB)
-  // BLE bekommt Funkvorrang vor WiFi. So bleibt der 123-BLE-Empfang (echtes 123
-  // ODER externes Emu-Board) stabil/flüssig, obwohl gleichzeitig AP + ESP-NOW
-  // laufen. Ohne das hungert die WiFi-Last den BLE-Link aus -> ruckelnde Daten.
-  if (esp_coex_preference_set(ESP_COEX_PREFER_BT) == ESP_OK) {
-    Serial.println("Coex:        BLE-Funkvorrang gesetzt (PREFER_BT)");
+  // BALANCE statt PREFER_BT: BLE bekommt genug Funkzeit für den 123-Empfang,
+  // ABER das WiFi-AP/ESP-NOW bleibt erreichbar. PREFER_BT hungerte das AP aus
+  // (Ping-Timeouts, keine WebGUI). Balance ist der stabile Kompromiss.
+  if (esp_coex_preference_set(ESP_COEX_PREFER_BALANCE) == ESP_OK) {
+    Serial.println("Coex:        BLE/WiFi Balance gesetzt (PREFER_BALANCE)");
   }
 #endif
   if (!hubFeatEmu123) {   // Emulator = nur BLE(123) + WebGUI, kein CAN/UART/Speed
