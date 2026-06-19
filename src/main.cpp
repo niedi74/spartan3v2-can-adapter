@@ -113,8 +113,32 @@
 #define SPARTAN_CAN_ID 0x400
 #endif
 
+#ifndef ENABLE_COCKPIT_CAN
+#define ENABLE_COCKPIT_CAN 0
+#endif
+
+#ifndef COCKPIT_CAN_ID
+#define COCKPIT_CAN_ID 0x510
+#endif
+
 #ifndef ENABLE_SPARTAN_DEMO
 #define ENABLE_SPARTAN_DEMO 0
+#endif
+
+#ifndef OPERATOR_COCKPIT_CAN_DEFAULT
+#define OPERATOR_COCKPIT_CAN_DEFAULT 0
+#endif
+
+#ifndef OPERATOR_DEMO_DEFAULT
+#define OPERATOR_DEMO_DEFAULT ENABLE_SPARTAN_DEMO
+#endif
+
+#ifndef OPERATOR_TUNE_BLE_DEFAULT
+#define OPERATOR_TUNE_BLE_DEFAULT ENABLE_BLE_HUB
+#endif
+
+#ifndef OPERATOR_BLE_DEFAULT
+#define OPERATOR_BLE_DEFAULT ENABLE_BLE_HUB
 #endif
 
 #ifndef ENABLE_SPARTAN_ANALOG
@@ -207,6 +231,8 @@ bool lcdReady = false;
 
 constexpr uint32_t kDisplayIntervalMs = 200;
 constexpr uint32_t kBleNotifyIntervalMs = 250;
+constexpr uint32_t kEspNowCockpitIntervalMs = 40;
+constexpr uint32_t kCanCockpitIntervalMs = 100;
 constexpr uint32_t kCanStaleMs = 500;
 constexpr uint32_t kHomeWifiConnectWindowMs = 15000;
 constexpr float kLambdaAtZeroVolt = 0.68f;
@@ -290,6 +316,21 @@ bool canReady = false;
 twai_status_info_t canStatus = {};
 uint32_t lastCanStatusMs = 0;
 uint32_t canStatusErrors = 0;
+uint32_t canRxTotal = 0;
+uint32_t canRxMatched = 0;
+uint32_t canRxIgnored = 0;
+uint32_t canLastRxMs = 0;
+uint32_t canLastId = 0;
+uint8_t canLastDlc = 0;
+uint8_t canLastData[8] = {};
+bool canLastExt = false;
+uint32_t lastCanCockpitSendMs = 0;
+uint32_t canCockpitTx = 0;
+uint32_t canCockpitTxFail = 0;
+bool operatorCockpitCanTx = OPERATOR_COCKPIT_CAN_DEFAULT;
+bool operatorDemoEnabled = OPERATOR_DEMO_DEFAULT;
+bool operatorBleEnabled = OPERATOR_BLE_DEFAULT;
+bool operatorTuneBleEnabled = OPERATOR_TUNE_BLE_DEFAULT;
 portMUX_TYPE stateMux = portMUX_INITIALIZER_UNLOCKED;
 float tuneRpm = 0.0f;
 float tuneAdvance = 0.0f;
@@ -738,6 +779,17 @@ void storeReading(const SpartanReading &fresh)
   portEXIT_CRITICAL(&stateMux);
 }
 
+void clearDemoReading()
+{
+  portENTER_CRITICAL(&stateMux);
+  if (reading.fromDemo) {
+    reading.valid = false;
+    reading.fromDemo = false;
+    reading.receivedMs = 0;
+  }
+  portEXIT_CRITICAL(&stateMux);
+}
+
 #if ENABLE_WEB_GUI
 String humanBytes(size_t bytes);
 size_t logFileSize(const char *path);
@@ -1094,6 +1146,43 @@ String statusJson()
   json += String(canStatus.rx_error_counter);
   json += ",\"can_status_errors\":";
   json += String(canStatusErrors);
+  json += ",\"can_rx_total\":";
+  json += String(canRxTotal);
+  json += ",\"can_rx_matched\":";
+  json += String(canRxMatched);
+  json += ",\"can_rx_ignored\":";
+  json += String(canRxIgnored);
+  json += ",\"can_last_age_ms\":";
+  json += canLastRxMs != 0 ? String(now - canLastRxMs) : "0";
+  json += ",\"can_last_id\":";
+  json += String(canLastId);
+  json += ",\"can_last_ext\":";
+  json += canLastExt ? "true" : "false";
+  json += ",\"can_last_dlc\":";
+  json += String(canLastDlc);
+  json += ",\"can_last_data\":\"";
+  for (uint8_t i = 0; i < canLastDlc && i < 8; i++) {
+    if (i) json += ' ';
+    if (canLastData[i] < 16) json += '0';
+  json += String(canLastData[i], HEX);
+  }
+  json += "\"";
+  json += ",\"operator_cockpit_can_tx\":";
+  json += operatorCockpitCanTx ? "true" : "false";
+  json += ",\"operator_demo\":";
+  json += operatorDemoEnabled ? "true" : "false";
+  json += ",\"operator_ble\":";
+  json += operatorBleEnabled ? "true" : "false";
+  json += ",\"operator_tune_ble\":";
+  json += operatorTuneBleEnabled ? "true" : "false";
+  json += ",\"demo_build\":";
+  json += ENABLE_SPARTAN_DEMO ? "true" : "false";
+  json += ",\"can_cockpit_id\":";
+  json += String(COCKPIT_CAN_ID);
+  json += ",\"can_cockpit_tx\":";
+  json += String(canCockpitTx);
+  json += ",\"can_cockpit_tx_fail\":";
+  json += String(canCockpitTxFail);
   json += ",\"heap_free\":";
   json += String(heap_caps_get_free_size(MALLOC_CAP_8BIT));
   json += ",\"device_hours\":";
@@ -1121,6 +1210,12 @@ String statusJson()
   json += bleAddress;
   json += "\",\"ble_display\":";
   json += ENABLE_BLE_DISPLAY ? "true" : "false";
+  json += ",\"ble_123_client_build\":true";
+#if ENABLE_BM6
+  json += ",\"bm6_build\":true";
+#else
+  json += ",\"bm6_build\":false";
+#endif
 #endif
 #if ENABLE_ESP_NOW_HUB
   json += ",\"esp_now_ready\":";
@@ -2449,6 +2544,16 @@ void updateBm6Ble()
 
 void updateTuneBle()
 {
+  if (!operatorBleEnabled || !operatorTuneBleEnabled) {
+    if (tuneConnected || tuneDoConnect || tuneClient != nullptr) {
+      resetTuneClient();
+    }
+    tuneDoConnect = false;
+    tuneNextScanMs = 0;
+    tuneStaleReconnectMs = 0;
+    setTuneLinkState(TuneLinkState::Idle, "operator_off");
+    return;
+  }
   const uint32_t now = millis();
   if (tuneDoConnect) {
     connectTune();
@@ -2511,6 +2616,8 @@ void setupBleHub()
 #endif
 #if ENABLE_WEB_GUI
   ensurePreferences();
+  operatorBleEnabled = networkPreferences.getBool("op_ble", OPERATOR_BLE_DEFAULT);
+  operatorTuneBleEnabled = networkPreferences.getBool("op_tune_ble", OPERATOR_TUNE_BLE_DEFAULT);
   tuneSavedAddress = networkPreferences.isKey("tune_mac")
       ? networkPreferences.getString("tune_mac", kTuneTargetAddress)
       : String(kTuneTargetAddress);
@@ -2562,7 +2669,11 @@ void setupBleHub()
 #endif
   Serial.printf("123TUNE BLE: target %s\n", tuneSavedAddress.c_str());
   logHubEvent("tune_state", "boot|target_saved");
-  startTuneScan();
+  if (operatorBleEnabled && operatorTuneBleEnabled) {
+    startTuneScan();
+  } else {
+    setTuneLinkState(TuneLinkState::Idle, "operator_off");
+  }
 #if ENABLE_BM6
   Serial.printf("BM6 BLE:     target %s\n", bm6SavedAddress.c_str());
   scheduleBm6Scan();
@@ -2571,6 +2682,15 @@ void setupBleHub()
 
 void updateBleHub()
 {
+  if (!operatorBleEnabled) {
+#if ENABLE_BM6
+    resetBm6Client();
+    bm6DoConnect = false;
+    bm6NextScanMs = 0;
+#endif
+    updateTuneBle();
+    return;
+  }
   updateTuneBle();
 #if ENABLE_BM6
   updateBm6Ble();
@@ -2655,7 +2775,7 @@ void updateEspNowHub()
   }
 
   const uint32_t now = millis();
-  if (now - lastEspNowSendMs < kBleNotifyIntervalMs) {
+  if (now - lastEspNowSendMs < kEspNowCockpitIntervalMs) {
     return;
   }
   lastEspNowSendMs = now;
@@ -2780,6 +2900,10 @@ void setupWebGui()
   timezoneIdx = networkPreferences.getUChar("tz_idx", kTimezoneDefault);
   if (timezoneIdx >= kTimezoneCount) timezoneIdx = kTimezoneDefault;
   logColumnMask = networkPreferences.getUShort("log_cols", kLogColDefault);
+  operatorCockpitCanTx = networkPreferences.getBool("op_can_tx", OPERATOR_COCKPIT_CAN_DEFAULT);
+  operatorDemoEnabled = networkPreferences.getBool("op_demo", OPERATOR_DEMO_DEFAULT);
+  operatorBleEnabled = networkPreferences.getBool("op_ble", OPERATOR_BLE_DEFAULT);
+  operatorTuneBleEnabled = networkPreferences.getBool("op_tune_ble", OPERATOR_TUNE_BLE_DEFAULT);
   logFsReady = SPIFFS.begin(true);
   Serial.printf("Logs:        SPIFFS %s, current=%s, old=%s\n",
                 logFsReady ? "OK" : "FAIL",
@@ -2890,6 +3014,7 @@ details.setup > .inside { padding: 0 16px 16px; }
 <button type="button" id="tabDiag" class="tab" onclick="showTab('diag')">Diagnose</button>
 <button type="button" id="tabLog" class="tab" onclick="showTab('log')">Log</button>
 <button type="button" id="tabSetup" class="tab" onclick="showTab('setup')">Setup</button>
+<button type="button" id="tabDev" class="tab" onclick="showTab('dev')">Dev</button>
 </div>
 <div class="tab-section" data-tab="live">
 <div class="card">
@@ -3063,6 +3188,26 @@ details.setup > .inside { padding: 0 16px 16px; }
 </div>
 </details>
 <details class="setup" open>
+<summary>Developer Console</summary>
+<div class="inside">
+<p class="hint">Betreiber-Schalter fuer CAN-Bring-up. Default bleibt AUS, damit der Hub nur Spartan-CAN liest und den Bus nicht mit Cockpit-Frames belastet.</p>
+<div class="row"><span>Cockpit CAN 0x510 senden</span><strong id="opCanTxState">-</strong></div>
+<div class="row"><span>TX / Fehler</span><strong id="opCanTxCounts">0 / 0</strong></div>
+<div class="row"><span>Demo-Werte</span><strong id="opDemoState">-</strong></div>
+<form action="/operator_can" method="post">
+<label><input type="checkbox" name="cockpit_can_tx" id="opCanTx" value="1"> Hub sendet Cockpit-CAN Frames</label>
+<p class="hint">AN: Hub sendet alle 100 ms Standard-CAN-ID 0x510 mit Lambda, RPM, Zuendung, MAP und Flags fuer den Touch. AUS: Hub liest nur Spartan-Lambda auf 0x400 und bleibt fuer das Cockpit stumm.</p>
+<p class="hint">Nur einschalten, wenn der CAN-Bus elektrisch sauber ist: CANH/CANL/GND korrekt, zwei 120 Ohm Abschluesse, keine steigenden TX-Fehler. Wenn Fehler steigen: sofort wieder AUS.</p>
+<button type="submit">Betreiber-Schalter speichern</button>
+</form>
+<form action="/operator_demo" method="post">
+<label><input type="checkbox" name="demo" id="opDemo" value="1"> Demo-Lambda erlauben</label>
+<p class="hint">AN: Der Hub erzeugt Testwerte, solange keine frischen Spartan-CAN-Daten auf 0x400 kommen. AUS: Nur echte Spartan-CAN/UART/ADC-Daten werden angezeigt.</p>
+<button type="submit">Demo-Schalter speichern</button>
+</form>
+</div>
+</details>
+<details class="setup" open>
 <summary>Geschwindigkeit Setup (Reed-Sensor)</summary>
 <div class="inside">
 <p class="hint">Reed-Kontakt gegen GND auf GPIO 27. Default: 10 Pulse pro Radumdrehung, Reifen 205/80 R14 = 2147 mm. Trim per GPS abgleichen: Trim = GPS / Reed.</p>
@@ -3145,6 +3290,11 @@ details.setup > .inside { padding: 0 16px 16px; }
 <button type="submit">BM6 Ziel speichern</button>
 </form>
 <form action="/bm6_aux_target" method="post">
+<label for="bm6AuxPreset">BM6 Aux Profil</label><select id="bm6AuxPreset">
+<option value="">Aus / keine Zusatzbatterie</option>
+<option value="3c:ab:72:7f:d0:bc">BM6 #1 3c:ab:72:7f:d0:bc</option>
+<option value="3c:ab:72:80:06:6a">BM6 #2 3c:ab:72:80:06:6a</option>
+</select>
 <label for="bm6_aux_mac">BM6 Zusatzbatterie (Aux)</label><input id="bm6_aux_mac" name="bm6_aux_mac" placeholder="aa:bb:cc:dd:ee:ff (leer=aus)">
 <button type="submit">BM6 Aux speichern</button>
 </form>
@@ -3192,6 +3342,52 @@ details.setup > .inside { padding: 0 16px 16px; }
 </details>
 <p class="hint">Aktuell ist der Bring-up-Modus aktiv. DEMO-Werte pruefen Display und Web-GUI, bis der CAN-Transceiver angeschlossen ist.</p>
 </div><!-- /tab setup -->
+<div class="tab-section" data-tab="dev" hidden>
+<details class="setup" open>
+<summary>Developer Console</summary>
+<div class="inside">
+<p class="hint">Betreiber-Schalter fuer Testfahrten und CAN-Bring-up. Default bleibt ruhig: Hub liest Spartan-CAN 0x400 und sendet keine Cockpit-CAN Frames.</p>
+<div class="row"><span>Cockpit CAN 0x510 senden</span><strong id="opCanTxStateDev">-</strong></div>
+<div class="row"><span>TX / Fehler</span><strong id="opCanTxCountsDev">0 / 0</strong></div>
+<div class="row"><span>BLE Funk / Scanner</span><strong id="opBleStateDev">-</strong></div>
+<div class="row"><span>123 direkt BLE-Client</span><strong id="opTuneBleStateDev">-</strong></div>
+<div class="row"><span>Demo-Werte</span><strong id="opDemoStateDev">-</strong></div>
+<div class="row"><span>CAN State / TX / RX</span><strong id="canDiagDev">-</strong></div>
+<div class="row"><span>Spartan CAN RX matched / ignored</span><strong id="canRxDev">0 / 0</strong></div>
+<form action="/operator_can" method="post">
+<label><input type="checkbox" name="cockpit_can_tx" id="opCanTxDev" value="1"> Hub sendet Cockpit-CAN Frames</label>
+<p class="hint">AN: Hub sendet alle 100 ms Standard-CAN-ID 0x510 mit Lambda, RPM, Zuendung, MAP und Flags fuer Touch/M5-CAN-Tests. AUS: Hub bleibt fuer das Cockpit stumm.</p>
+<p class="hint">Nur einschalten, wenn CANH/CANL/GND korrekt sind, zwei 120 Ohm Abschluesse am Bus sitzen und TX-Fehler nicht steigen.</p>
+<button type="submit">Dev-Schalter speichern</button>
+</form>
+<form action="/operator_ble_power" method="post">
+<label><input type="checkbox" name="ble" id="opBleDev" value="1"> BLE allgemein erlauben</label>
+<p class="hint">AN: Der Hub darf BLE scannen und BLE-Clients wie 123 oder spaeter BM6 verbinden. AUS: Hub trennt laufende BLE-Verbindungen und startet keine neuen BLE-Scans. Der BLE-Code bleibt im Build, funkt aber fuer die Betriebslogik nicht weiter.</p>
+<button type="submit">BLE-Schalter speichern</button>
+</form>
+<form action="/operator_ble" method="post">
+<label><input type="checkbox" name="tune_ble" id="opTuneBleDev" value="1"> Hub liest 123 direkt per BLE</label>
+<p class="hint">AN: Hub scannt/verbindet zur gespeicherten 123/Emu-BLE-Adresse und legt RPM, Zuendwinkel und MAP auf API/CAN. AUS: Hub trennt nur 123-BLE und sendet keine frischen 123-Werte weiter. Dieser Schalter wirkt nur, wenn BLE allgemein ebenfalls AN ist.</p>
+<button type="submit">123-BLE-Schalter speichern</button>
+</form>
+<form action="/operator_demo" method="post">
+<label><input type="checkbox" name="demo" id="opDemoDev" value="1"> Demo-Lambda erlauben</label>
+<p class="hint">AN: sinnvoll fuer COM14/Testhub ohne CAN-Modul. Sobald echte Spartan-CAN-Frames frisch sind, gewinnen die echten Werte. AUS: Demo wird sofort verworfen.</p>
+<button type="submit">Demo-Schalter speichern</button>
+</form>
+</div>
+</details>
+<details class="setup" open>
+<summary>Aktuelle Bus-Rollen</summary>
+<div class="inside">
+<div class="row"><span>Spartan Lambda Quelle</span><strong id="sourceDev">-</strong></div>
+<div class="row"><span>ESP-NOW</span><strong id="espnowDev">-</strong></div>
+<div class="row"><span>BLE Hub Build</span><strong id="bleDev">-</strong></div>
+<div class="row"><span>Log Status</span><strong id="logDev">-</strong></div>
+<p class="hint">Fuer den aktuellen stabilen Betrieb: 123 direkt auf Touch/M5, Hub liefert Lambda via HTTP/CAN. ESP-NOW bleibt erstmal aus den Displays raus.</p>
+</div>
+</details>
+</div><!-- /tab dev -->
 <script>
 let lastJson = {};
 function showTab(name) {
@@ -3202,11 +3398,12 @@ function showTab(name) {
   document.getElementById('tabDiag').classList.toggle('on', name === 'diag');
   document.getElementById('tabLog').classList.toggle('on', name === 'log');
   document.getElementById('tabSetup').classList.toggle('on', name === 'setup');
+  document.getElementById('tabDev').classList.toggle('on', name === 'dev');
   try { localStorage.setItem('spartanTab', name); } catch (e) {}
 }
 try {
   const saved = localStorage.getItem('spartanTab');
-  if (saved === 'setup' || saved === 'log' || saved === 'diag') showTab(saved);
+  if (saved === 'setup' || saved === 'log' || saved === 'diag' || saved === 'dev') showTab(saved);
 } catch (e) {}
 document.getElementById('tunePreset').addEventListener('change', (e) => {
   document.getElementById('tune_mac').value = e.target.value || '';
@@ -3214,11 +3411,15 @@ document.getElementById('tunePreset').addEventListener('change', (e) => {
 document.getElementById('bm6Preset').addEventListener('change', (e) => {
   document.getElementById('bm6_mac').value = e.target.value || '';
 });
+document.getElementById('bm6AuxPreset').addEventListener('change', (e) => {
+  document.getElementById('bm6_aux_mac').value = e.target.value || '';
+});
 async function saveBleTarget(kind, addr) {
   const isBm6 = kind === 'bm6';
-  const target = isBm6 ? 'bm6_mac' : 'tune_mac';
-  const endpoint = isBm6 ? '/bm6_target' : '/ble_target';
-  const field = isBm6 ? 'bm6_mac' : 'tune_mac';
+  const isBm6Aux = kind === 'bm6_aux';
+  const target = isBm6Aux ? 'bm6_aux_mac' : (isBm6 ? 'bm6_mac' : 'tune_mac');
+  const endpoint = isBm6Aux ? '/bm6_aux_target' : (isBm6 ? '/bm6_target' : '/ble_target');
+  const field = isBm6Aux ? 'bm6_aux_mac' : (isBm6 ? 'bm6_mac' : 'tune_mac');
   const input = document.getElementById(target);
   input.value = addr;
   try {
@@ -3275,13 +3476,13 @@ function syncBlePresetOptions(selectId, devices, kind, savedAddr) {
   devices.forEach(x => {
     const addr = String(x.addr || '').toLowerCase();
     if (!addr || seen.has(addr)) return;
-    if (kind === 'bm6' && !x.bm6 && addr !== String(savedAddr || '').toLowerCase()) return;
+    if ((kind === 'bm6' || kind === 'bm6_aux') && !x.bm6 && addr !== String(savedAddr || '').toLowerCase()) return;
     if (kind === 'tune' && !x.tune && addr !== String(savedAddr || '').toLowerCase()) return;
     const opt = document.createElement('option');
     opt.value = addr;
     opt.dataset.scan = '1';
     const name = x.name ? ' ' + x.name : '';
-    opt.textContent = (kind === 'bm6' ? 'Scan BM6' : 'Scan 123') + name + ' ' + addr + ' ' + (x.rssi ?? 0) + ' dBm';
+    opt.textContent = (kind === 'tune' ? 'Scan 123' : 'Scan BM6') + name + ' ' + addr + ' ' + (x.rssi ?? 0) + ' dBm';
     sel.appendChild(opt);
     seen.add(addr);
   });
@@ -3358,6 +3559,7 @@ async function refresh() {
     const scan = Array.isArray(d.ble_scan) ? d.ble_scan : [];
     syncBlePresetOptions('tunePreset', scan, 'tune', d.tune_saved_address);
     syncBlePresetOptions('bm6Preset', scan, 'bm6', d.bm6_saved_address);
+    syncBlePresetOptions('bm6AuxPreset', scan, 'bm6_aux', d.bm6_aux_saved_address);
     document.getElementById('blescancount').textContent = scan.length + ' Geraete';
     document.getElementById('blescan').innerHTML = scan.map(x => {
       const name = escHtml(x.name || '-');
@@ -3366,7 +3568,8 @@ async function refresh() {
       return '<div class="row"><span>' + tag + ' ' + name + '<br>' + addr + '</span><strong>' +
              (x.rssi ?? 0) + ' dBm<br><button type="button" data-kind="tune" data-addr="' +
              addr + '">123</button> <button type="button" data-kind="bm6" data-addr="' +
-             addr + '">BM6</button></strong></div>';
+             addr + '">BM6</button> <button type="button" data-kind="bm6_aux" data-addr="' +
+             addr + '">Aux</button></strong></div>';
     }).join('');
     document.getElementById('wifi').textContent = d.wifi_connected ? d.wifi_ssid : (d.wifi_saved ? 'verbindet...' : 'nicht eingerichtet');
     document.getElementById('lanip').textContent = d.wifi_connected ? d.wifi_ip : '-';
@@ -3410,10 +3613,11 @@ async function refresh() {
     cls(document.getElementById('ustate'), uartState.indexOf('Timeout') >= 0 ? 'bad' : (uartResp ? 'ok' : 'warn'));
     document.getElementById('uresp').textContent = uartResp || '-';
     document.getElementById('uage').textContent = Math.round(ucmdAge) + ' ms / ' + (uartResp ? Math.round(urspAge) + ' ms' : '-');
-    document.getElementById('tconn').textContent = d.tune_connected ? 'verbunden' : 'scan/retry';
-    cls(document.getElementById('tconn'), d.tune_connected ? 'ok' : 'warn');
-    document.getElementById('liveTuneConn').textContent = d.tune_connected ? 'verbunden' : 'scan';
-    cls(document.getElementById('liveTuneConn'), d.tune_connected ? 'ok' : 'warn');
+    const tuneBleBuilt = !!d.ble_name;
+    document.getElementById('tconn').textContent = tuneBleBuilt ? (d.tune_connected ? 'verbunden' : 'scan/retry') : 'nicht im Build';
+    cls(document.getElementById('tconn'), tuneBleBuilt ? (d.tune_connected ? 'ok' : 'warn') : 'bad');
+    document.getElementById('liveTuneConn').textContent = tuneBleBuilt ? (d.tune_connected ? 'verbunden' : 'scan') : 'aus';
+    cls(document.getElementById('liveTuneConn'), tuneBleBuilt ? (d.tune_connected ? 'ok' : 'warn') : 'bad');
     document.getElementById('trx').textContent = d.tune_rx ?? 0;
     document.getElementById('tage').textContent = (d.tune_age_ms ?? 0) + ' ms';
     document.getElementById('tscan').textContent = (d.tune_scan_seen ?? 0) + ' / ' + (d.tune_scan_candidates ?? 0);
@@ -3424,6 +3628,56 @@ async function refresh() {
     var tuneMac = document.getElementById('tune_mac');
     if (tuneMac && document.activeElement !== tuneMac) tuneMac.value = d.tune_saved_address || '';
     document.getElementById('candiag').textContent = (d.can_state ?? '-') + ' / ' + (d.can_tx_errors ?? 0) + ' / ' + (d.can_rx_errors ?? 0);
+    document.getElementById('opCanTxState').textContent = d.operator_cockpit_can_tx ? 'AN' : 'AUS';
+    cls(document.getElementById('opCanTxState'), d.operator_cockpit_can_tx ? 'warn' : 'ok');
+    document.getElementById('opCanTxCounts').textContent = (d.can_cockpit_tx ?? 0) + ' / ' + (d.can_cockpit_tx_fail ?? 0);
+    var opCanTx = document.getElementById('opCanTx');
+    if (opCanTx) opCanTx.checked = !!d.operator_cockpit_can_tx;
+    var opDemoState = document.getElementById('opDemoState');
+    if (opDemoState) {
+      opDemoState.textContent = d.demo_build ? (d.operator_demo ? 'AN' : 'AUS') : 'nicht im Build';
+      cls(opDemoState, d.demo_build ? (d.operator_demo ? 'warn' : 'ok') : 'bad');
+    }
+    var opDemo = document.getElementById('opDemo');
+    if (opDemo) {
+      opDemo.checked = !!d.operator_demo;
+      opDemo.disabled = !d.demo_build;
+    }
+    const opCanTxStateDev = document.getElementById('opCanTxStateDev');
+    if (opCanTxStateDev) {
+      opCanTxStateDev.textContent = d.operator_cockpit_can_tx ? 'AN' : 'AUS';
+      cls(opCanTxStateDev, d.operator_cockpit_can_tx ? 'warn' : 'ok');
+      document.getElementById('opCanTxCountsDev').textContent = (d.can_cockpit_tx ?? 0) + ' / ' + (d.can_cockpit_tx_fail ?? 0);
+      document.getElementById('opBleStateDev').textContent = d.ble_123_client_build ? (d.operator_ble ? 'AN' : 'AUS') : 'nicht im Build';
+      cls(document.getElementById('opBleStateDev'), d.ble_123_client_build ? (d.operator_ble ? 'warn' : 'ok') : 'bad');
+      document.getElementById('opTuneBleStateDev').textContent = d.ble_123_client_build ? (d.operator_tune_ble ? 'AN' : 'AUS') : 'nicht im Build';
+      cls(document.getElementById('opTuneBleStateDev'), d.ble_123_client_build ? (d.operator_ble && d.operator_tune_ble ? 'warn' : 'ok') : 'bad');
+      document.getElementById('opDemoStateDev').textContent = d.demo_build ? (d.operator_demo ? 'AN' : 'AUS') : 'nicht im Build';
+      cls(document.getElementById('opDemoStateDev'), d.demo_build ? (d.operator_demo ? 'warn' : 'ok') : 'bad');
+      document.getElementById('canDiagDev').textContent = (d.can_state ?? '-') + ' / ' + (d.can_tx_errors ?? 0) + ' / ' + (d.can_rx_errors ?? 0);
+      document.getElementById('canRxDev').textContent = (d.can_rx_matched ?? 0) + ' / ' + (d.can_rx_ignored ?? 0);
+      document.getElementById('sourceDev').textContent = d.source || '-';
+      document.getElementById('espnowDev').textContent = d.esp_now_ready ? ('bereit ch' + (d.esp_now_channel ?? '-')) : 'aus/nicht bereit';
+      document.getElementById('bleDev').textContent = d.ble_name ? d.ble_name : 'nicht im Build';
+      document.getElementById('logDev').textContent = d.log_ready ? ('ready ' + (d.log_current_bytes ?? 0) + ' B') : 'nicht bereit';
+      var opCanTxDev = document.getElementById('opCanTxDev');
+      if (opCanTxDev) opCanTxDev.checked = !!d.operator_cockpit_can_tx;
+      var opBleDev = document.getElementById('opBleDev');
+      if (opBleDev) {
+        opBleDev.checked = !!d.operator_ble;
+        opBleDev.disabled = !d.ble_123_client_build;
+      }
+      var opTuneBleDev = document.getElementById('opTuneBleDev');
+      if (opTuneBleDev) {
+        opTuneBleDev.checked = !!d.operator_tune_ble;
+        opTuneBleDev.disabled = !d.ble_123_client_build || !d.operator_ble;
+      }
+      var opDemoDev = document.getElementById('opDemoDev');
+      if (opDemoDev) {
+        opDemoDev.checked = !!d.operator_demo;
+        opDemoDev.disabled = !d.demo_build;
+      }
+    }
     document.getElementById('canerr').textContent = d.can_status_errors ?? 0;
     document.getElementById('heap').textContent = d.heap_free ? Math.round(d.heap_free / 1024) + ' KB' : '-';
     document.getElementById('hours').textContent = Number(d.device_hours ?? 0).toFixed(2) + ' / ' + Number(d.engine_hours ?? 0).toFixed(2) + ' / ' + Number(d.sensor_hours ?? 0).toFixed(2) + ' h';
@@ -3446,6 +3700,8 @@ async function refresh() {
     if (bm6AddrSetup) bm6AddrSetup.textContent = d.bm6_saved_address || '-';
     var bm6Mac = document.getElementById('bm6_mac');
     if (bm6Mac && document.activeElement !== bm6Mac) bm6Mac.value = d.bm6_saved_address || '';
+    var bm6AuxMac = document.getElementById('bm6_aux_mac');
+    if (bm6AuxMac && document.activeElement !== bm6AuxMac) bm6AuxMac.value = d.bm6_aux_saved_address || '';
     var spdHz = document.getElementById('spdhz');
     if (spdHz) {
       spdHz.textContent = Number(d.speed_hz ?? 0).toFixed(2) + ' Hz';
@@ -3561,6 +3817,75 @@ setInterval(() => {
     Serial.printf("Logs:        columns mask=0x%04X\n", logColumnMask);
     server.sendHeader("Location", "/", true);
     server.send(303, "text/plain", "");
+  });
+  server.on("/operator_can", HTTP_POST, []() {
+    operatorCockpitCanTx = server.hasArg("cockpit_can_tx");
+    ensurePreferences();
+    networkPreferences.putBool("op_can_tx", operatorCockpitCanTx);
+    if (!operatorCockpitCanTx) {
+      canCockpitTxFail = 0;
+    }
+    Serial.printf("Operator:    cockpit CAN TX %s\n", operatorCockpitCanTx ? "ON" : "OFF");
+    server.sendHeader("Location", "/", true);
+    server.send(303, "text/plain", "");
+  });
+  server.on("/operator_demo", HTTP_POST, []() {
+    operatorDemoEnabled = ENABLE_SPARTAN_DEMO && server.hasArg("demo");
+    ensurePreferences();
+    networkPreferences.putBool("op_demo", operatorDemoEnabled);
+    if (!operatorDemoEnabled) {
+      clearDemoReading();
+    }
+    Serial.printf("Operator:    demo %s\n", operatorDemoEnabled ? "ON" : "OFF");
+    server.sendHeader("Location", "/", true);
+    server.send(303, "text/plain", "");
+  });
+  server.on("/operator_ble_power", HTTP_POST, []() {
+#if ENABLE_BLE_HUB
+    operatorBleEnabled = server.hasArg("ble");
+    ensurePreferences();
+    networkPreferences.putBool("op_ble", operatorBleEnabled);
+    if (operatorBleEnabled) {
+      if (operatorTuneBleEnabled && !tuneConnected && !tuneDoConnect) scheduleTuneScan(true);
+    } else {
+      resetTuneClient();
+      tuneDoConnect = false;
+      tuneNextScanMs = 0;
+#if ENABLE_BM6
+      resetBm6Client();
+      bm6DoConnect = false;
+      bm6NextScanMs = 0;
+#endif
+      setTuneLinkState(TuneLinkState::Idle, "operator_ble_off");
+    }
+    Serial.printf("Operator:    BLE %s\n", operatorBleEnabled ? "ON" : "OFF");
+    server.sendHeader("Location", "/", true);
+    server.send(303, "text/plain", "");
+#else
+    server.send(400, "text/plain", "BLE nicht im Build");
+#endif
+  });
+  server.on("/operator_ble", HTTP_POST, []() {
+#if ENABLE_BLE_HUB
+    const bool next = server.hasArg("tune_ble");
+    operatorTuneBleEnabled = next;
+    ensurePreferences();
+    networkPreferences.putBool("op_tune_ble", operatorTuneBleEnabled);
+    if (operatorBleEnabled && operatorTuneBleEnabled) {
+      tuneFailStreak = 0;
+      if (!tuneConnected && !tuneDoConnect) scheduleTuneScan(true);
+    } else {
+      resetTuneClient();
+      tuneDoConnect = false;
+      tuneNextScanMs = 0;
+      setTuneLinkState(TuneLinkState::Idle, operatorBleEnabled ? "operator_123_off" : "operator_ble_off");
+    }
+    Serial.printf("Operator:    123 BLE %s\n", operatorTuneBleEnabled ? "ON" : "OFF");
+    server.sendHeader("Location", "/", true);
+    server.send(303, "text/plain", "");
+#else
+    server.send(400, "text/plain", "123 BLE nicht im Build");
+#endif
   });
 #if SPEED_REED_PIN >= 0
   server.on("/speed", HTTP_POST, []() {
@@ -3798,13 +4123,73 @@ void setupCan()
   twai_timing_config_t timing = TWAI_TIMING_CONFIG_500KBITS();
   twai_filter_config_t filter = TWAI_FILTER_CONFIG_ACCEPT_ALL();
 
-  if (twai_driver_install(&general, &timing, &filter) != ESP_OK || twai_start() != ESP_OK) {
-    Serial.println("CAN start failed");
+  const esp_err_t installErr = twai_driver_install(&general, &timing, &filter);
+  if (installErr != ESP_OK) {
+    Serial.printf("CAN install failed err=%d RX=%u TX=%u\n", static_cast<int>(installErr), CAN_RX_PIN, CAN_TX_PIN);
+    return;
+  }
+
+  const esp_err_t startErr = twai_start();
+  if (startErr != ESP_OK) {
+    Serial.printf("CAN start failed err=%d RX=%u TX=%u\n", static_cast<int>(startErr), CAN_RX_PIN, CAN_TX_PIN);
+    twai_driver_uninstall();
     return;
   }
 
   canReady = true;
   Serial.printf("CAN:         500 kbit/s RX=%u TX=%u Spartan ID=0x%03X\n", CAN_RX_PIN, CAN_TX_PIN, SPARTAN_CAN_ID);
+#endif
+}
+
+void updateCockpitCanTx(uint32_t now)
+{
+#if ENABLE_SPARTAN_CAN && ENABLE_COCKPIT_CAN
+  if (!operatorCockpitCanTx || !canReady || now - lastCanCockpitSendMs < kCanCockpitIntervalMs) {
+    return;
+  }
+  lastCanCockpitSendMs = now;
+
+  const SpartanReading spartan = readingSnapshot();
+#if ENABLE_BLE_HUB
+  const TuneSnapshot tune = tuneSnapshot();
+  const bool tuneFresh = tune.lastRxMs != 0 && (now - tune.lastRxMs) <= 3000;
+  const bool tuneLinkConnected = tuneConnected;
+#else
+  const TuneSnapshot tune = {};
+  const bool tuneFresh = false;
+  const bool tuneLinkConnected = false;
+#endif
+  const uint16_t lambdaX1000 = spartan.valid
+      ? static_cast<uint16_t>(constrain(static_cast<int>(spartan.lambda * 1000.0f + 0.5f), 0, 65535))
+      : 0;
+  const uint16_t rpm = static_cast<uint16_t>(constrain(static_cast<int>(tune.rpm + 0.5f), 0, 65535));
+  const int16_t advX10 = static_cast<int16_t>(constrain(static_cast<int>(tune.advance * 10.0f), -32768, 32767));
+  const uint8_t map = static_cast<uint8_t>(constrain(static_cast<int>(tune.map + 0.5f), 0, 255));
+  uint8_t flags = static_cast<uint8_t>((spartan.status & 0x0F) << 4);
+  if (spartan.valid) flags |= 0x01;
+  if (tuneFresh) flags |= 0x02;
+  if (tuneLinkConnected) flags |= 0x04;
+
+  twai_message_t frame = {};
+  frame.identifier = COCKPIT_CAN_ID;
+  frame.data_length_code = 8;
+  frame.data[0] = static_cast<uint8_t>(lambdaX1000 >> 8);
+  frame.data[1] = static_cast<uint8_t>(lambdaX1000 & 0xFF);
+  frame.data[2] = static_cast<uint8_t>(rpm >> 8);
+  frame.data[3] = static_cast<uint8_t>(rpm & 0xFF);
+  frame.data[4] = static_cast<uint8_t>(advX10 >> 8);
+  frame.data[5] = static_cast<uint8_t>(advX10 & 0xFF);
+  frame.data[6] = map;
+  frame.data[7] = flags;
+
+  const esp_err_t err = twai_transmit(&frame, 0);
+  if (err == ESP_OK) {
+    if (canCockpitTx < UINT32_MAX) canCockpitTx++;
+  } else if (canCockpitTxFail < UINT32_MAX) {
+    canCockpitTxFail++;
+  }
+#else
+  (void)now;
 #endif
 }
 
@@ -3831,9 +4216,19 @@ void updateCan()
 
   twai_message_t message;
   while (twai_receive(&message, 0) == ESP_OK) {
+    canRxTotal++;
+    canLastRxMs = millis();
+    canLastId = message.identifier;
+    canLastExt = message.extd;
+    canLastDlc = message.data_length_code > 8 ? 8 : message.data_length_code;
+    for (uint8_t i = 0; i < canLastDlc; i++) {
+      canLastData[i] = message.data[i];
+    }
     if (message.extd || message.identifier != SPARTAN_CAN_ID || message.data_length_code < 4) {
+      canRxIgnored++;
       continue;
     }
+    canRxMatched++;
 
     const uint16_t rawLambda = (static_cast<uint16_t>(message.data[0]) << 8) | message.data[1];
     SpartanReading fresh;
@@ -3847,12 +4242,17 @@ void updateCan()
     storeReading(fresh);
     digitalWrite(STATUS_LED_PIN, fresh.status == 3 ? HIGH : LOW);
   }
+
+  updateCockpitCanTx(now);
 #endif
 }
 
 void updateDemo()
 {
 #if ENABLE_SPARTAN_DEMO
+  if (!operatorDemoEnabled) {
+    return;
+  }
   const uint32_t now = millis();
   SpartanReading snapshot = readingSnapshot();
   if (snapshot.fromCan && now - snapshot.receivedMs <= kCanStaleMs) {
