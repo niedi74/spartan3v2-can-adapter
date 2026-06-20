@@ -316,6 +316,8 @@ bool canReady = false;
 twai_status_info_t canStatus = {};
 uint32_t lastCanStatusMs = 0;
 uint32_t canStatusErrors = 0;
+uint32_t canBusOffEvents = 0;
+uint32_t canRecoveries = 0;
 uint32_t canRxTotal = 0;
 uint32_t canRxMatched = 0;
 uint32_t canRxIgnored = 0;
@@ -1146,6 +1148,10 @@ String statusJson()
   json += String(canStatus.rx_error_counter);
   json += ",\"can_status_errors\":";
   json += String(canStatusErrors);
+  json += ",\"can_bus_off\":";
+  json += String(canBusOffEvents);
+  json += ",\"can_recoveries\":";
+  json += String(canRecoveries);
   json += ",\"can_rx_total\":";
   json += String(canRxTotal);
   json += ",\"can_rx_matched\":";
@@ -4204,9 +4210,25 @@ void updateCan()
   if (now - lastCanStatusMs >= 1000) {
     lastCanStatusMs = now;
     if (twai_get_status_info(&canStatus) == ESP_OK) {
-      if (canStatus.state != TWAI_STATE_RUNNING ||
-          canStatus.tx_error_counter > 127 ||
-          canStatus.rx_error_counter > 127) {
+      if (canStatus.state == TWAI_STATE_BUS_OFF) {
+        // tx_error_counter >= 256 hat den Controller abgeschaltet (z.B. kein
+        // zweiter Knoten/ACK, fehlender Abschluss). Recovery anstoßen, sonst
+        // bleibt der Bus dauerhaft tot (rx=0, TX-Fehler eingefroren).
+        if (canStatusErrors < UINT32_MAX) {
+          canStatusErrors++;
+        }
+        if (twai_initiate_recovery() == ESP_OK && canBusOffEvents < UINT32_MAX) {
+          canBusOffEvents++;
+        }
+      } else if (canStatus.state == TWAI_STATE_STOPPED) {
+        // Recovery abgeschlossen (BUS_OFF -> RECOVERING -> STOPPED): Bus wieder
+        // anfahren, damit er nach behobener Verkabelung von selbst zurückkommt.
+        if (twai_start() == ESP_OK && canRecoveries < UINT32_MAX) {
+          canRecoveries++;
+        }
+      } else if (canStatus.state != TWAI_STATE_RUNNING ||
+                 canStatus.tx_error_counter > 127 ||
+                 canStatus.rx_error_counter > 127) {
         if (canStatusErrors < UINT32_MAX) {
           canStatusErrors++;
         }
