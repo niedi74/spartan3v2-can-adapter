@@ -223,7 +223,7 @@ constexpr char kTuneTargetAddress[] = "ef:a8:b2:de:e0:9e";
 constexpr char kTuneNusServiceUuid[] = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
 constexpr char kTuneNusRxUuid[] = "6e400002-b5a3-f393-e0a9-e50e24dcca9e";
 constexpr char kTuneNusTxUuid[] = "6e400003-b5a3-f393-e0a9-e50e24dcca9e";
-constexpr uint32_t kTuneScanWindowMs = 10000;
+constexpr uint32_t kTuneScanWindowMs = 6000;
 constexpr uint32_t kTuneReconnectDelayMs = 5000;
 constexpr uint32_t kTunePingIntervalMs = 1650;
 constexpr uint32_t kBleHubAdvertiseFallbackMs = 30000;
@@ -242,7 +242,7 @@ enum class TuneLinkState : uint8_t {
 #define ENABLE_BM6 1
 #endif
 
-constexpr char kBm6TargetAddress[] = "3c:ab:72:80:06:6a";
+constexpr char kBm6TargetAddress[] = "3c:ab:72:7f:d0:bc";
 constexpr char kBm6ServiceUuid[] = "0000fff0-0000-1000-8000-00805f9b34fb";
 constexpr char kBm6WriteUuid[] = "0000fff3-0000-1000-8000-00805f9b34fb";
 constexpr char kBm6NotifyUuid[] = "0000fff4-0000-1000-8000-00805f9b34fb";
@@ -274,7 +274,17 @@ struct SpartanReading {
   bool valid = false;
   bool fromCan = false;
   bool fromDemo = false;
+  bool fromTest = false;
 };
+
+enum class LambdaTestMode : uint8_t {
+  Off = 0,
+  Fixed = 1,
+  Sweep = 2,
+};
+
+LambdaTestMode lambdaTestMode = LambdaTestMode::Off;
+uint32_t lastLambdaTestMs = 0;
 
 struct TuneSnapshot {
   float rpm = 0.0f;
@@ -451,6 +461,8 @@ bool homeWifiDisabledForRoadAp = false;
 uint32_t lastApRetryMs = 0;
 uint32_t apRetryCount = 0;
 bool logFsReady = false;
+String logError = "";
+bool logErrorReported = false;
 size_t logCurrentBytes = 0;
 size_t logOldBytes = 0;
 uint32_t lastCsvAppendMs = 0;
@@ -553,6 +565,7 @@ void saveHubFeatures()
   networkPreferences.putBool("hf_emu123", hubFeatEmu123);
   networkPreferences.putString("emu_addr", emu123Addr);
   networkPreferences.putUChar("espnow_ch", hubEspNowChannelPref);
+  networkPreferences.putUChar("lambda_test", static_cast<uint8_t>(lambdaTestMode));
 }
 
 void loadHubFeatures()
@@ -588,6 +601,10 @@ void loadHubFeatures()
   hubFeatBle123 = networkPreferences.getBool("hf_ble123", false);
   hubFeatBleBm6 = networkPreferences.getBool("hf_blebm6", false);
   hubFeatEmu123 = networkPreferences.getBool("hf_emu123", false);
+  const uint8_t savedLambdaTest = networkPreferences.getUChar("lambda_test", 0);
+  lambdaTestMode = savedLambdaTest <= static_cast<uint8_t>(LambdaTestMode::Sweep)
+      ? static_cast<LambdaTestMode>(savedLambdaTest)
+      : LambdaTestMode::Off;
   emu123Addr = networkPreferences.getString("emu_addr", "");
   hubEspNowChannelPref = networkPreferences.getUChar("espnow_ch", 0);
   if (hubEspNowChannelPref > 14) {
@@ -824,6 +841,10 @@ void setupDisplay()
 
 // statusText(String) entfernt — nur statusTextC(const char*) verwenden.
 
+SpartanReading readingSnapshot();
+void storeReading(const SpartanReading &fresh);
+void logHubEvent(const char *type, const char *detail);
+
 const char *statusTextC(uint8_t status)
 {
   switch (status) {
@@ -840,6 +861,9 @@ const char *statusTextC(uint8_t status)
 
 const char *sourceTextC(const SpartanReading &snapshot)
 {
+  if (snapshot.fromTest) {
+    return "TEST";
+  }
   if (snapshot.fromCan) {
     return "CAN";
   }
@@ -850,6 +874,44 @@ const char *sourceTextC(const SpartanReading &snapshot)
     return "ADC";
   }
   return "NONE";
+}
+
+const char *lambdaTestModeText()
+{
+  switch (lambdaTestMode) {
+    case LambdaTestMode::Fixed: return "fixed";
+    case LambdaTestMode::Sweep: return "sweep";
+    default: return "off";
+  }
+}
+
+bool setLambdaTestMode(const String &requested)
+{
+  String mode = requested;
+  mode.trim();
+  mode.toLowerCase();
+  LambdaTestMode next;
+  if (mode == "off" || mode == "0") next = LambdaTestMode::Off;
+  else if (mode == "fixed" || mode == "1") next = LambdaTestMode::Fixed;
+  else if (mode == "sweep" || mode == "2") next = LambdaTestMode::Sweep;
+  else return false;
+
+  lambdaTestMode = next;
+  lastLambdaTestMs = 0;
+#if ENABLE_WEB_GUI
+  ensurePreferences();
+  networkPreferences.putUChar("lambda_test", static_cast<uint8_t>(lambdaTestMode));
+  logHubEvent("lambda_test", lambdaTestModeText());
+#endif
+  if (lambdaTestMode == LambdaTestMode::Off) {
+    SpartanReading snapshot = readingSnapshot();
+    if (snapshot.fromTest) {
+      SpartanReading cleared;
+      storeReading(cleared);
+    }
+  }
+  Serial.printf("Lambda test: %s\n", lambdaTestModeText());
+  return true;
 }
 
 // sourceText(String) entfernt — nur sourceTextC(const char*) verwenden.
@@ -1213,7 +1275,11 @@ String statusJson()
   json += String(snapshot.status);
   json += ",\"source\":\"";
   json += sourceTextC(snapshot);
-  json += "\",\"can_ready\":";
+  json += "\",\"lambda_test_mode\":\"";
+  json += lambdaTestModeText();
+  json += "\",\"lambda_test_active\":";
+  json += lambdaTestMode != LambdaTestMode::Off ? "true" : "false";
+  json += ",\"can_ready\":";
   json += canReady ? "true" : "false";
   json += ",\"age_ms\":";
   json += snapshot.valid ? String(now - snapshot.receivedMs) : "0";
@@ -1358,6 +1424,9 @@ String statusJson()
   json += String(apRetryCount);
   json += ",\"log_ready\":";
   json += logFsReady ? "true" : "false";
+  json += ",\"log_error\":\"";
+  json += jsonEscape(logError);
+  json += "\"";
   json += ",\"log_current_bytes\":";
   json += String(static_cast<unsigned long>(logFileSize(kLogFile)));
   json += ",\"log_old_bytes\":";
@@ -1827,6 +1896,70 @@ String csvTimeText(uint32_t ms)
   return String(buf);
 }
 
+void setLogError(const char *message)
+{
+  logError = message ? message : "unknown";
+  if (!logErrorReported) {
+    logErrorReported = true;
+    Serial.printf("Logs:        disabled: %s\n", logError.c_str());
+    logHubEvent("log_error", logError.c_str());
+  }
+}
+
+void clearLogError()
+{
+  logError = "";
+  logErrorReported = false;
+}
+
+bool probeLogFilesystem()
+{
+  const char *probePath = "/.rwtest";
+  File probe = SPIFFS.open(probePath, FILE_WRITE);
+  if (!probe) return false;
+  const size_t written = probe.print("ok");
+  probe.close();
+  SPIFFS.remove(probePath);
+  return written == 2;
+}
+
+bool initializeLogFilesystem(bool forceFormat = false)
+{
+  clearLogError();
+  SPIFFS.end();
+  if (forceFormat && !SPIFFS.format()) {
+    logFsReady = false;
+    setLogError("format_failed");
+    return false;
+  }
+
+  logFsReady = SPIFFS.begin(true);
+  if (!logFsReady) {
+    setLogError("mount_failed");
+    return false;
+  }
+
+  const bool hadLogs = SPIFFS.exists(kLogFile) || SPIFFS.exists(kOldLogFile);
+  if (!probeLogFilesystem()) {
+    if (!forceFormat && !hadLogs) {
+      Serial.println("Logs:        write probe failed, one-time format recovery");
+      SPIFFS.end();
+      if (SPIFFS.format() && SPIFFS.begin(false) && probeLogFilesystem()) {
+        logFsReady = true;
+        clearLogError();
+        logHubEvent("log_fs", "format_recovered");
+        return true;
+      }
+    }
+    logFsReady = false;
+    setLogError("write_probe_failed");
+    return false;
+  }
+
+  logHubEvent("log_fs", forceFormat ? "formatted_ok" : "ready");
+  return true;
+}
+
 void ensureLogHeader()
 {
   if (!logFsReady) return;
@@ -1853,7 +1986,7 @@ void ensureLogHeader()
     logFsReady = false;
     logCurrentBytes = 0;
     logOldBytes = 0;
-    Serial.println("Logs:        CSV disabled, SPIFFS file open failed");
+    setLogError("header_open_failed");
     return;
   }
   f.println(expectedHeader);
@@ -1907,7 +2040,7 @@ void appendLiveCsv()
     logFsReady = false;
     logCurrentBytes = 0;
     logOldBytes = 0;
-    Serial.println("Logs:        CSV disabled, SPIFFS append failed");
+    setLogError("append_failed");
     return;
   }
 
@@ -2268,13 +2401,13 @@ void startTuneScan()
   }
   scan->setScanCallbacks(&tuneScanCallbacks, false);
   scan->setActiveScan(true);
-  scan->setInterval(100);
-  scan->setWindow(99);
+  scan->setInterval(160);
+  scan->setWindow(24);
   tuneScanSeen = 0;
   tuneScanCandidates = 0;
   bleCentralScanActive = true;
   setTuneLinkState(TuneLinkState::Scanning, "start");
-  Serial.println("123TUNE BLE: scan 10s...");
+  Serial.println("123TUNE BLE: scan 6s (15% duty)...");
   if (!scan->start(kTuneScanWindowMs, false)) {
     Serial.println("123TUNE BLE: scan start failed");
     markBleCentralScanEnded();
@@ -2645,8 +2778,8 @@ void startBm6Scan()
   }
   scan->setScanCallbacks(&bm6ScanCallbacks, false);
   scan->setActiveScan(true);
-  scan->setInterval(100);
-  scan->setWindow(99);
+  scan->setInterval(160);
+  scan->setWindow(24);
   bleCentralScanActive = true;
   logHubEvent("bm6_state", "scan|start");
   Serial.println("BM6 BLE:     scan 10s...");
@@ -2716,11 +2849,12 @@ void connectBm6()
 
 void updateBm6Ble()
 {
-  // Die 123 hat ABSOLUTEN Vorrang. BM6 ist nachrangig:
+  // Die 123 hat Vorrang. BM6 ist nachrangig:
   //  - bestehende BM6-Verbindung wird gehalten (nur Trigger),
   //  - Slot-Rotation (disconnect+rescan) nur wenn die 123 NICHT verbunden ist,
-  //  - NEU scannen/connecten erst, wenn die 123 verbunden ist (sie connectet
-  //    zuerst ungestoert; der kurze 3s-BM6-Scan ueberlebt ihr 4s-Timeout).
+  //  - 123 bekommt beim Boot 30 s exklusiv; danach darf BM6 auch ohne 123
+  //    kurze Scanfenster nutzen. Das haelt Batterie-Daten im Tischtest sichtbar,
+  //    waehrend bleRadioFreeForBm6Scan() parallele Scans verhindert.
   const uint32_t now = millis();
   if (bm6Connected) {
     if (now - bm6LastRxMs > 5000 && now - bm6LastTriggerMs > kBm6TriggerIntervalMs) {
@@ -2729,7 +2863,8 @@ void updateBm6Ble()
     if (!tuneConnected) maybeRotateBm6Slot();
     return;
   }
-  if (!tuneConnected) return;   // 123 zuerst verbinden lassen
+  const bool bm6FallbackAllowed = tuneConnected || (now - bm6SlotStartedMs >= 30000UL);
+  if (!bm6FallbackAllowed) return;
   if (bm6DoConnect) {
     connectBm6();
     return;
@@ -3350,10 +3485,14 @@ void applyHubFeatures()
 #if ENABLE_BLE_HUB
   if (!hubFeatBle123 && tuneConnected) {
     resetTuneClient();
+  } else if (hubFeatBle123 && !tuneConnected && !tuneDoConnect && tuneNextScanMs == 0) {
+    scheduleTuneScan(true);
   }
 #if ENABLE_BM6
   if (!hubFeatBleBm6 && bm6Connected) {
     resetBm6Client();
+  } else if (hubFeatBleBm6 && !bm6Connected && !bm6DoConnect && bm6NextScanMs == 0) {
+    scheduleBm6Scan();
   }
 #endif
 #endif
@@ -3361,6 +3500,23 @@ void applyHubFeatures()
 
 bool handleHubFeatSerialLine(const String &line)
 {
+  if (line.startsWith("lambda test ")) {
+    const String mode = line.substring(12);
+    if (!setLambdaTestMode(mode)) {
+      Serial.println("Lambda test: use off, fixed or sweep");
+    }
+    return true;
+  }
+  if (line.equalsIgnoreCase("hub logfs reset")) {
+    logCurrentBytes = 0;
+    logOldBytes = 0;
+    if (initializeLogFilesystem(true)) {
+      ensureLogHeader();
+      refreshLogSizeCache();
+      Serial.println("Logs:        filesystem reset OK");
+    }
+    return true;
+  }
   if (!line.startsWith("hub feat ")) {
     return false;
   }
@@ -3481,9 +3637,10 @@ void setupWebGui()
   timezoneIdx = networkPreferences.getUChar("tz_idx", kTimezoneDefault);
   if (timezoneIdx >= kTimezoneCount) timezoneIdx = kTimezoneDefault;
   logColumnMask = networkPreferences.getUShort("log_cols", kLogColDefault);
-  logFsReady = SPIFFS.begin(true);
+  logFsReady = initializeLogFilesystem(false);
   logCurrentBytes = 0;
   logOldBytes = 0;
+  refreshLogSizeCache();
   Serial.printf("Logs:        SPIFFS %s, current=%s, old=%s\n",
                 logFsReady ? "OK" : "FAIL",
                 humanBytes(logFileSize(kLogFile)).c_str(),
@@ -3810,6 +3967,18 @@ details.setup > .inside { padding: 0 16px 16px; }
 </details>
 </div><!-- /tab log -->
 <div class="tab-section" data-tab="setup" hidden>
+<details class="setup" open>
+<summary>Lambda Tischtest</summary>
+<div class="inside">
+<div class="row"><span>Aktueller Modus</span><strong id="lambdaTestStatus">off</strong></div>
+<div class="grid">
+<form action="/lambda_test" method="post"><input type="hidden" name="return" value="1"><input type="hidden" name="mode" value="off"><button class="secondary" type="submit">AUS</button></form>
+<form action="/lambda_test" method="post"><input type="hidden" name="return" value="1"><input type="hidden" name="mode" value="fixed"><button type="submit">Fest 1.000</button></form>
+<form action="/lambda_test" method="post"><input type="hidden" name="return" value="1"><input type="hidden" name="mode" value="sweep"><button type="submit">Sweep 0.85-1.15</button></form>
+</div>
+<p class="hint">TEST ueberschreibt Lambda/CAN absichtlich. 123 und BM6 bleiben echte BLE-Eingaenge und CSV loggt alle Werte gemeinsam.</p>
+</div>
+</details>
 <details class="setup" open>
 <summary>Funktionen An/Aus</summary>
 <div class="inside">
@@ -4203,6 +4372,7 @@ async function refresh() {
     document.getElementById('source').textContent = d.source;
     document.getElementById('lambda').textContent = d.valid ? d.lambda.toFixed(3) : '-.---';
     document.getElementById('status').textContent = d.status;
+    document.getElementById('lambdaTestStatus').textContent = d.lambda_test_mode || 'off';
     document.getElementById('temp').textContent = d.valid ? d.temperature + ' C' : '- C';
     document.getElementById('main123').textContent = (d.rpm ?? 0) + ' / ' + Number(d.advance ?? 0).toFixed(1) + ' / ' + (d.map ?? 0);
     document.getElementById('can').textContent = d.can_ready ? 'aktiv' : 'Fehler';
@@ -4405,6 +4575,21 @@ setInterval(() => {
   };
   server.on("/state", sendStatus);
   server.on("/api/status", sendStatus);
+  server.on("/lambda_test", HTTP_POST, []() {
+    if (!server.hasArg("mode") || !setLambdaTestMode(server.arg("mode"))) {
+      server.send(400, "application/json",
+                  "{\"ok\":false,\"error\":\"mode must be off, fixed or sweep\"}");
+      return;
+    }
+    if (server.hasArg("return")) {
+      server.sendHeader("Location", "/", true);
+      server.send(303, "text/plain", "");
+      return;
+    }
+    const String body = String("{\"ok\":true,\"mode\":\"") +
+        lambdaTestModeText() + "\"}";
+    server.send(200, "application/json", body);
+  });
   server.on("/api/ota/progress", HTTP_GET, []() {
     server.sendHeader("Connection", "close");
     server.send(200, "application/json", otaProgressJson());
@@ -4486,6 +4671,18 @@ setInterval(() => {
     clearHubEvents();
     server.sendHeader("Location", "/", true);
     server.send(303, "text/plain", "");
+  });
+  server.on("/log/fs_reset", HTTP_POST, []() {
+    logCurrentBytes = 0;
+    logOldBytes = 0;
+    const bool ok = initializeLogFilesystem(true);
+    if (ok) {
+      ensureLogHeader();
+      refreshLogSizeCache();
+    }
+    const String body = String("{\"ok\":") + (ok ? "true" : "false") +
+        ",\"error\":\"" + jsonEscape(logError) + "\"}";
+    server.send(ok ? 200 : 500, "application/json", body);
   });
   server.on("/clear", HTTP_POST, []() {
     if (logFsReady) {
@@ -5053,11 +5250,39 @@ void updateDemo()
 #endif
 }
 
+void updateLambdaTest()
+{
+  if (lambdaTestMode == LambdaTestMode::Off) return;
+  const uint32_t now = millis();
+  if (now - lastLambdaTestMs < 100) return;
+  lastLambdaTestMs = now;
+
+  SpartanReading fresh;
+  fresh.lambda = 1.000f;
+  if (lambdaTestMode == LambdaTestMode::Sweep) {
+    const uint32_t halfCycleMs = 10000;
+    const uint32_t phaseMs = now % (halfCycleMs * 2UL);
+    const float phase = static_cast<float>(phaseMs <= halfCycleMs
+        ? phaseMs
+        : (halfCycleMs * 2UL - phaseMs)) / static_cast<float>(halfCycleMs);
+    fresh.lambda = 0.85f + phase * 0.30f;
+  }
+  fresh.temperatureC = 780;
+  fresh.status = 3;
+  fresh.receivedMs = now;
+  fresh.valid = true;
+  fresh.fromCan = false;
+  fresh.fromDemo = false;
+  fresh.fromTest = true;
+  storeReading(fresh);
+}
+
 void updateAnalog()
 {
 #if ENABLE_SPARTAN_ANALOG
   const SpartanReading snapshot = readingSnapshot();
-  if ((snapshot.fromCan || snapshot.fromDemo) && millis() - snapshot.receivedMs <= kCanStaleMs) {
+  if ((snapshot.fromCan || snapshot.fromDemo || snapshot.fromTest) &&
+      millis() - snapshot.receivedMs <= kCanStaleMs) {
     return;
   }
 
@@ -5369,6 +5594,7 @@ void loop()
   if (!hubFeatEmu123) {   // im Emulator-Modus nur BLE + WebGUI
     updateCan();
     updateDemo();
+    updateLambdaTest();
     updateAnalog();
     updateHeaterAnalog();
     updateUart();
