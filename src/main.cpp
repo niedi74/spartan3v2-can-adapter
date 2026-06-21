@@ -617,6 +617,11 @@ void loadHubFeatures()
   if (hubApSsid.length() == 0) hubApSsid = WEB_AP_SSID;
   if (hubApMask.length() == 0) hubApMask = "255.255.255.0";
   if (!networkPreferences.isKey("hf_ver")) {
+#if BLE_BRIDGE
+    // BLE-Coprozessor: KEIN WLAN/AP/ESP-NOW (Funk frei, kein Brownout), 123+BM6 AN.
+    hubFeatEspNow = false; hubFeatAp = false; hubFeatWifi = false; hubFeatLog = false;
+    hubFeatBle123 = true;  hubFeatBleBm6 = true;  hubFeatEmu123 = false;
+#else
     hubFeatEspNow = true;
     hubFeatAp = true;
     hubFeatWifi = true;
@@ -624,9 +629,10 @@ void loadHubFeatures()
     hubFeatBle123 = false;
     hubFeatBleBm6 = false;
     hubFeatEmu123 = false;
+#endif
     hubEspNowChannelPref = 0;
     saveHubFeatures();
-    Serial.println("Hub feats:   Fahrt defaults (ESP-NOW/AP/WLAN/LOG on, BLE 123/BM6 off)");
+    Serial.println("Hub feats:   defaults gesetzt");
     return;
   }
   bool defaultWifi = strlen(HOME_WIFI_SSID) > 0;
@@ -5766,6 +5772,25 @@ void loop()
 {
 #ifdef USE_M5_DISPLAY
   M5.update();
+#endif
+#if BLE_BRIDGE
+  {
+    // BLE-Coprozessor: 123 + BM6 lesen, Werte per Konsole ausgeben (Test).
+    // Spaeter wird derselbe Datensatz zusaetzlich per UART an den S3 geschickt.
+    static uint32_t lastBridgeMs = 0;
+    const uint32_t nowB = millis();
+    if (nowB - lastBridgeMs >= 500) {
+      lastBridgeMs = nowB;
+      const TuneSnapshot t = tuneSnapshot();
+      const uint32_t tuneAge = t.lastRxMs ? (nowB - t.lastRxMs) : 999999;
+      const uint32_t bm6Age = bm6LastRxMs ? (nowB - bm6LastRxMs) : 999999;
+      Serial.printf("BRIDGE | 123:%-3s rpm=%4d adv=%4.1f map=%3d age=%lums  ||  BM6:%-3s V=%5.2f T=%dC age=%lums\n",
+                    tuneConnected ? "ON" : "off", (int)t.rpm, t.advance, (int)t.map,
+                    (unsigned long)tuneAge,
+                    bm6Connected ? "ON" : "off", bm6Voltage, (int)bm6Temperature,
+                    (unsigned long)bm6Age);
+    }
+  }
 #endif
   if (!hubFeatEmu123) {   // im Emulator-Modus nur BLE + WebGUI
     updateCan();
