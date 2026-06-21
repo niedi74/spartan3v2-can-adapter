@@ -587,6 +587,26 @@ void saveHubFeatures()
   networkPreferences.putUChar("lambda_test", static_cast<uint8_t>(lambdaTestMode));
 }
 
+// [WLAN-DIAG] Loggt STA-Events inkl. Reason-Code, damit ein fehlschlagender
+// Heimnetz-Connect eindeutig wird (201=NO_AP_FOUND/Signal, 15/204=HANDSHAKE/Passwort,
+// 202=AUTH_FAIL, 203=ASSOC_FAIL, 8=ASSOC_LEAVE).
+void onHubWifiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
+  switch (event) {
+    case ARDUINO_EVENT_WIFI_STA_CONNECTED:
+      Serial.println("WiFi-EVT:    STA assoziiert (AP gefunden+Auth OK), warte auf IP");
+      break;
+    case ARDUINO_EVENT_WIFI_STA_GOT_IP:
+      Serial.printf("WiFi-EVT:    GOT IP %s\n", WiFi.localIP().toString().c_str());
+      break;
+    case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
+      Serial.printf("WiFi-EVT:    STA disconnected reason=%d\n",
+                    info.wifi_sta_disconnected.reason);
+      break;
+    default:
+      break;
+  }
+}
+
 void loadHubFeatures()
 {
   ensurePreferences();
@@ -692,6 +712,7 @@ void ensureHubSoftAp()
   if (WiFi.softAPIP() != IPAddress(0, 0, 0, 0) && WiFi.softAPSSID() == String(apSsid)) {
     return;
   }
+  WiFi.onEvent(onHubWifiEvent);  // [WLAN-DIAG] STA-Reason-Codes loggen
   if (hubFeatWifi || WiFi.status() == WL_CONNECTED) {
     WiFi.mode(WIFI_AP_STA);
   } else {
