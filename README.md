@@ -21,9 +21,13 @@ Display firmware for a dedicated ESP32 Dev adapter board connected to a 14Point7
 - Cockpit link: **ESP-NOW broadcast** to M5/Waveshare (BLE display server disabled in `motorraum` build)
 - BLE: 123TUNE+ central + optional BM6; setup name `Spartan3-Hub` for diagnostics only
 
-### M5
+### touch 2.8c
 
-The `m5_motorraum` environment uses `M5Unified` and currently targets `m5stack-core-esp32`. Adjust the PlatformIO board if the actual M5 model differs.
+wavesahre 2.8c round touchdispaly
+als uhr im cokpit
+Soll final alle sensor daten vom hub via can bekommen.
+
+
 
 ## GPIO Pinbelegung (Uebersicht)
 
