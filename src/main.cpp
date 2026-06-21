@@ -97,6 +97,20 @@
 #define HOME_WIFI_PASSWORD ""
 #endif
 
+// Default-WLAN-Profil nach Erase: 0=Bus(AP-only), 1=Zuhause, 2=Handy.
+// Der Test-Hub (COM14) setzt das per Build-Flag auf 1, damit er sich direkt
+// ins Heim-WLAN anmeldet. Der Live-Bus-Hub bleibt bei 0 (nur AP).
+#ifndef DEFAULT_WIFI_PROFILE
+#define DEFAULT_WIFI_PROFILE 0
+#endif
+
+// 123-Emulator: per Build entscheiden. Emu-Build (emu_com17) = 1 (Gerät spielt die
+// 123 als BLE-Peripheral nach). Test-Hub/Client (COM14) und Live-Hub = 0 (reiner
+// Client, kein Emu). So bleibt eine Codebasis für beide Rollen.
+#ifndef ENABLE_EMU123
+#define ENABLE_EMU123 0
+#endif
+
 #ifndef ENABLE_SPARTAN_CAN
 #define ENABLE_SPARTAN_CAN 1
 #endif
@@ -227,7 +241,11 @@ constexpr uint32_t kTuneScanWindowMs = 6000;
 constexpr uint32_t kTuneReconnectDelayMs = 5000;
 constexpr uint32_t kTunePingIntervalMs = 1650;
 constexpr uint32_t kBleHubAdvertiseFallbackMs = 30000;
-constexpr uint32_t kTuneStaleRxMs = 3000;
+// 12 s statt 3 s: am Tisch liefert der Emu die 123 in Schüben (WLAN+BLE-Koexistenz
+// auf dem Emu). Mit 3 s kappte der Hub die voll funktionierende Verbindung bei jedem
+// kurzen Schub-Loch und verlor dabei auch BM6-Scanzeit. 12 s hält die Verbindung
+// stabil durch und reconnectet nur, wenn die 123 wirklich weg ist.
+constexpr uint32_t kTuneStaleRxMs = 12000;
 constexpr uint32_t kTuneReconnectBackoffMaxMs = 30000;
 
 enum class TuneLinkState : uint8_t {
@@ -380,6 +398,7 @@ uint32_t tuneLastPingMs = 0;
 uint32_t tuneScanSeen = 0;
 uint32_t tuneScanCandidates = 0;
 String tuneSavedAddress = "";
+uint32_t tuneConnStartMs = 0;  // Start der aktuellen 123-Verbindung (für Stale-Bezug)
 struct BleScanDevice {
   String address;
   String name;
@@ -600,7 +619,17 @@ void loadHubFeatures()
   hubFeatLog = networkPreferences.getBool("hf_log", true);
   hubFeatBle123 = networkPreferences.getBool("hf_ble123", false);
   hubFeatBleBm6 = networkPreferences.getBool("hf_blebm6", false);
-  hubFeatEmu123 = networkPreferences.getBool("hf_emu123", false);
+#if ENABLE_EMU123
+  // Emu-Build (COM17): immer die 123 emulieren, und KEIN ESP-NOW (Funk frei für
+  // flüssige BLE-Notifies; zusammen mit Coex PREFER_BT).
+  hubFeatEmu123 = true;
+  hubFeatEspNow = false;
+#else
+  // Test-Hub/Client (COM14) + Live-Hub: nie Emu. Der 123-Emulator läuft auf einem
+  // separaten ESP (COM17). Dieser Hub ist reiner Client: 123 empfangen + BM6 +
+  // Lambda(Demo) + loggen.
+  hubFeatEmu123 = false;
+#endif
   const uint8_t savedLambdaTest = networkPreferences.getUChar("lambda_test", 0);
   lambdaTestMode = savedLambdaTest <= static_cast<uint8_t>(LambdaTestMode::Sweep)
       ? static_cast<LambdaTestMode>(savedLambdaTest)
@@ -2485,6 +2514,7 @@ void connectTune()
     scheduleTuneScan(false);
     return;
   }
+  tuneConnStartMs = millis();
 
   tuneFailStreak = 0;
   tuneStaleReconnectMs = 0;
@@ -2802,7 +2832,12 @@ void connectBm6()
     bm6Client->setClientCallbacks(&bm6ClientCallbacks, false);
   }
 
-  bm6Client->setConnectionParams(6, 12, 0, 150);
+  // BM6 bewusst entspannt takten: es liefert nur alle ~2 s (kBm6TriggerIntervalMs)
+  // einen Spannungswert. Das frühere 6/12 (7,5–15 ms) belegte fast die gesamte
+  // Funkzeit und zwang den NimBLE-Host, den parallelen 123-Link periodisch zu
+  // kappen (disconnect reason 534 = local host). 24/48 (30–60 ms) mit slave
+  // latency 2 lässt den 123-Link durchgehend stabil laufen, BM6 bleibt frisch.
+  bm6Client->setConnectionParams(24, 48, 2, 400);
   const String &targetMac = bm6ActiveSavedMac();
   if (looksLikeMacAddress(targetMac)) {
     bm6TargetAddress = NimBLEAddress(std::string(targetMac.c_str()), BLE_ADDR_PUBLIC);
@@ -2886,7 +2921,13 @@ void updateTuneBle()
   sendTunePing();
   if (tuneConnected) {
     const TuneSnapshot tune = tuneSnapshot();
-    if (tune.lastRxMs != 0 && (now - tune.lastRxMs) > kTuneStaleRxMs &&
+    // Frische relativ zur AKTUELLEN Verbindung messen: lastRxMs kann noch von der
+    // vorigen Verbindung stammen (wird nicht beim Connect zurückgesetzt). Ohne diesen
+    // Boden feuerte stale_rx fälschlich ~alle 2 s und kappte eine voll funktionierende
+    // Verbindung (disconnect reason 534, hubInitiated). tuneConnStartMs gibt der neuen
+    // Verbindung ein volles kTuneStaleRxMs-Fenster, bevor sie als stale gilt.
+    const uint32_t tuneRxRef = (tune.lastRxMs > tuneConnStartMs) ? tune.lastRxMs : tuneConnStartMs;
+    if (tuneConnStartMs != 0 && (now - tuneRxRef) > kTuneStaleRxMs &&
         tune.rpm >= ENGINE_RUNNING_RPM_THRESHOLD) {
       if (tuneStaleReconnectMs == 0 || (now - tuneStaleReconnectMs) > 5000) {
         tuneStaleReconnectMs = now;
@@ -2899,8 +2940,15 @@ void updateTuneBle()
     return;
   }
   if (tuneNextScanMs != 0 && static_cast<int32_t>(now - tuneNextScanMs) >= 0) {
-    tuneNextScanMs = 0;
-    startTuneScan();
+    if (!bleCentralScanActive && !tuneDoConnect) {
+      tuneNextScanMs = 0;
+      startTuneScan();
+    } else {
+      // Funk gerade vom BM6-Scan belegt (nur EIN zentraler Scanner). Timer NICHT
+      // löschen, sonst bleibt die 123 dauerhaft ohne Rescan hängen. Kurz erneut
+      // versuchen — 123 hat Vorrang und greift sich den Scanner, sobald frei.
+      tuneNextScanMs = now + 300;
+    }
   }
 }
 
@@ -3597,15 +3645,11 @@ bool handleHubFeatSerialLine(const String &line)
       changed = true;
     }
   } else if (feat == "emu123") {
-    if (arg.equalsIgnoreCase("on") || arg == "1") {
-      hubFeatEmu123 = true;
-      changed = true;
-    } else if (arg.equalsIgnoreCase("off") || arg == "0") {
-      hubFeatEmu123 = false;
-      changed = true;
-    }
+    // Test-Hub ist reiner Client — emu123 läuft auf separatem ESP (COM17).
+    Serial.println("Hub feats:   emu123 auf diesem Test-Hub deaktiviert (Emu = separater ESP / COM17)");
+    return true;
   } else {
-    Serial.println("Hub feats:   unknown feature (espnow/ap/wifi/log/ble123/blebm6/emu123)");
+    Serial.println("Hub feats:   unknown feature (espnow/ap/wifi/log/ble123/blebm6)");
     return true;
   }
 
@@ -3669,7 +3713,7 @@ void setupWebGui()
     strlcpy(g_hubWifiProfiles[2].ssid, p2.c_str(), sizeof(g_hubWifiProfiles[2].ssid));
     strlcpy(g_hubWifiProfiles[2].pass, p2p.c_str(), sizeof(g_hubWifiProfiles[2].pass));
   }
-  hubWifiProfile = networkPreferences.getUChar("wifi_prof", 0);
+  hubWifiProfile = networkPreferences.getUChar("wifi_prof", DEFAULT_WIFI_PROFILE);
   if (hubWifiProfile > 2) hubWifiProfile = 0;
 
   const bool busMode = (hubWifiProfile == 0);
@@ -3798,12 +3842,12 @@ details.setup > .inside { padding: 0 16px 16px; }
 </head>
 <body><main>
 <h1>SPARTAN 3 v2 Motorraum Hub</h1>
-<p style="margin:-4px 0 12px"><a href="/emu" style="display:inline-block;background:#26372e;color:#bde87a;border-radius:8px;padding:9px 14px;text-decoration:none">&#9654; 123-Emulator (/emu)</a></p>
 <div class="tabs">
 <button type="button" id="tabLive" class="tab on" onclick="showTab('live')">Live</button>
 <button type="button" id="tabDiag" class="tab" onclick="showTab('diag')">Diagnose</button>
 <button type="button" id="tabLog" class="tab" onclick="showTab('log')">Log</button>
 <button type="button" id="tabSetup" class="tab" onclick="showTab('setup')">Setup</button>
+<button type="button" id="tabDev" class="tab" onclick="showTab('dev')">Dev</button>
 </div>
 <div class="tab-section" data-tab="live">
 <div class="card">
@@ -4179,7 +4223,22 @@ details.setup > .inside { padding: 0 16px 16px; }
 </details>
 <p class="hint">Aktuell ist der Bring-up-Modus aktiv. DEMO-Werte pruefen Display und Web-GUI, bis der CAN-Transceiver angeschlossen ist.</p>
 </div><!-- /tab setup -->
+<div class="tab-section" data-tab="dev" hidden>
+<div class="card">
+<h3>Dev &mdash; Runtime-Schalter</h3>
+<p class="hint">Wirken sofort, ohne neuen Build/Flash.</p>
+<div class="row"><span>123 BLE (Client)</span><span><button type="button" onclick="devFeat('ble123','on')">AN</button> <button type="button" onclick="devFeat('ble123','off')">AUS</button> &middot; <strong id="dev_ble123">-</strong></span></div>
+<div class="row"><span>BM6 BLE</span><span><button type="button" onclick="devFeat('blebm6','on')">AN</button> <button type="button" onclick="devFeat('blebm6','off')">AUS</button> &middot; <strong id="dev_blebm6">-</strong></span></div>
+<div class="row"><span>ESP-NOW</span><span><button type="button" onclick="devFeat('espnow','on')">AN</button> <button type="button" onclick="devFeat('espnow','off')">AUS</button> &middot; <strong id="dev_espnow">-</strong></span></div>
+<div class="row"><span>Logging</span><span><button type="button" onclick="devFeat('log','on')">AN</button> <button type="button" onclick="devFeat('log','off')">AUS</button> &middot; <strong id="dev_log">-</strong></span></div>
+<div class="row"><span>Lambda-Demo</span><span><button type="button" onclick="devLambda('off')">AUS</button> <button type="button" onclick="devLambda('fixed')">1.000</button> <button type="button" onclick="devLambda('sweep')">Sweep</button></span></div>
+<div class="row"><span></span><strong id="dev_lambda">-</strong></div>
+</div>
+<p class="hint">WLAN-Profil (Bus/Zuhause/Handy) bleibt im Setup-Tab. CAN-Pins am S3: RX 10 / TX 11.</p>
+</div><!-- /tab dev -->
 <script>
+async function devFeat(name,val){try{await fetch('/hub_feat?name='+name+'&val='+val);}catch(e){}}
+async function devLambda(mode){try{await fetch('/lambda_test',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'mode='+mode});}catch(e){}}
 let lastJson = {};
 function showTab(name) {
   document.querySelectorAll('.tab-section').forEach(s => {
@@ -4189,11 +4248,12 @@ function showTab(name) {
   document.getElementById('tabDiag').classList.toggle('on', name === 'diag');
   document.getElementById('tabLog').classList.toggle('on', name === 'log');
   document.getElementById('tabSetup').classList.toggle('on', name === 'setup');
+  document.getElementById('tabDev').classList.toggle('on', name === 'dev');
   try { localStorage.setItem('spartanTab', name); } catch (e) {}
 }
 try {
   const saved = localStorage.getItem('spartanTab');
-  if (saved === 'setup' || saved === 'log' || saved === 'diag') showTab(saved);
+  if (saved === 'setup' || saved === 'log' || saved === 'diag' || saved === 'dev') showTab(saved);
 } catch (e) {}
 document.getElementById('tunePreset').addEventListener('change', (e) => {
   document.getElementById('tune_mac').value = e.target.value || '';
@@ -4409,6 +4469,13 @@ async function refresh() {
     setFeatBadge('featBle123', '123', d.hub_feat_ble123);
     setFeatBadge('featBleBm6', 'BM6', d.hub_feat_blebm6);
     setFeatBadge('featLog', 'LOG', d.hub_feat_log);
+    // Dev-Tab Schalterzustände spiegeln
+    {
+      const sd=(id,on)=>{const e=document.getElementById(id);if(e){e.textContent=on?'AN':'AUS';e.style.color=on?'#54d273':'#ff6a5a';}};
+      sd('dev_ble123', d.hub_feat_ble123); sd('dev_blebm6', d.hub_feat_blebm6);
+      sd('dev_espnow', d.hub_feat_espnow); sd('dev_log', d.hub_feat_log);
+      const dl=document.getElementById('dev_lambda'); if(dl) dl.textContent='Lambda: '+(d.lambda_test_mode||'off');
+    }
     document.getElementById('tuneLinkState').textContent = d.tune_link_state ?? '-';
     document.getElementById('blename').textContent = d.ble_name || '-';
     document.getElementById('bleaddr').textContent = d.ble_address || '-';
@@ -4575,6 +4642,24 @@ setInterval(() => {
   };
   server.on("/state", sendStatus);
   server.on("/api/status", sendStatus);
+  server.on("/hub_feat", HTTP_GET, []() {
+    // Dev-Tab: Hub-Features zur Laufzeit schalten (kein Reflash).
+    const String name = server.arg("name");
+    const bool on = (server.arg("val") == "on" || server.arg("val") == "1");
+    bool known = true;
+    if (name == "ble123") hubFeatBle123 = on;
+    else if (name == "blebm6") hubFeatBleBm6 = on;
+    else if (name == "espnow") hubFeatEspNow = on;
+    else if (name == "log") hubFeatLog = on;
+    else known = false;
+    if (known) {
+      saveHubFeatures();
+      applyHubFeatures();
+      logHubEvent("hub_feat", "web");
+    }
+    server.send(known ? 200 : 400, "application/json",
+                String("{\"ok\":") + (known ? "true" : "false") + "}");
+  });
   server.on("/lambda_test", HTTP_POST, []() {
     if (!server.hasArg("mode") || !setLambdaTestMode(server.arg("mode"))) {
       server.send(400, "application/json",
@@ -4842,18 +4927,8 @@ setInterval(() => {
     server.send(303, "text/plain", "");
   });
   server.on("/emu", HTTP_GET, []() {
-    // An/Aus (mit Reboot), Sweep oder feste RPM.
-    if (server.hasArg("set")) {
-      const String s = server.arg("set");
-      hubFeatEmu123 = (s == "on" || s == "1");
-      saveHubFeatures();
-      server.send(200, "text/html",
-                  "<meta http-equiv='refresh' content='4;url=/emu'>Emulator " +
-                  String(hubFeatEmu123 ? "AN" : "AUS") + " — Reboot...");
-      delay(300);
-      ESP.restart();
-      return;
-    }
+#if ENABLE_EMU123
+    // Emu-Build: volle Emulator-Steuerung (RPM/Sweep + advertised BLE-Adresse).
     if (server.hasArg("rpm"))   emu123ManualRpm = server.arg("rpm").toInt();
     if (server.hasArg("sweep")) emu123ManualRpm = -1;
     if (server.hasArg("addr")) {   // advertised BLE-Adresse aendern (Reboot)
@@ -4875,9 +4950,7 @@ setInterval(() => {
            "border:1px solid #444;border-radius:9px;text-decoration:none}a.on{background:#2e7d32;border-color:#2e7d32}"
            ".big{font-size:2.1rem;font-weight:700;margin:14px 0}.muted{color:#9aa}</style>"
            "<h2>123&#92;TUNE+ Emulator</h2>");
-    h += "<div>Status: <b style='color:";
-    h += hubFeatEmu123 ? "#54d273'>AN" : "#ff6a5a'>AUS";
-    h += "</b> &middot; Modus: <b>";
+    h += "<div>Status: <b style='color:#54d273'>AKTIV</b> &middot; Modus: <b>";
     h += (emu123ManualRpm >= 0) ? ("fest " + String(emu123ManualRpm)) : String("Sweep 700-3200");
     h += "</b></div>";
     h += "<div class=muted>BLE-Adresse: <b style='color:#9ed85b'>" + bleAddress +
@@ -4891,16 +4964,25 @@ setInterval(() => {
          "<p class=muted style='margin:4px 0'>Adresse muss static-random sein (erstes Byte Top-Bits 11, "
          "z.B. e..&#47;f..&#47;c..&#47;d..).</p>";
     h += F("<div class=big id=live>--</div>"
-           "<div><a class='btn on' href='/emu?set=on'>EMU AN</a><a class='btn' href='/emu?set=off'>EMU AUS</a></div>"
            "<div class=muted>Drehzahl:</div>"
            "<div><a class='btn' href='/emu?sweep=1'>Sweep</a>"
            "<a class='btn' href='/emu?rpm=800'>800</a><a class='btn' href='/emu?rpm=1500'>1500</a>"
            "<a class='btn' href='/emu?rpm=2500'>2500</a><a class='btn' href='/emu?rpm=4000'>4000</a></div>"
-           "<p class=muted>Advertised als &#39;123&#92;TUNE+&#39; (NUS, Company 2330). "
-           "Touch/M5/Hub verbinden sich damit wie mit der echten 123.</p>"
+           "<p class=muted>Advertised als &#39;123&#92;TUNE+&#39;. Hub/M5 verbinden sich damit wie mit der echten 123.</p>"
            "<script>setInterval(async()=>{try{let d=await(await fetch('/api/status')).json();"
-           "document.getElementById('live').textContent=d.emu123_on?('RPM '+d.emu123_rpm+'  ADV '+d.emu123_adv+'\\u00b0  MAP '+d.emu123_map):'Emulator aus';}catch(e){}},400);</script>");
+           "document.getElementById('live').textContent=d.emu123_on?('RPM '+d.emu123_rpm+'  ADV '+d.emu123_adv+'\\u00b0  MAP '+d.emu123_map):'--';}catch(e){}},400);</script>");
     server.send(200, "text/html", h);
+#else
+    // Test-Hub ist reiner Client — der 123-Emulator läuft auf einem separaten ESP.
+    server.send(200, "text/html",
+                "<!doctype html><meta name=viewport content='width=device-width,initial-scale=1'>"
+                "<title>123 Emulator</title><body style='font-family:system-ui;background:#0e0e0e;color:#eee;margin:16px'>"
+                "<h2>123 Emulator</h2><p>Dieser Test-Hub ist reiner <b>Client</b>: "
+                "empf&auml;ngt 123, liest BM6, Lambda-Demo, loggt.</p>"
+                "<p style='color:#9aa'>Der 123-Emulator l&auml;uft auf einem separaten ESP "
+                "(COM17, <a style='color:#bde87a' href='http://192.168.0.80/emu'>192.168.0.80/emu</a>).</p>"
+                "<p><a style='color:#bde87a' href='/'>&larr; zur&uuml;ck</a></p></body>");
+#endif
   });
 
   server.on("/ble_target", HTTP_POST, []() {
@@ -5562,13 +5644,21 @@ void setup()
   setupBleHub();
   setupWebGui();
   setupEspNowHub();
-#if defined(ENABLE_BLE_HUB) && defined(ENABLE_ESP_NOW_HUB)
-  // BALANCE statt PREFER_BT: BLE bekommt genug Funkzeit für den 123-Empfang,
-  // ABER das WiFi-AP/ESP-NOW bleibt erreichbar. PREFER_BT hungerte das AP aus
-  // (Ping-Timeouts, keine WebGUI). Balance ist der stabile Kompromiss.
+#if defined(ENABLE_BLE_HUB)
+#if ENABLE_EMU123
+  // Emu (COM17): muss die 123 flüssig über BLE SENDEN. BLE bekommt Funkvorrang,
+  // sonst blockiert WiFi die Notifies (Burst-dann-Stillstand -> Gegenstelle
+  // trennt per Stale). WLAN-AP wird dabei schwächer — beim reinen Emu egal.
+  if (esp_coex_preference_set(ESP_COEX_PREFER_BT) == ESP_OK) {
+    Serial.println("Coex:        BLE-Vorrang gesetzt (PREFER_BT, Emu)");
+  }
+#else
+  // Hub/Client: BALANCE — BLE-Empfang stabil, WiFi-AP/ESP-NOW erreichbar.
+  // PREFER_BT hungerte hier das AP aus (Ping-Timeouts, keine WebGUI).
   if (esp_coex_preference_set(ESP_COEX_PREFER_BALANCE) == ESP_OK) {
     Serial.println("Coex:        BLE/WiFi Balance gesetzt (PREFER_BALANCE)");
   }
+#endif
 #endif
   if (!hubFeatEmu123) {   // Emulator = nur BLE(123) + WebGUI, kein CAN/UART/Speed
     setupHourmeters();
