@@ -226,7 +226,7 @@ constexpr uint32_t kBleNotifyIntervalMs = 250;
 // 40 ms = 25 Hz. Frames sind winzig (17 B), das ist für ESP-NOW unkritisch.
 constexpr uint32_t kEspNowSendIntervalMs = 40;
 constexpr uint32_t kCanStaleMs = 500;
-constexpr uint32_t kHomeWifiConnectWindowMs = 15000;
+constexpr uint32_t kHomeWifiConnectWindowMs = 45000;  // 45s: BLE-Koexistenz verlangsamt den STA-Connect; 15s wuergte ihn ab
 constexpr float kLambdaAtZeroVolt = 0.68f;
 constexpr float kLambdaAtFiveVolt = 1.36f;
 #if ENABLE_BLE_HUB
@@ -4117,6 +4117,16 @@ details.setup > .inside { padding: 0 16px 16px; }
 <div class="row"><span>Gespeichert</span><strong id="wifisaved">-</strong></div>
 <div class="row"><span>Profil</span><strong id="wifiProfLabel">-</strong></div>
 <div style="margin:8px 0" id="wifiProfBtns"></div>
+<div style="margin:10px 0;padding:10px;border:1px solid #2a3a2e;border-radius:8px">
+<b>WLAN auswählen &amp; verbinden</b>
+<div style="margin:6px 0"><button type="button" onclick="wifiScan()">Netzwerke scannen</button> <span id="wifiScanInfo" class="hint"></span></div>
+<label>Gefundene Netzwerke</label>
+<select id="wifiScanSel" onchange="document.getElementById('wcSsid').value=this.value"><option value="">— erst scannen —</option></select>
+<label>SSID</label><input id="wcSsid" placeholder="Netzwerkname">
+<label>Passwort</label><input id="wcPass" type="password" placeholder="WLAN-Passwort">
+<button type="button" onclick="wifiConnect()">Verbinden &amp; speichern (Reboot)</button>
+<p class="hint">Beim Scan kann der AP kurz aussetzen — falls die Seite hängt, neu laden.</p>
+</div>
 <details style="margin:8px 0"><summary>Profile bearbeiten</summary>
 <form action="/wifi_profile_save" method="post" style="margin:6px 0">
 <input type="hidden" name="slot" value="1">
@@ -4237,6 +4247,23 @@ details.setup > .inside { padding: 0 16px 16px; }
 <p class="hint">WLAN-Profil (Bus/Zuhause/Handy) bleibt im Setup-Tab. CAN-Pins am S3: RX 10 / TX 11.</p>
 </div><!-- /tab dev -->
 <script>
+async function wifiScan(){
+  const info=document.getElementById('wifiScanInfo'), sel=document.getElementById('wifiScanSel');
+  info.textContent=' scanne...';
+  try{
+    const nets=await (await fetch('/wifi_scan',{cache:'no-store'})).json();
+    nets.sort((a,b)=>b.rssi-a.rssi);
+    sel.innerHTML='<option value="">— '+nets.length+' Netze —</option>'+nets.map(n=>'<option value="'+(n.ssid||'').replace(/"/g,'')+'">'+(n.lock?'🔒 ':'')+(n.ssid||'')+' ('+n.rssi+' dBm)</option>').join('');
+    info.textContent=' '+nets.length+' gefunden';
+  }catch(e){ info.textContent=' Scan fehlgeschlagen — Seite neu laden'; }
+}
+async function wifiConnect(){
+  const ssid=(document.getElementById('wcSsid').value||'').trim(), pass=document.getElementById('wcPass').value||'';
+  if(!ssid){alert('Bitte SSID eingeben oder aus der Liste wählen');return;}
+  try{ await fetch('/wifi_connect',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'ssid='+encodeURIComponent(ssid)+'&pass='+encodeURIComponent(pass)});
+    alert('Verbinde mit "'+ssid+'" — Gerät startet neu. Danach im Heimnetz (192.168.0.x) erreichbar.');
+  }catch(e){ alert('Verbinden fehlgeschlagen'); }
+}
 async function devFeat(name,val){try{await fetch('/hub_feat?name='+name+'&val='+val);}catch(e){}}
 async function devLambda(mode){try{await fetch('/lambda_test',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'mode='+mode});}catch(e){}}
 let lastJson = {};
@@ -4255,10 +4282,10 @@ try {
   const saved = localStorage.getItem('spartanTab');
   if (saved === 'setup' || saved === 'log' || saved === 'diag' || saved === 'dev') showTab(saved);
 } catch (e) {}
-document.getElementById('tunePreset').addEventListener('change', (e) => {
+document.getElementById('tunePreset')?.addEventListener('change', (e) => {
   document.getElementById('tune_mac').value = e.target.value || '';
 });
-document.getElementById('bm6Preset').addEventListener('change', (e) => {
+document.getElementById('bm6Preset')?.addEventListener('change', (e) => {
   document.getElementById('bm6_mac').value = e.target.value || '';
 });
 async function saveBleTarget(kind, addr) {
@@ -4275,16 +4302,16 @@ async function saveBleTarget(kind, addr) {
     await refresh();
   } catch (err) {}
 }
-document.getElementById('blescan').addEventListener('click', (e) => {
+document.getElementById('blescan')?.addEventListener('click', (e) => {
   const btn = e.target.closest('button[data-addr]');
   if (!btn) return;
   saveBleTarget(btn.dataset.kind, btn.dataset.addr);
 });
-document.getElementById('wifiPreset').addEventListener('change', (e) => {
+document.getElementById('wifiPreset')?.addEventListener('change', (e) => {
   const option = e.target.selectedOptions[0];
   const ssid = option.value || '';
-  document.getElementById('ssid').value = ssid;
-  document.getElementById('pass').value = option.dataset.pass || '';
+  const s = document.getElementById('ssid'); if (s) s.value = ssid;
+  const p = document.getElementById('pass'); if (p) p.value = option.dataset.pass || '';
 });
 document.querySelectorAll('form[data-async=\"uart\"]').forEach((form) => {
   form.addEventListener('submit', async (e) => {
@@ -4835,6 +4862,44 @@ setInterval(() => {
     server.send(303, "text/plain", "");
   });
 #endif
+  server.on("/wifi_scan", HTTP_GET, []() {
+    // Netzwerke scannen (blockiert ~3-5s; der AP kann kurz aussetzen).
+    int n = WiFi.scanNetworks();
+    String j = "[";
+    int added = 0;
+    for (int i = 0; i < n && added < 25; i++) {
+      String s = WiFi.SSID(i);
+      if (s.length() == 0) continue;
+      if (added) j += ",";
+      j += "{\"ssid\":\"" + jsonEscape(s) + "\",\"rssi\":" + String(WiFi.RSSI(i)) +
+           ",\"lock\":" + String(WiFi.encryptionType(i) == WIFI_AUTH_OPEN ? 0 : 1) + "}";
+      added++;
+    }
+    j += "]";
+    WiFi.scanDelete();
+    server.send(200, "application/json", j);
+  });
+  server.on("/wifi_connect", HTTP_POST, []() {
+    // Auswählen + verbinden: SSID/Passwort -> Profil 1 (Zuhause), aktiv, WLAN an, Reboot.
+    String ssid = server.arg("ssid"); ssid.trim();
+    String pass = server.arg("pass");
+    if (ssid.length() == 0) { server.send(400, "text/plain", "SSID fehlt"); return; }
+    ensurePreferences();
+    strlcpy(g_hubWifiProfiles[1].ssid, ssid.c_str(), sizeof(g_hubWifiProfiles[1].ssid));
+    strlcpy(g_hubWifiProfiles[1].pass, pass.c_str(), sizeof(g_hubWifiProfiles[1].pass));
+    networkPreferences.putString("p1_ssid", ssid);
+    networkPreferences.putString("p1_pass", pass);
+    networkPreferences.putUChar("wifi_prof", 1);
+    hubWifiProfile = 1;
+    hubFeatWifi = true;
+    saveHubFeatures();
+    Serial.printf("WiFi connect: SSID='%s' -> Profil 1, Reboot\n", ssid.c_str());
+    server.send(200, "text/html",
+                "<meta http-equiv='refresh' content='7;url=/'>Verbinde mit '" + ssid +
+                "' - Geraet startet neu...");
+    delay(300);
+    ESP.restart();
+  });
   server.on("/wifi_prof", HTTP_POST, []() {
     int slot = server.arg("slot").toInt();
     if (slot < 0 || slot > 2) slot = 0;
