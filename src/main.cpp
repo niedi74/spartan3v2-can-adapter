@@ -4251,6 +4251,17 @@ details.setup > .inside { padding: 0 16px 16px; }
 </div>
 </div>
 <div class="card">
+<h3>Anzeigefrequenz</h3>
+<div class="row"><span>Aktuell</span><strong id="dev_poll_freq">5 Hz</strong></div>
+<div style="display:flex;gap:8px;margin-top:8px">
+<button type="button" onclick="setPollInterval(100);document.getElementById('dev_poll_freq').textContent='10 Hz'">10 Hz</button>
+<button type="button" onclick="setPollInterval(200);document.getElementById('dev_poll_freq').textContent='5 Hz'">5 Hz</button>
+<button type="button" onclick="setPollInterval(500);document.getElementById('dev_poll_freq').textContent='2 Hz'">2 Hz</button>
+<button type="button" onclick="setPollInterval(1000);document.getElementById('dev_poll_freq').textContent='1 Hz'">1 Hz</button>
+</div>
+<p class="hint">10 Hz = sehr flüssig (wie 123TUNE+ App). 2 Hz = sparsam für Langzeit.</p>
+</div>
+<div class="card">
 <h3>UART-Bridge (2. ESP32)</h3>
 <p class="hint">Optionaler zweiter ESP32 liefert 123-Daten per UART. RX-Pin eingeben, 0 = aus. Gilt nach Neustart.</p>
 <div class="row"><span>Status</span><strong id="dev_uart_status">-</strong></div>
@@ -4706,7 +4717,13 @@ async function refresh() {
   } catch (e) {}
 }
 refresh();
-setInterval(() => { if (!document.hidden) refresh(); }, 750);
+let pollIntervalMs = 200;  // Standard 200ms = 5 Hz, flüssig aber sparsam
+function setPollInterval(ms) {
+  pollIntervalMs = ms;
+  clearInterval(window._pollTimer);
+  window._pollTimer = setInterval(() => { if (!document.hidden) refresh(); }, pollIntervalMs);
+}
+window._pollTimer = setInterval(() => { if (!document.hidden) refresh(); }, pollIntervalMs);
 setInterval(() => {
   if (!document.hidden && !document.querySelector('[data-tab=\"diag\"]').hidden) refreshEvents();
 }, 2000);
