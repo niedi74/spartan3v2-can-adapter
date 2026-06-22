@@ -276,7 +276,8 @@ constexpr char kBm6WriteUuid[] = "0000fff3-0000-1000-8000-00805f9b34fb";
 constexpr char kBm6NotifyUuid[] = "0000fff4-0000-1000-8000-00805f9b34fb";
 constexpr uint32_t kBm6ScanWindowMs = 1500;   // 1.5s: BM6 findet sich, 123-Link ueberlebt den Scan
 constexpr uint32_t kBm6ReconnectDelayMs = 8000;
-constexpr uint32_t kBm6TriggerIntervalMs = 2000;
+constexpr uint32_t kBm6TriggerIntervalMs = 2000;  // interner Polling-Takt (verbunden)
+uint32_t bm6PollIntervalMs = 60000;               // Abfrageintervall: Standard 60s, per /bm6_interval
 constexpr uint32_t kBm6MainSlotMs = 45000;   // Batterie (main)
 constexpr uint32_t kBm6AuxSlotMs = 15000;    // Zusatzbatterie poll window
 constexpr uint32_t kBm6CacheMaxAgeMs = 120000;
@@ -1630,6 +1631,8 @@ String statusJson()
   json += String(static_cast<int>(bm6Temperature));
   json += ",\"bm6_rx_count\":";
   json += String(static_cast<unsigned long>(bm6RxCount));
+  json += ",\"bm6_poll_sec\":";
+  json += String(bm6PollIntervalMs / 1000);
   json += ",\"bm6_decode_fail\":";
   json += String(static_cast<unsigned long>(bm6DecodeFailCount));
   json += ",\"bm6_age_ms\":";
@@ -2940,7 +2943,7 @@ void updateBm6Ble()
   //    waehrend bleRadioFreeForBm6Scan() parallele Scans verhindert.
   const uint32_t now = millis();
   if (bm6Connected) {
-    if (now - bm6LastRxMs > 5000 && now - bm6LastTriggerMs > kBm6TriggerIntervalMs) {
+    if (now - bm6LastRxMs > 5000 && now - bm6LastTriggerMs > bm6PollIntervalMs) {
       bm6SendTrigger();
     }
     if (!tuneConnected) maybeRotateBm6Slot();
@@ -4059,41 +4062,6 @@ details.setup > .inside { padding: 0 16px 16px; }
 </details>
 </div><!-- /tab log -->
 <div class="tab-section" data-tab="setup" hidden>
-<details class="setup" open>
-<summary>Lambda Tischtest</summary>
-<div class="inside">
-<div class="row"><span>Aktueller Modus</span><strong id="lambdaTestStatus">off</strong></div>
-<div class="grid">
-<form action="/lambda_test" method="post"><input type="hidden" name="return" value="1"><input type="hidden" name="mode" value="off"><button class="secondary" type="submit">AUS</button></form>
-<form action="/lambda_test" method="post"><input type="hidden" name="return" value="1"><input type="hidden" name="mode" value="fixed"><button type="submit">Fest 1.000</button></form>
-<form action="/lambda_test" method="post"><input type="hidden" name="return" value="1"><input type="hidden" name="mode" value="sweep"><button type="submit">Sweep 0.85-1.15</button></form>
-</div>
-<p class="hint">TEST ueberschreibt Lambda/CAN absichtlich. 123 und BM6 bleiben echte BLE-Eingaenge und CSV loggt alle Werte gemeinsam.</p>
-</div>
-</details>
-<details class="setup" open>
-<summary>Funktionen An/Aus</summary>
-<div class="inside">
-<p class="hint">Fahrt-Setup: Hub = CAN/UART + ESP-NOW. Displays verbinden 123 direkt per BLE. BM6/123 am Hub nur wenn kein Display-BLE.</p>
-<form action="/hub_features" method="post" id="hubFeaturesForm">
-<label><input type="checkbox" name="espnow" value="1" id="hfEspnow"> ESP-NOW Spartan (Lambda/RPM broadcast)</label>
-<label for="espnow_ch">ESP-NOW Kanal</label>
-<select id="espnow_ch" name="espnow_ch">
-<option value="0">Automatisch (folgt WLAN)</option>
-<option value="6">Bus (Kanal 6 / Spartan3-Setup)</option>
-<option value="11">Handy-Test (Kanal 11)</option>
-</select>
-<label><input type="checkbox" name="ap" value="1" id="hfAp"> SoftAP Spartan3-Setup</label>
-<p class="hint">SoftAP kann aus, solange WLAN STA aktiv ist. WLAN und SoftAP gleichzeitig aus wird blockiert.</p>
-<label><input type="checkbox" name="wifi" value="1" id="hfWifi"> WLAN STA (Heimnetz verbinden)</label>
-<label><input type="checkbox" name="log" value="1" id="hfLog"> CSV Fahrtlog</label>
-<label><input type="checkbox" name="ble123" value="1" id="hfBle123"> 123TUNE BLE am Hub</label>
-<label><input type="checkbox" name="blebm6" value="1" id="hfBleBm6"> BM6 BLE am Hub</label>
-<p class="hint">BM6 am Hub aktiviert BLE-Scan auf dem Hub. Fuer 123TUNE bleibt empfohlen: ein Client direkt, Rest via ESP-NOW.</p>
-<button type="submit">Speichern</button>
-</form>
-</div>
-</details>
 <details class="setup">
 <summary>SoftAP Name / Passwort / IP</summary>
 <div class="inside">
@@ -4105,26 +4073,6 @@ details.setup > .inside { padding: 0 16px 16px; }
 <p class="hint">Passwort leer = offener AP. Sonst mindestens 8 Zeichen. Nach Speichern startet der AP neu.</p>
 <button type="submit">AP speichern</button>
 </form>
-</div>
-</details>
-<details class="setup" open>
-<summary>System Diagnose</summary>
-<div class="inside">
-<div class="row"><span>CAN State / TX / RX</span><strong id="candiag">-</strong></div>
-<div class="row"><span>CAN Statusfehler</span><strong id="canerr">0</strong></div>
-<div class="row"><span>Heap frei</span><strong id="heap">-</strong></div>
-<div class="row"><span>Geraet / Motor / Sonde</span><strong id="hours">0 / 0 / 0 h</strong></div>
-<div class="row"><span>AP IP / Retry</span><strong id="apdiag">-</strong></div>
-<button class="secondary" type="button" onclick="copyJson()">JSON kopieren</button>
-<form action="/restart" method="post" style="margin-top:10px">
-<button class="danger" type="submit">Hub neu starten</button>
-</form>
-<details class="setup">
-<summary>JSON Rohdaten</summary>
-<div class="inside">
-<pre id="jsondump">{}</pre>
-</div>
-</details>
 </div>
 </details>
 <details class="setup" open>
@@ -4279,20 +4227,48 @@ details.setup > .inside { padding: 0 16px 16px; }
 </form>
 </div>
 </details>
-<p class="hint">Aktuell ist der Bring-up-Modus aktiv. DEMO-Werte pruefen Display und Web-GUI, bis der CAN-Transceiver angeschlossen ist.</p>
 </div><!-- /tab setup -->
 <div class="tab-section" data-tab="dev" hidden>
 <div class="card">
-<h3>Dev &mdash; Runtime-Schalter</h3>
-<p class="hint">Wirken sofort, ohne neuen Build/Flash.</p>
-<div class="row"><span>123 BLE (Client)</span><span><button type="button" onclick="devFeat('ble123','on')">AN</button> <button type="button" onclick="devFeat('ble123','off')">AUS</button> &middot; <strong id="dev_ble123">-</strong></span></div>
-<div class="row"><span>BM6 BLE</span><span><button type="button" onclick="devFeat('blebm6','on')">AN</button> <button type="button" onclick="devFeat('blebm6','off')">AUS</button> &middot; <strong id="dev_blebm6">-</strong></span></div>
-<div class="row"><span>ESP-NOW</span><span><button type="button" onclick="devFeat('espnow','on')">AN</button> <button type="button" onclick="devFeat('espnow','off')">AUS</button> &middot; <strong id="dev_espnow">-</strong></span></div>
-<div class="row"><span>Logging</span><span><button type="button" onclick="devFeat('log','on')">AN</button> <button type="button" onclick="devFeat('log','off')">AUS</button> &middot; <strong id="dev_log">-</strong></span></div>
-<div class="row"><span>Lambda-Demo</span><span><button type="button" onclick="devLambda('off')">AUS</button> <button type="button" onclick="devLambda('fixed')">1.000</button> <button type="button" onclick="devLambda('sweep')">Sweep</button></span></div>
-<div class="row"><span></span><strong id="dev_lambda">-</strong></div>
+<h3>Schalter</h3>
+<div class="row"><span>123 BLE</span><span><button type="button" onclick="devFeat('ble123','on')">AN</button> <button type="button" onclick="devFeat('ble123','off')">AUS</button> <strong id="dev_ble123" style="margin-left:8px">-</strong></span></div>
+<div class="row"><span>BM6 BLE</span><span><button type="button" onclick="devFeat('blebm6','on')">AN</button> <button type="button" onclick="devFeat('blebm6','off')">AUS</button> <strong id="dev_blebm6" style="margin-left:8px">-</strong></span></div>
+<div class="row"><span>ESP-NOW</span><span><button type="button" onclick="devFeat('espnow','on')">AN</button> <button type="button" onclick="devFeat('espnow','off')">AUS</button> <strong id="dev_espnow" style="margin-left:8px">-</strong></span></div>
+<div class="row"><span>Logging</span><span><button type="button" onclick="devFeat('log','on')">AN</button> <button type="button" onclick="devFeat('log','off')">AUS</button> <strong id="dev_log" style="margin-left:8px">-</strong></span></div>
 </div>
-<p class="hint">WLAN-Profil (Bus/Zuhause/Handy) bleibt im Setup-Tab. CAN-Pins am S3: RX 10 / TX 11.</p>
+<div class="card">
+<h3>Lambda-Demo (Tischtest)</h3>
+<div class="row"><span>Modus</span><strong id="dev_lambda">-</strong></div>
+<div style="display:flex;gap:8px;margin-top:8px">
+<button type="button" onclick="devLambda('off')">AUS</button>
+<button type="button" onclick="devLambda('fixed')">Fest 1.000</button>
+<button type="button" onclick="devLambda('sweep')">Sweep 0.85-1.15</button>
+</div>
+</div>
+<div class="card">
+<h3>BM6 Abfrageintervall</h3>
+<div class="row"><span>Aktuell</span><strong id="dev_bm6interval">-</strong></div>
+<div style="display:flex;gap:8px;margin-top:8px">
+<button type="button" onclick="devBm6Interval(30)">30s</button>
+<button type="button" onclick="devBm6Interval(60)">1 Min</button>
+<button type="button" onclick="devBm6Interval(300)">5 Min</button>
+</div>
+<p class="hint">BM6-Spannung aendert sich langsam — 1-5 Min reichen fuer Logging.</p>
+</div>
+<div class="card">
+<h3>System</h3>
+<div class="row"><span>CAN State / TX / RX</span><strong id="candiag">-</strong></div>
+<div class="row"><span>CAN Fehler</span><strong id="canerr">0</strong></div>
+<div class="row"><span>Heap frei</span><strong id="heap">-</strong></div>
+<div class="row"><span>Betriebsstunden</span><strong id="hours">-</strong></div>
+<div style="display:flex;gap:8px;margin-top:8px">
+<button class="secondary" type="button" onclick="copyJson()">JSON kopieren</button>
+<form action="/restart" method="post" style="margin:0"><button class="danger" type="submit">Neustart</button></form>
+</div>
+<details style="margin-top:10px"><summary class="hint">JSON Rohdaten</summary>
+<pre id="jsondump" style="font-size:10px;overflow:auto;max-height:200px">{}</pre>
+</details>
+</div>
 </div><!-- /tab dev -->
 <script>
 async function wifiScan(){
@@ -4314,6 +4290,7 @@ async function wifiConnect(){
 }
 async function devFeat(name,val){try{await fetch('/hub_feat?name='+name+'&val='+val);}catch(e){}}
 async function devLambda(mode){try{await fetch('/lambda_test',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'mode='+mode});}catch(e){}}
+async function devBm6Interval(sec){try{await fetch('/bm6_interval?sec='+sec);document.getElementById('dev_bm6interval').textContent=sec+'s';}catch(e){}}
 let lastJson = {};
 function showTab(name) {
   document.querySelectorAll('.tab-section').forEach(s => {
@@ -4549,7 +4526,8 @@ async function refresh() {
       const sd=(id,on)=>{const e=document.getElementById(id);if(e){e.textContent=on?'AN':'AUS';e.style.color=on?'#54d273':'#ff6a5a';}};
       sd('dev_ble123', d.hub_feat_ble123); sd('dev_blebm6', d.hub_feat_blebm6);
       sd('dev_espnow', d.hub_feat_espnow); sd('dev_log', d.hub_feat_log);
-      const dl=document.getElementById('dev_lambda'); if(dl) dl.textContent='Lambda: '+(d.lambda_test_mode||'off');
+      const dl=document.getElementById('dev_lambda'); if(dl) dl.textContent=(d.lambda_test_mode||'off');
+      const di=document.getElementById('dev_bm6interval'); if(di&&d.bm6_poll_sec) di.textContent=d.bm6_poll_sec+'s';
     }
     document.getElementById('tuneLinkState').textContent = d.tune_link_state ?? '-';
     document.getElementById('blename').textContent = d.ble_name || '-';
@@ -4717,6 +4695,15 @@ setInterval(() => {
   };
   server.on("/state", sendStatus);
   server.on("/api/status", sendStatus);
+  server.on("/bm6_interval", HTTP_GET, []() {
+    uint32_t sec = server.arg("sec").toInt();
+    if (sec >= 10 && sec <= 3600) {
+      bm6PollIntervalMs = sec * 1000;
+      Serial.printf("BM6:         Abfrageintervall %lus\n", (unsigned long)sec);
+    }
+    server.send(200, "application/json",
+                "{\"ok\":true,\"bm6_poll_sec\":" + String(bm6PollIntervalMs/1000) + "}");
+  });
   server.on("/hub_feat", HTTP_GET, []() {
     // Dev-Tab: Hub-Features zur Laufzeit schalten (kein Reflash).
     const String name = server.arg("name");
