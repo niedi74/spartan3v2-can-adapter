@@ -231,10 +231,10 @@ constexpr uint32_t kCanStaleMs = 500;
 // GPIO6/7 sind freie Standard-GPIOs ohne Sonderfunktion.
 // Protokoll: "T,rpm,adv,map,coil,volt,temp\n"
 #ifndef BRIDGE_UART_RX_PIN
-#define BRIDGE_UART_RX_PIN 38
+#define BRIDGE_UART_RX_PIN 21
 #endif
 #ifndef BRIDGE_UART_TX_PIN
-#define BRIDGE_UART_TX_PIN 39
+#define BRIDGE_UART_TX_PIN 20
 #endif
 constexpr uint32_t kHomeWifiConnectWindowMs = 45000;  // 45s: BLE-Koexistenz verlangsamt den STA-Connect; 15s wuergte ihn ab
 constexpr float kLambdaAtZeroVolt = 0.68f;
@@ -5605,6 +5605,20 @@ void setupBridgeUart()
 static void processBridgeLine(const String &line)
 {
   if (line.length() < 3) return;
+  // Format 2: Touch-S3 / Waveshare "BLE: LIVE rpm=X adv=Y map=Z rx=N"
+  if (line.startsWith("BLE: LIVE ")) {
+    float rpm = 0, adv = 0, map = 0;
+    int r = sscanf(line.c_str(), "BLE: LIVE rpm=%f adv=%f map=%f", &rpm, &adv, &map);
+    if (r >= 2) {
+      portENTER_CRITICAL(&stateMux);
+      tuneRpm = rpm; tuneAdvance = adv; tuneMap = map;
+      if (tuneRxCount < UINT32_MAX) tuneRxCount++;
+      portEXIT_CRITICAL(&stateMux);
+      tuneLastRxMs = millis();
+      tuneConnected = true;
+    }
+    return;
+  }
   if (line[0] == 'T' && line[1] == ',') {
     // T,rpm,adv,map[,coil,volt,temp]
     int idx = 2, field = 0;
