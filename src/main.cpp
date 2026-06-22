@@ -3094,7 +3094,13 @@ class Emu123TxCB : public NimBLECharacteristicCallbacks {
   void onSubscribe(NimBLECharacteristic *c, NimBLEConnInfo &, uint16_t val) override {
     emu123Subscribed = (val == 1 || val == 2);
     Serial.printf("EMU123:      Subscribe CCCD=%u -> %s\n", val, emu123Subscribed?"AN":"AUS");
-    if (emu123Subscribed) emu123LastMs = 0;  // sofort senden nach Subscribe
+    if (emu123Subscribed && emu123Tx) {
+      // Sofort ersten Frame senden — App wartet auf Daten um Verbindung zu halten
+      vTaskDelay(pdMS_TO_TICKS(50));
+      uint8_t buf[5] = { 0x30, '0', '0', 0x40, 0x20 };  // RPM=0 als ersten Frame
+      emu123Tx->notify(buf, 5);
+      emu123LastMs = 0;  // weiterer sofortiger Send im nächsten Tick
+    }
   }
 };
 static Emu123TxCB emu123TxCB;
