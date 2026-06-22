@@ -2531,7 +2531,7 @@ void connectTune()
     scheduleTuneScan(false);
     return;
   }
-  delay(1000);  // 1s statt 750ms: gibt nRF52810 Zeit zur GATT-Stabilisierung
+  vTaskDelay(pdMS_TO_TICKS(1000));  // non-blocking: andere Tasks (WebServer) laufen weiter
 
   NimBLERemoteService *service = tuneClient->getService(kTuneNusServiceUuid);
   if (service == nullptr) {
@@ -2566,7 +2566,7 @@ void connectTune()
     uint16_t off = 0x0000;
     bool offOk = cccd->writeValue(reinterpret_cast<uint8_t *>(&off), 2, true);
     Serial.printf("123TUNE BLE: CCCD off %s\n", offOk ? "OK" : "FAIL");
-    delay(150);
+    vTaskDelay(pdMS_TO_TICKS(150));
   } else {
     Serial.println("123TUNE BLE: CCCD missing");
   }
@@ -2599,7 +2599,7 @@ void connectTune()
     const uint8_t ping = '$';
     const uint8_t enter = '\r';
     const bool pingOk = tuneNusRx->writeValue(&ping, 1, true);
-    delay(120);
+    vTaskDelay(pdMS_TO_TICKS(120));
     const bool enterOk = tuneNusRx->writeValue(&enter, 1, true);
     tuneLastPingMs = millis();
     Serial.printf("123TUNE BLE: wake '$' %s, CR %s\n",
@@ -2916,7 +2916,7 @@ void connectBm6()
     scheduleBm6Scan();
     return;
   }
-  delay(500);
+  vTaskDelay(pdMS_TO_TICKS(500));
 
   NimBLERemoteService *svc = bm6Client->getService(kBm6ServiceUuid);
   if (svc == nullptr) {
@@ -2980,7 +2980,12 @@ void updateTuneBle()
 {
   const uint32_t now = millis();
   if (tuneDoConnect) {
-    connectTune();
+    // BLE-Connect in eigenem FreeRTOS-Task: Loop + WebServer laufen weiter
+    tuneDoConnect = false;
+    xTaskCreate([](void*){
+      connectTune();
+      vTaskDelete(nullptr);
+    }, "tuneConnect", 8192, nullptr, 1, nullptr);
     return;
   }
   sendTunePing();
