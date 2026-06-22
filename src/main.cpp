@@ -3069,6 +3069,7 @@ static bool     emu123Started = false;
 static uint32_t emu123LastMs = 0;
 static float    emu123Rpm = 800.0f;
 static bool     emu123Rising = true;
+static SemaphoreHandle_t emu123PingSem = nullptr;  // signalisiert sofortigen Send nach $
 
 static inline char emu123Nib(int n) { return (n < 10) ? ('0' + n) : ('A' + n - 10); }
 
@@ -3095,7 +3096,9 @@ class Emu123TxCB : public NimBLECharacteristicCallbacks {
     emu123Subscribed = (val == 1 || val == 2);
     Serial.printf("EMU123:      Subscribe CCCD=%u -> %s\n", val, emu123Subscribed?"AN":"AUS");
     if (emu123Subscribed) {
-      emu123LastMs = 0;  // sofortiger Send im nächsten Loop-Tick
+      emu123LastMs = 0;
+      // Auch Semaphor geben → sofortiger voller Zyklus aus dediziertem Task
+      if (emu123PingSem) xSemaphoreGiveFromISR(emu123PingSem, nullptr);
     }
   }
 };
@@ -3148,8 +3151,23 @@ void startEmu123() {
         emu123Tx->notify((uint8_t*)resp.c_str(), resp.length());
         Serial.println("EMU123 TX:   PW -> OK");
       } else if (cmd[0] == '$' || cmd[0] == 0x24) {
-        // Ping — Flag setzen, Loop sendet beim nächsten Tick sofort
+        // Ping — Semaphor geben damit dedizierter Task sofort sendet
         emu123LastMs = 0;
+        if (emu123PingSem) xSemaphoreGiveFromISR(emu123PingSem, nullptr);
+      } else if (cmd[0] == '\r' || cmd[0] == 0x0D) {
+        // CR nach $ — v@-Response schicken (echte 123 antwortet auf $\r mit Status)
+        if (emu123Tx && emu123Subscribed) {
+          // v@\r Voltage/Temp/Pressure + Version (aus Referenz-Impl)
+          // Format: v@\r + Volt(2) + Temp(2) + Pressure(2) + Version(9)
+          const int voltRaw = (int)(13.8f * 4.54f + 0.5f);
+          const int tempRaw = (int)(75 + 30);
+          const int presRaw = 100;  // 100 kPa
+          char resp[32];
+          snprintf(resp, sizeof(resp), "v@\r%02X%02X%02X41-10-45 ",
+                   voltRaw, tempRaw, presRaw);
+          emu123Tx->notify((uint8_t*)resp, strlen(resp));
+          if (emu123PingSem) xSemaphoreGiveFromISR(emu123PingSem, nullptr);
+        }
       }
     }
   };
@@ -3189,6 +3207,48 @@ void startEmu123() {
   adv->setScanResponseData(sr);
   adv->start();
   emu123Started = true;
+
+  // Semaphor für sofortigen Send nach $ Ping
+  if (!emu123PingSem) emu123PingSem = xSemaphoreCreateBinary();
+
+  // Dedizierter Sender-Task: wartet auf $ Semaphor, sendet sofort RPM-Frame
+  xTaskCreate([](void*) {
+    for (;;) {
+      // Auf $ oder Subscribe warten (max 50ms), dann sofort senden
+      xSemaphoreTake(emu123PingSem, pdMS_TO_TICKS(50));
+      {
+        if (emu123Tx && emu123Subscribed) {
+          // Kompletten Zyklus senden: RPM, ADV, MAP, Temp, Volt, 0x42(end)
+          // Genau wie echte 123TUNE+ nach $\r — App erwartet vollen Zyklus
+          const int rpm = (int)emu123CurRpm;
+          const float adv = 10.0f + (rpm - 700) * 0.004f;
+          const int mapv = 40 + (rpm - 700) / 50;
+          const int tempRaw = (int)(75 + 30); // 75°C
+          const int voltRaw = (int)(13.8f * 4.54f);
+
+          auto sendF = [](uint8_t f, int hi, int lo, bool last) {
+            uint8_t h=(uint8_t)emu123Nib(hi); uint8_t l=(uint8_t)emu123Nib(lo);
+            uint8_t chk=(uint8_t)(f+0x10+(h-0x30)+(l-0x30));
+            uint8_t buf[5]={f,h,l,chk,(uint8_t)(last?0x0D:0x20)};
+            emu123Tx->notify(buf,5);
+          };
+          { int rhi=rpm/800; int rlo=(rpm-rhi*800)/50; sendF(0x30,rhi,rlo,false); }
+          vTaskDelay(1);
+          { int ahi=(int)(adv/3.2f); int alo=(int)((adv-ahi*3.2f)/0.2f); sendF(0x31,ahi,alo,false); }
+          vTaskDelay(1);
+          sendF(0x32,(mapv>>4)&0xF,mapv&0xF,false);
+          vTaskDelay(1);
+          sendF(0x33,(tempRaw>>4)&0xF,tempRaw&0xF,false);
+          vTaskDelay(1);
+          sendF(0x41,(voltRaw>>4)&0xF,voltRaw&0xF,false);
+          vTaskDelay(1);
+          sendF(0x42,0x4,0x6,true);  // Zyklusende mit 0x0D
+          Serial.printf("EMU123 TX:   voller Zyklus rpm=%d\n", rpm);
+        }
+      }
+    }
+  }, "emu123ping", 4096, nullptr, 2, nullptr);
+
   Serial.println("EMU123:      AN — vollstaendige 123TUNE+ Emulation (NUS+DIS+BAT+TxPwr)");
 }
 
