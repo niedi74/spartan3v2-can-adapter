@@ -640,7 +640,11 @@ void loadHubFeatures()
     hubFeatBle123 = false;
     hubFeatBleBm6 = false;
 #endif
+#if ENABLE_EMU123
+    hubFeatEmu123 = true;
+#else
     hubFeatEmu123 = false;
+#endif
 #endif
     hubEspNowChannelPref = 0;
     saveHubFeatures();
