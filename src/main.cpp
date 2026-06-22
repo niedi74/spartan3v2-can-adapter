@@ -264,7 +264,7 @@ constexpr char kBm6TargetAddress[] = "3c:ab:72:7f:d0:bc";
 constexpr char kBm6ServiceUuid[] = "0000fff0-0000-1000-8000-00805f9b34fb";
 constexpr char kBm6WriteUuid[] = "0000fff3-0000-1000-8000-00805f9b34fb";
 constexpr char kBm6NotifyUuid[] = "0000fff4-0000-1000-8000-00805f9b34fb";
-constexpr uint32_t kBm6ScanWindowMs = 3000;   // kurz, damit die 123 (4s Timeout) den Scan ueberlebt
+constexpr uint32_t kBm6ScanWindowMs = 1500;   // 1.5s: BM6 findet sich, 123-Link ueberlebt den Scan
 constexpr uint32_t kBm6ReconnectDelayMs = 8000;
 constexpr uint32_t kBm6TriggerIntervalMs = 2000;
 constexpr uint32_t kBm6MainSlotMs = 45000;   // Batterie (main)
@@ -2372,7 +2372,18 @@ class TuneClientCallbacks : public NimBLEClientCallbacks {
     Serial.printf("123TUNE BLE: disconnected reason=%d\n", reason);
     logHubEvent("tune_state", detail);
     tuneFailStreak = 0;
+#if BLE_BRIDGE
+    // Bridge: kein Scan nach Disconnect — direkt auf bekannte MAC reconnecten.
+    if (tuneSavedAddress.length() == 17) {
+      tuneTargetAddress = NimBLEAddress(std::string(tuneSavedAddress.c_str()));
+      tuneDoConnect = true;
+      Serial.println("123TUNE BLE: Bridge -> direkt reconnect (kein Scan)");
+    } else {
+      scheduleTuneScan(true);
+    }
+#else
     scheduleTuneScan(true);
+#endif
   }
 };
 
@@ -5730,6 +5741,42 @@ void setup()
   Serial.begin(115200);
   delay(500);
 
+#if BLE_BRIDGE
+  // BLE-Bridge: NUR 123\TUNE+, dediziert, kein BM6, kein WLAN, kein Hintergrund-Scan.
+  // Architektur: feste MAC aus NVS (oder Compile-Default) -> direkt verbinden -> bei
+  // Trennung direkt reconnect ohne erneuten Scan. Einmaliger Scan nur wenn keine MAC
+  // gespeichert (erstes Setup). Danach: Verbindung halten = einzige Aufgabe.
+  Serial.println("\n=== BLE-Bridge: NUR 123\\TUNE+, dediziert ===");
+  hubFeatBle123 = true;
+  hubFeatBleBm6 = false;   // BM6 = zweitrangig, separater Chip spaeter
+  hubFeatEmu123 = false;
+  hubFeatEspNow = false;
+  hubFeatAp     = false;
+  hubFeatWifi   = false;
+  NimBLEDevice::init("BLE-Bridge-123");
+  NimBLEDevice::setPower(ESP_PWR_LVL_P9);
+  NimBLEDevice::setMTU(23);
+  // MAC aus NVS laden (vom letzten Setup-Scan), sonst Compile-Default
+  ensurePreferences();
+  if (networkPreferences.isKey("tune_mac")) {
+    tuneSavedAddress = networkPreferences.getString("tune_mac", kTuneTargetAddress);
+  } else {
+    tuneSavedAddress = kTuneTargetAddress;  // ef:a8:b2:de:e0:9e (Default-Emu/echte 123)
+    Serial.printf("Bridge:      kein MAC gespeichert, nutze Default %s\n", kTuneTargetAddress);
+  }
+  tuneSavedAddress.toLowerCase();
+  Serial.printf("Bridge:      Ziel-MAC = %s\n", tuneSavedAddress.c_str());
+  Serial2.begin(115200, SERIAL_8N1, 16, 17);  // UART2 -> S3: RX=GPIO16, TX=GPIO17
+  // MAC als Zieladresse setzen — direkt verbinden ohne Scan.
+  // scheduleTuneScan(true) plant einen schnellen Connect-Versuch (500ms), der über
+  // connectTune() direkt auf tuneTargetAddress geht (kein Scan da addrMatch=1).
+  tuneTargetAddress = NimBLEAddress(std::string(tuneSavedAddress.c_str()));
+  scheduleTuneScan(true);  // startet schnellen Connect (500ms Delay)
+  Serial.printf("Bridge:      Verbinde direkt auf %s (kein Hintergrund-Scan)\n",
+                tuneSavedAddress.c_str());
+  return;
+#endif
+
   setupDisplay();
   printBootDetails();
   loadHubFeatures();
@@ -5774,23 +5821,29 @@ void loop()
   M5.update();
 #endif
 #if BLE_BRIDGE
+  // Bridge-Loop: NUR 123-State-Machine, kein BM6, kein Hintergrund-Scan.
+  // Nach Trennung: direkt reconnect auf gespeicherte MAC (kein neuer Scan).
+  updateTuneBle();
   {
-    // BLE-Coprozessor: 123 + BM6 lesen, Werte per Konsole ausgeben (Test).
-    // Spaeter wird derselbe Datensatz zusaetzlich per UART an den S3 geschickt.
     static uint32_t lastBridgeMs = 0;
     const uint32_t nowB = millis();
     if (nowB - lastBridgeMs >= 500) {
       lastBridgeMs = nowB;
       const TuneSnapshot t = tuneSnapshot();
       const uint32_t tuneAge = t.lastRxMs ? (nowB - t.lastRxMs) : 999999;
-      const uint32_t bm6Age = bm6LastRxMs ? (nowB - bm6LastRxMs) : 999999;
-      Serial.printf("BRIDGE | 123:%-3s rpm=%4d adv=%4.1f map=%3d age=%lums  ||  BM6:%-3s V=%5.2f T=%dC age=%lums\n",
-                    tuneConnected ? "ON" : "off", (int)t.rpm, t.advance, (int)t.map,
-                    (unsigned long)tuneAge,
-                    bm6Connected ? "ON" : "off", bm6Voltage, (int)bm6Temperature,
-                    (unsigned long)bm6Age);
+      // Konsole (Mensch):
+      Serial.printf("BRIDGE | 123:%-3s rpm=%4d adv=%4.1f map=%3d age=%lums\n",
+                    tuneConnected ? "ON " : "off", (int)t.rpm, t.advance, (int)t.map,
+                    (unsigned long)tuneAge);
+      // UART2 -> S3 (Maschine): T,rpm,adv,map,coil,volt,temp
+      if (tuneConnected) {
+        Serial2.printf("T,%d,%.1f,%d,%.1f,%.1f,%d\n",
+                       (int)t.rpm, t.advance, (int)t.map,
+                       t.coilCurrent, t.voltage, (int)t.temperature);
+      }
     }
   }
+  return;
 #endif
   if (!hubFeatEmu123) {   // im Emulator-Modus nur BLE + WebGUI
     updateCan();
