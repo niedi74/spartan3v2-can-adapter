@@ -637,8 +637,13 @@ void loadHubFeatures()
     hubFeatAp = true;
     hubFeatWifi = true;
     hubFeatLog = true;
+#ifdef DEFAULT_BLE123_ON
+    hubFeatBle123 = true;
+    hubFeatBleBm6 = true;
+#else
     hubFeatBle123 = false;
     hubFeatBleBm6 = false;
+#endif
     hubFeatEmu123 = false;
 #endif
     hubEspNowChannelPref = 0;
