@@ -4489,7 +4489,7 @@ async function refresh() {
     document.getElementById('source').textContent = d.source;
     document.getElementById('lambda').textContent = d.valid ? d.lambda.toFixed(3) : '-.---';
     document.getElementById('status').textContent = d.status;
-    document.getElementById('lambdaTestStatus').textContent = d.lambda_test_mode || 'off';
+    const lts=document.getElementById('lambdaTestStatus'); if(lts) lts.textContent = d.lambda_test_mode || 'off';
     document.getElementById('temp').textContent = d.valid ? d.temperature + ' C' : '- C';
     document.getElementById('main123').textContent = (d.rpm ?? 0) + ' / ' + Number(d.advance ?? 0).toFixed(1) + ' / ' + (d.map ?? 0);
     document.getElementById('can').textContent = d.can_ready ? 'aktiv' : 'Fehler';
@@ -4652,7 +4652,7 @@ async function refresh() {
     document.getElementById('hours').textContent = Number(d.device_hours ?? 0).toFixed(2) + ' / ' + Number(d.engine_hours ?? 0).toFixed(2) + ' / ' + Number(d.sensor_hours ?? 0).toFixed(2) + ' h';
     document.getElementById('liveHours').textContent = Number(d.sensor_hours ?? 0).toFixed(2) + ' h';
     document.getElementById('liveHoursMeta').textContent = Number(d.device_hours ?? 0).toFixed(2) + ' / ' + Number(d.engine_hours ?? 0).toFixed(2) + ' / ' + Number(d.sensor_hours ?? 0).toFixed(2) + ' h';
-    document.getElementById('apdiag').textContent = (d.ap_ip || '-') + ' / ' + (d.ap_retry_count ?? 0);
+    const apd=document.getElementById('apdiag'); if(apd) apd.textContent = (d.ap_ip || '-') + ' / ' + (d.ap_retry_count ?? 0);
     document.getElementById('bm6conn').textContent = d.bm6_connected ? 'verbunden' : 'scan/retry';
     cls(document.getElementById('bm6conn'), d.bm6_connected ? 'ok' : 'warn');
     document.getElementById('liveBm6Conn').textContent = d.bm6_connected ? 'verbunden' : 'scan';
