@@ -4234,7 +4234,8 @@ details.setup > .inside { padding: 0 16px 16px; }
 <form action="/ble_target" method="post">
 <label for="tunePreset">123 Profil</label><select id="tunePreset">
 <option value="">Manuell</option>
-<option value="ef:a8:b2:de:e0:9e">123 #1 ef:a8:b2:de:e0:9e</option>
+<option value="ef:a8:b2:de:e0:9e">Echte 123TUNE+ (ef:a8:b2:de:e0:9e)</option>
+<option value="10:20:ba:57:49:b1">Emu COM22 (10:20:ba:57:49:b1)</option>
 </select>
 <label for="tune_mac">123 BLE-Adresse</label><input id="tune_mac" name="tune_mac" placeholder="aa:bb:cc:dd:ee:ff">
 <button type="submit">123 Ziel speichern</button>
@@ -4297,6 +4298,15 @@ details.setup > .inside { padding: 0 16px 16px; }
 </details>
 </div><!-- /tab setup -->
 <div class="tab-section" data-tab="dev" hidden>
+<div class="card">
+<h3>BLE-Scan</h3>
+<p class="hint">Einmal 10s scannen — gefundene Geräte als Ziel setzen.</p>
+<div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
+<button type="button" onclick="devBleScan()">Scan starten (10s)</button>
+<span id="dev_scan_status" class="hint"></span>
+</div>
+<div id="dev_scan_results" style="font-family:monospace;font-size:11px"></div>
+</div>
 <div class="card">
 <h3>Schalter</h3>
 <div class="row"><span>123 BLE</span><span><button type="button" onclick="devFeat('ble123','on')">AN</button> <button type="button" onclick="devFeat('ble123','off')">AUS</button> <strong id="dev_ble123" style="margin-left:8px">-</strong></span></div>
@@ -4381,6 +4391,35 @@ async function wifiConnect(){
 }
 async function devFeat(name,val){try{await fetch('/hub_feat?name='+name+'&val='+val);}catch(e){}}
 async function devLambda(mode){try{await fetch('/lambda_test',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'mode='+mode});}catch(e){}}
+async function devBleScan(){
+  const status=document.getElementById('dev_scan_status');
+  const results=document.getElementById('dev_scan_results');
+  status.textContent=' scanne 10s...'; results.innerHTML='';
+  try {
+    // Scan via bestehender /api/status ble_scan Liste — frisch nach 10s
+    await new Promise(r=>setTimeout(r,10000));
+    const d=await(await fetch('/api/status',{cache:'no-store'})).json();
+    const devs=d.ble_scan||[];
+    if(devs.length===0){status.textContent=' nichts gefunden';return;}
+    status.textContent=' '+devs.length+' Geräte';
+    results.innerHTML=devs.map(x=>{
+      const name=x.name||'---';
+      const is123=x.tune?'✓123':'';
+      const isBm6=x.bm6?'✓BM6':'';
+      return `<div style="padding:3px 0;border-bottom:1px solid #2a3a2e">
+        <span style="color:#9ed85b">${x.addr}</span> ${name} rssi=${x.rssi} ${is123}${isBm6}
+        ${x.tune?`<button type="button" style="margin-left:6px;font-size:10px" onclick="devSetTune('${x.addr}')">als 123 setzen</button>`:''}
+        ${x.bm6?`<button type="button" style="margin-left:4px;font-size:10px" onclick="devSetBm6('${x.addr}')">als BM6 setzen</button>`:''}
+      </div>`;
+    }).join('');
+  } catch(e){status.textContent=' Fehler';}
+}
+async function devSetTune(mac){
+  try{const fd=new FormData();fd.set('tune_mac',mac);await fetch('/ble_target',{method:'POST',body:fd});alert('123-Ziel gesetzt: '+mac);}catch(e){}
+}
+async function devSetBm6(mac){
+  try{const fd=new FormData();fd.set('bm6_mac',mac);await fetch('/bm6_target',{method:'POST',body:fd});alert('BM6-Ziel gesetzt: '+mac);}catch(e){}
+}
 async function devUartSave(){
   const rx=document.getElementById('dev_uart_rx').value||'0';
   const tx=document.getElementById('dev_uart_tx').value||'0';
