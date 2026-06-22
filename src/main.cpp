@@ -3073,15 +3073,18 @@ static bool     emu123Rising = true;
 
 static inline char emu123Nib(int n) { return (n < 10) ? ('0' + n) : ('A' + n - 10); }
 
-static void emu123SendField(uint8_t field, int hi, int lo) {
+static void emu123SendField(uint8_t field, int hi, int lo, bool last = false) {
   if (!emu123Tx) return;
   if (hi < 0) hi = 0; else if (hi > 15) hi = 15;
   if (lo < 0) lo = 0; else if (lo > 15) lo = 15;
-  uint8_t buf[3] = { field, (uint8_t)emu123Nib(hi), (uint8_t)emu123Nib(lo) };
-  // notify(payload,len) sendet den Wert DIREKT — kein gemeinsamer setValue-Puffer,
-  // darum sind jetzt mehrere Notifies pro Tick zuverlässig (vorher kam nur das
-  // letzte Feld an). Das erlaubt RPM-Priorisierung für eine flüssige Drehzahl.
-  emu123Tx->notify(buf, 3);
+  uint8_t h = (uint8_t)emu123Nib(hi);
+  uint8_t l = (uint8_t)emu123Nib(lo);
+  // Checksum: field + 0x10 + (h - 0x30) + (l - 0x30)  (aus 123tune_ble_protocol.md)
+  uint8_t chk = (uint8_t)(field + 0x10 + (h - 0x30) + (l - 0x30));
+  // Terminator: 0x0D (letztes Feld im Zyklus) oder 0x20 (Space = weitere folgen)
+  uint8_t term = last ? 0x0D : 0x20;
+  uint8_t buf[5] = { field, h, l, chk, term };
+  emu123Tx->notify(buf, 5);
 }
 
 // Nach Disconnect muss das Advertising NEU gestartet werden, sonst kann sich
@@ -3102,29 +3105,59 @@ void startEmu123() {
   NimBLEDevice::getScan()->stop();
   NimBLEServer *srv = NimBLEDevice::createServer();
   srv->setCallbacks(&emu123ServerCB);
+
+  // 1. Nordic UART Service (NUS) — Hauptdatenkanal
   NimBLEService *nus = srv->createService(NimBLEUUID("6e400001-b5a3-f393-e0a9-e50e24dcca9e"));
   nus->createCharacteristic(NimBLEUUID("6e400002-b5a3-f393-e0a9-e50e24dcca9e"),
-                            NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);  // RX (kick)
+                            NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);
   emu123Tx = nus->createCharacteristic(NimBLEUUID("6e400003-b5a3-f393-e0a9-e50e24dcca9e"),
-                                       NIMBLE_PROPERTY::NOTIFY);                  // TX (daten)
-  nus->start();
+                                       NIMBLE_PROPERTY::NOTIFY);
 
+  // 2. Device Information Service (0x180A) — App prüft Firmware-String!
+  NimBLEService *dis = srv->createService(NimBLEUUID((uint16_t)0x180A));
+  // Manufacturer Name: "nRF52810 UART AT Command"
+  NimBLECharacteristic *mfgName = dis->createCharacteristic(NimBLEUUID((uint16_t)0x2A29), NIMBLE_PROPERTY::READ);
+  mfgName->setValue(std::string("nRF52810 UART AT Command"));
+  // Firmware Revision: "version: 1.4c(Albertronic BV)" — EXAKT wie echte 123
+  NimBLECharacteristic *fwRev = dis->createCharacteristic(NimBLEUUID((uint16_t)0x2A26), NIMBLE_PROPERTY::READ);
+  fwRev->setValue(std::string("version: 1.4c(Albertronic BV)"));
+  // Serial Number
+  NimBLECharacteristic *serial = dis->createCharacteristic(NimBLEUUID((uint16_t)0x2A25), NIMBLE_PROPERTY::READ);
+  serial->setValue(std::string("no data!"));
+
+  // 3. Battery Service (0x180F) — App zeigt Batteriestand
+  NimBLEService *bat = srv->createService(NimBLEUUID((uint16_t)0x180F));
+  NimBLECharacteristic *batLvl = bat->createCharacteristic(NimBLEUUID((uint16_t)0x2A19),
+                                  NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY);
+  uint8_t batVal = 80;  // 80% — plausibel für laufendes Fahrzeug
+  batLvl->setValue(&batVal, 1);
+
+  // 4. Tx Power Service (0x1804)
+  NimBLEService *txpwr = srv->createService(NimBLEUUID((uint16_t)0x1804));
+  NimBLECharacteristic *txpwrLvl = txpwr->createCharacteristic(NimBLEUUID((uint16_t)0x2A07), NIMBLE_PROPERTY::READ);
+  uint8_t txpwrVal = 4;  // 4 dBm
+  txpwrLvl->setValue(&txpwrVal, 1);
+
+  // Services starten
+  srv->start();
+
+  // Advertising — exakt wie echte 123TUNE+ (aus nRF Connect Log)
   NimBLEAdvertising *adv = NimBLEDevice::getAdvertising();
   adv->stop();
   NimBLEAdvertisementData ad;
-  ad.setFlags(0x06);
+  ad.setFlags(0x06);  // LE General Discoverable, BR/EDR Not Supported
   ad.addServiceUUID(NimBLEUUID("6e400001-b5a3-f393-e0a9-e50e24dcca9e"));
   NimBLEAdvertisementData sr;
   sr.setName("123\\TUNE+");
-  std::string mfg;  // Company 2330 (0x091A, LE) + DeviceType 5 + Serial
-  mfg += (char)0x1A; mfg += (char)0x09; mfg += (char)0x00;
-  mfg += (char)0x05; mfg += (char)0x50; mfg += (char)0x6C;
+  std::string mfg;  // Albertronic BV (0x091A) + 0x00 + 0x05506C
+  mfg += (char)0x1A; mfg += (char)0x09;  // Company ID 0x091A (LE)
+  mfg += (char)0x00; mfg += (char)0x05; mfg += (char)0x50; mfg += (char)0x6C;
   sr.setManufacturerData(mfg);
   adv->setAdvertisementData(ad);
   adv->setScanResponseData(sr);
   adv->start();
   emu123Started = true;
-  Serial.println("EMU123:      AN — advertised als '123\\TUNE+' (NUS, Company 2330)");
+  Serial.println("EMU123:      AN — vollstaendige 123TUNE+ Emulation (NUS+DIS+BAT+TxPwr)");
 }
 
 void stopEmu123() {
@@ -3193,7 +3226,12 @@ void updateEmu123() {
     case 1: emu123SendField(0x32, (mapv >> 4) & 0xF, mapv & 0xF); break;   // MAP
     case 2: emu123SendField(0x33, (tempRaw >> 4) & 0xF, tempRaw & 0xF); break;  // Temp
     case 3: emu123SendField(0x35, (coilRaw >> 4) & 0xF, coilRaw & 0xF); break;  // Coil
-    default: emu123SendField(0x41, (voltRaw >> 4) & 0xF, voltRaw & 0xF); break; // Volt
+    default:
+      emu123SendField(0x41, (voltRaw >> 4) & 0xF, voltRaw & 0xF); // Volt
+      // 0x42-Frame = Zyklusende (konstant 70 = 0x46), terminator 0x0D
+      // Echte 123 sendet diesen immer als letzten Frame pro Zyklus.
+      emu123SendField(0x42, 0x4, 0x6, true);  // last=true → 0x0D terminator
+      break;
   }
   sec = (sec + 1) % 5;
 }
