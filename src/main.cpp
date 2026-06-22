@@ -3094,12 +3094,8 @@ class Emu123TxCB : public NimBLECharacteristicCallbacks {
   void onSubscribe(NimBLECharacteristic *c, NimBLEConnInfo &, uint16_t val) override {
     emu123Subscribed = (val == 1 || val == 2);
     Serial.printf("EMU123:      Subscribe CCCD=%u -> %s\n", val, emu123Subscribed?"AN":"AUS");
-    if (emu123Subscribed && emu123Tx) {
-      // Sofort ersten Frame senden — App wartet auf Daten um Verbindung zu halten
-      vTaskDelay(pdMS_TO_TICKS(50));
-      uint8_t buf[5] = { 0x30, '0', '0', 0x40, 0x20 };  // RPM=0 als ersten Frame
-      emu123Tx->notify(buf, 5);
-      emu123LastMs = 0;  // weiterer sofortiger Send im nächsten Tick
+    if (emu123Subscribed) {
+      emu123LastMs = 0;  // sofortiger Send im nächsten Loop-Tick
     }
   }
 };
@@ -3126,23 +3122,45 @@ void startEmu123() {
 
   // 1. Nordic UART Service (NUS) — Hauptdatenkanal
   NimBLEService *nus = srv->createService(NimBLEUUID("6e400001-b5a3-f393-e0a9-e50e24dcca9e"));
+
+  // RX-Command-Handler: App schreibt AT-Commands, Emu antwortet über TX
   class EmuRxCB : public NimBLECharacteristicCallbacks {
     void onWrite(NimBLECharacteristic *c, NimBLEConnInfo &) override {
       std::string val = c->getValue();
-      Serial.printf("EMU123 RX:   len=%u hex=", val.length());
-      for (size_t i=0;i<val.length()&&i<16;i++) Serial.printf("%02X ",val[i]);
-      Serial.println();
+      // ASCII-Command extrahieren (z.B. "$", "I@\r", "v@\r", "PW1234!")
+      std::string cmd(val.begin(), val.end());
+      Serial.printf("EMU123 RX:   '%s' (len=%u)\n", cmd.c_str(), val.length());
+      if (!emu123Tx) return;
+      // AT-Command-Antworten (aus APK-Analyse: AuthorizeCommand, ReadInfoCommand)
+      if (cmd.find("I@") != std::string::npos) {
+        // Device Info: "I@<UID>,<License>,<Flags>\r"
+        std::string resp = "I@12345678,STANDARD,00\r";
+        emu123Tx->notify((uint8_t*)resp.c_str(), resp.length());
+        Serial.println("EMU123 TX:   I@ response");
+      } else if (cmd.find("v@") != std::string::npos) {
+        // Firmware/Settings: "v@<Version> <Cyl> <Curve> <Data>\r"
+        std::string resp = "v@1.4c 4 1 0\r";
+        emu123Tx->notify((uint8_t*)resp.c_str(), resp.length());
+        Serial.println("EMU123 TX:   v@ response");
+      } else if (cmd.find("PW") != std::string::npos) {
+        // Auth: immer OK (kein echtes Passwort)
+        std::string resp = "OK\r";
+        emu123Tx->notify((uint8_t*)resp.c_str(), resp.length());
+        Serial.println("EMU123 TX:   PW -> OK");
+      } else if (cmd[0] == '$' || cmd[0] == 0x24) {
+        // Ping — Flag setzen, Loop sendet beim nächsten Tick sofort
+        emu123LastMs = 0;
+      }
     }
   };
   static EmuRxCB emuRxCB;
   auto *rxChar = nus->createCharacteristic(NimBLEUUID("6e400002-b5a3-f393-e0a9-e50e24dcca9e"),
                             NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);
-  rxChar->setCallbacks(&emuRxCB);  // loggt was die App schreibt
+  rxChar->setCallbacks(&emuRxCB);
   emu123Tx = nus->createCharacteristic(NimBLEUUID("6e400003-b5a3-f393-e0a9-e50e24dcca9e"),
                                        NIMBLE_PROPERTY::NOTIFY);
   emu123Tx->setCallbacks(&emu123TxCB);
-  // Expliziter CCCD-Descriptor (0x2902) — App schreibt 0x0100 darauf für Subscribe
-  emu123Tx->createDescriptor("2902", NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::WRITE);
+  // NimBLE erstellt CCCD automatisch bei NOTIFY-Property — kein expliziter Descriptor nötig
 
   // 2. Device Information Service (0x180A) — minimal, schnelle Discovery
   NimBLEService *dis = srv->createService(NimBLEUUID((uint16_t)0x180A));
