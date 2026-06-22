@@ -226,6 +226,16 @@ constexpr uint32_t kBleNotifyIntervalMs = 250;
 // 40 ms = 25 Hz. Frames sind winzig (17 B), das ist für ESP-NOW unkritisch.
 constexpr uint32_t kEspNowSendIntervalMs = 40;
 constexpr uint32_t kCanStaleMs = 500;
+// BLE-Bridge UART: C6/AZ -> S3 GPIO6(RX)/GPIO7(TX), 115200 Baud.
+// GPIO4/5 am S3 sind JTAG-Pins -> nach Boot als UART-RX unzuverlaessig.
+// GPIO6/7 sind freie Standard-GPIOs ohne Sonderfunktion.
+// Protokoll: "T,rpm,adv,map,coil,volt,temp\n"
+#ifndef BRIDGE_UART_RX_PIN
+#define BRIDGE_UART_RX_PIN 38
+#endif
+#ifndef BRIDGE_UART_TX_PIN
+#define BRIDGE_UART_TX_PIN 39
+#endif
 constexpr uint32_t kHomeWifiConnectWindowMs = 45000;  // 45s: BLE-Koexistenz verlangsamt den STA-Connect; 15s wuergte ihn ab
 constexpr float kLambdaAtZeroVolt = 0.68f;
 constexpr float kLambdaAtFiveVolt = 1.36f;
@@ -2375,7 +2385,7 @@ class TuneClientCallbacks : public NimBLEClientCallbacks {
 #if BLE_BRIDGE
     // Bridge: kein Scan nach Disconnect — direkt auf bekannte MAC reconnecten.
     if (tuneSavedAddress.length() == 17) {
-      tuneTargetAddress = NimBLEAddress(std::string(tuneSavedAddress.c_str()));
+      tuneTargetAddress = NimBLEAddress(std::string(tuneSavedAddress.c_str()), BLE_ADDR_RANDOM);
       tuneDoConnect = true;
       Serial.println("123TUNE BLE: Bridge -> direkt reconnect (kein Scan)");
     } else {
@@ -4744,6 +4754,16 @@ setInterval(() => {
     server.sendHeader("Connection", "close");
     server.send(200, "application/json", otaProgressJson());
   });
+  server.on("/uart_test", HTTP_GET, []() {
+    // Loopback-Test: sendet auf Serial1 TX (GPIO39) und liest RX (GPIO38) zurück.
+    Serial1.printf("T,9999,45.0,100,3.0,14.0,80\n");
+    Serial1.flush();
+    delay(50);
+    String rx = "";
+    while (Serial1.available()) rx += (char)Serial1.read();
+    server.send(200, "application/json",
+      "{\"sent\":\"T,9999,45.0,100\",\"recv\":\"" + rx + "\",\"rx_gpio\":" + String(BRIDGE_UART_RX_PIN) + ",\"tx_gpio\":" + String(BRIDGE_UART_TX_PIN) + "}");
+  });
   server.on("/restart", HTTP_POST, []() {
     server.sendHeader("Connection", "close");
     server.send(200, "text/html",
@@ -5573,6 +5593,59 @@ void setupUart()
 #endif
 }
 
+void setupBridgeUart()
+{
+  Serial1.begin(115200, SERIAL_8N1, BRIDGE_UART_RX_PIN, BRIDGE_UART_TX_PIN);
+  Serial.printf("Bridge UART: 115200 8N1 RX=GPIO%d TX=GPIO%d (AZ-ESP32 BLE-Bridge)\n",
+                BRIDGE_UART_RX_PIN, BRIDGE_UART_TX_PIN);
+}
+
+// Parst eine Bridge-Zeile "T,rpm,adv,map,coil,volt,temp" und schreibt direkt
+// in die tune-Globals — exakt wie onTuneNotify, aber per UART statt BLE.
+static void processBridgeLine(const String &line)
+{
+  if (line.length() < 3) return;
+  if (line[0] == 'T' && line[1] == ',') {
+    // T,rpm,adv,map[,coil,volt,temp]
+    int idx = 2, field = 0;
+    float vals[6] = {0};
+    while (idx < (int)line.length() && field < 6) {
+      int comma = line.indexOf(',', idx);
+      String tok = (comma < 0) ? line.substring(idx) : line.substring(idx, comma);
+      vals[field++] = tok.toFloat();
+      if (comma < 0) break;
+      idx = comma + 1;
+    }
+    portENTER_CRITICAL(&stateMux);
+    tuneRpm         = vals[0];
+    tuneAdvance     = vals[1];
+    tuneMap         = vals[2];
+    tuneCoilCurrent = (field > 3) ? vals[3] : tuneCoilCurrent;
+    tuneVoltage     = (field > 4) ? vals[4] : tuneVoltage;
+    tuneTemperature = (field > 5) ? vals[5] : tuneTemperature;
+    if (tuneRxCount < UINT32_MAX) tuneRxCount++;
+    portEXIT_CRITICAL(&stateMux);
+    tuneLastRxMs = millis();
+    tuneConnected = true;  // Bridge liefert — gilt als "verbunden"
+  }
+}
+
+static String bridgeUartBuf;
+
+void updateBridgeUart()
+{
+  while (Serial1.available()) {
+    const char c = static_cast<char>(Serial1.read());
+    if (c == '\n') {
+      bridgeUartBuf.trim();
+      if (bridgeUartBuf.length() > 0) processBridgeLine(bridgeUartBuf);
+      bridgeUartBuf = "";
+    } else if (c != '\r' && bridgeUartBuf.length() < 64) {
+      bridgeUartBuf += c;
+    }
+  }
+}
+
 void updateUart()
 {
 #if ENABLE_SPARTAN_UART
@@ -5766,11 +5839,12 @@ void setup()
   }
   tuneSavedAddress.toLowerCase();
   Serial.printf("Bridge:      Ziel-MAC = %s\n", tuneSavedAddress.c_str());
-  Serial2.begin(115200, SERIAL_8N1, 16, 17);  // UART2 -> S3: RX=GPIO16, TX=GPIO17
+  // UART zum S3: TX=GPIO4, RX=GPIO5 (C6: freie Pins, kein Strapping/DAC)
+  Serial1.begin(115200, SERIAL_8N1, 5, 4);  // RX=GPIO5, TX=GPIO4
   // MAC als Zieladresse setzen — direkt verbinden ohne Scan.
   // scheduleTuneScan(true) plant einen schnellen Connect-Versuch (500ms), der über
   // connectTune() direkt auf tuneTargetAddress geht (kein Scan da addrMatch=1).
-  tuneTargetAddress = NimBLEAddress(std::string(tuneSavedAddress.c_str()));
+  tuneTargetAddress = NimBLEAddress(std::string(tuneSavedAddress.c_str()), BLE_ADDR_RANDOM);
   scheduleTuneScan(true);  // startet schnellen Connect (500ms Delay)
   Serial.printf("Bridge:      Verbinde direkt auf %s (kein Hintergrund-Scan)\n",
                 tuneSavedAddress.c_str());
@@ -5804,6 +5878,7 @@ void setup()
     setupCan();
     setupUart();
     setupSpeedReed();
+    setupBridgeUart();  // BLE-Bridge UART: AZ-ESP32 GPIO17->S3-GPIO4
   } else {
     Serial.println("EMU123:      123-Emulator (CAN/UART/Speed aus, ESP-NOW Fan-out an)");
   }
@@ -5835,12 +5910,12 @@ void loop()
       Serial.printf("BRIDGE | 123:%-3s rpm=%4d adv=%4.1f map=%3d age=%lums\n",
                     tuneConnected ? "ON " : "off", (int)t.rpm, t.advance, (int)t.map,
                     (unsigned long)tuneAge);
-      // UART2 -> S3 (Maschine): T,rpm,adv,map,coil,volt,temp
-      if (tuneConnected) {
-        Serial2.printf("T,%d,%.1f,%d,%.1f,%.1f,%d\n",
-                       (int)t.rpm, t.advance, (int)t.map,
-                       t.coilCurrent, t.voltage, (int)t.temperature);
-      }
+      // UART2 (GPIO25 TX) -> S3 GPIO4 RX: immer senden fuer Loopback-Test
+      Serial1.printf("T,%d,%.1f,%d,%.1f,%.1f,%d\n",
+                     (int)t.rpm, t.advance, (int)t.map,
+                     t.coilCurrent, t.voltage, (int)t.temperature);
+      Serial1.flush();
+      Serial.printf("UART-TX GPIO4: T,%d,%.1f,%d\n", (int)t.rpm, t.advance, (int)t.map);
     }
   }
   return;
@@ -5852,6 +5927,7 @@ void loop()
     updateAnalog();
     updateHeaterAnalog();
     updateUart();
+    updateBridgeUart();  // 123-Werte von AZ-ESP32 BLE-Bridge per UART
     updateSpeedReed();
     updateHourmeters();
     appendLiveCsv();
