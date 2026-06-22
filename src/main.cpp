@@ -2361,12 +2361,11 @@ void scheduleTuneScan(bool fastRetry = false)
   if (!fastRetry) {
     tuneFailStreak++;
   }
+  // Backoff: max 5s damit Reconnect immer schnell passiert (war: bis 30s!)
   uint32_t delayMs = fastRetry ? 500UL : kTuneReconnectDelayMs;
   if (!fastRetry && tuneFailStreak > 1) {
-    delayMs = kTuneReconnectDelayMs * tuneFailStreak;
-    if (delayMs > kTuneReconnectBackoffMaxMs) {
-      delayMs = kTuneReconnectBackoffMaxMs;
-    }
+    delayMs = kTuneReconnectDelayMs * min((uint32_t)tuneFailStreak, 2UL); // max 2× = 10s
+    if (delayMs > 5000UL) delayMs = 5000UL;  // niemals länger als 5s
   }
   tuneNextScanMs = millis() + delayMs;
   setTuneLinkState(TuneLinkState::Idle, fastRetry ? "retry_fast" : "retry_scheduled");
@@ -2980,12 +2979,7 @@ void updateTuneBle()
 {
   const uint32_t now = millis();
   if (tuneDoConnect) {
-    // BLE-Connect in eigenem FreeRTOS-Task: Loop + WebServer laufen weiter
-    tuneDoConnect = false;
-    xTaskCreate([](void*){
-      connectTune();
-      vTaskDelete(nullptr);
-    }, "tuneConnect", 8192, nullptr, 1, nullptr);
+    connectTune();
     return;
   }
   sendTunePing();
@@ -3094,12 +3088,25 @@ static void emu123SendField(uint8_t field, int hi, int lo, bool last = false) {
 
 // Nach Disconnect muss das Advertising NEU gestartet werden, sonst kann sich
 // kein Central wieder verbinden (NimBLE stoppt Advertising bei Connect).
+static bool emu123Subscribed = false;
+
+class Emu123TxCB : public NimBLECharacteristicCallbacks {
+  void onSubscribe(NimBLECharacteristic *c, NimBLEConnInfo &, uint16_t val) override {
+    emu123Subscribed = (val == 1 || val == 2);
+    Serial.printf("EMU123:      Subscribe CCCD=%u -> %s\n", val, emu123Subscribed?"AN":"AUS");
+    if (emu123Subscribed) emu123LastMs = 0;  // sofort senden nach Subscribe
+  }
+};
+static Emu123TxCB emu123TxCB;
+
 class Emu123ServerCB : public NimBLEServerCallbacks {
   void onConnect(NimBLEServer *, NimBLEConnInfo &) override {
     Serial.println("EMU123:      Central verbunden");
+    emu123Subscribed = false;
   }
   void onDisconnect(NimBLEServer *, NimBLEConnInfo &, int reason) override {
     Serial.printf("EMU123:      Central getrennt (r=%d) -> re-advertise\n", reason);
+    emu123Subscribed = false;
     NimBLEDevice::getAdvertising()->start();
   }
 };
@@ -3113,38 +3120,34 @@ void startEmu123() {
 
   // 1. Nordic UART Service (NUS) — Hauptdatenkanal
   NimBLEService *nus = srv->createService(NimBLEUUID("6e400001-b5a3-f393-e0a9-e50e24dcca9e"));
-  nus->createCharacteristic(NimBLEUUID("6e400002-b5a3-f393-e0a9-e50e24dcca9e"),
+  class EmuRxCB : public NimBLECharacteristicCallbacks {
+    void onWrite(NimBLECharacteristic *c, NimBLEConnInfo &) override {
+      std::string val = c->getValue();
+      Serial.printf("EMU123 RX:   len=%u hex=", val.length());
+      for (size_t i=0;i<val.length()&&i<16;i++) Serial.printf("%02X ",val[i]);
+      Serial.println();
+    }
+  };
+  static EmuRxCB emuRxCB;
+  auto *rxChar = nus->createCharacteristic(NimBLEUUID("6e400002-b5a3-f393-e0a9-e50e24dcca9e"),
                             NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);
+  rxChar->setCallbacks(&emuRxCB);  // loggt was die App schreibt
   emu123Tx = nus->createCharacteristic(NimBLEUUID("6e400003-b5a3-f393-e0a9-e50e24dcca9e"),
                                        NIMBLE_PROPERTY::NOTIFY);
+  emu123Tx->setCallbacks(&emu123TxCB);
+  // Expliziter CCCD-Descriptor (0x2902) — App schreibt 0x0100 darauf für Subscribe
+  emu123Tx->createDescriptor("2902", NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::WRITE);
 
-  // 2. Device Information Service (0x180A) — App prüft Firmware-String!
+  // 2. Device Information Service (0x180A) — minimal, schnelle Discovery
   NimBLEService *dis = srv->createService(NimBLEUUID((uint16_t)0x180A));
-  // Manufacturer Name: "nRF52810 UART AT Command"
-  NimBLECharacteristic *mfgName = dis->createCharacteristic(NimBLEUUID((uint16_t)0x2A29), NIMBLE_PROPERTY::READ);
-  mfgName->setValue(std::string("nRF52810 UART AT Command"));
-  // Firmware Revision: "version: 1.4c(Albertronic BV)" — EXAKT wie echte 123
   NimBLECharacteristic *fwRev = dis->createCharacteristic(NimBLEUUID((uint16_t)0x2A26), NIMBLE_PROPERTY::READ);
   fwRev->setValue(std::string("version: 1.4c(Albertronic BV)"));
-  // Serial Number
-  NimBLECharacteristic *serial = dis->createCharacteristic(NimBLEUUID((uint16_t)0x2A25), NIMBLE_PROPERTY::READ);
-  serial->setValue(std::string("no data!"));
-
-  // 3. Battery Service (0x180F) — App zeigt Batteriestand
-  NimBLEService *bat = srv->createService(NimBLEUUID((uint16_t)0x180F));
-  NimBLECharacteristic *batLvl = bat->createCharacteristic(NimBLEUUID((uint16_t)0x2A19),
-                                  NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY);
-  uint8_t batVal = 80;  // 80% — plausibel für laufendes Fahrzeug
-  batLvl->setValue(&batVal, 1);
-
-  // 4. Tx Power Service (0x1804)
-  NimBLEService *txpwr = srv->createService(NimBLEUUID((uint16_t)0x1804));
-  NimBLECharacteristic *txpwrLvl = txpwr->createCharacteristic(NimBLEUUID((uint16_t)0x2A07), NIMBLE_PROPERTY::READ);
-  uint8_t txpwrVal = 4;  // 4 dBm
-  txpwrLvl->setValue(&txpwrVal, 1);
 
   // Services starten
   srv->start();
+
+  // Generic Access Device Name auf "123\TUNE+" setzen (App liest 0x2A00!)
+  NimBLEDevice::setDeviceName("123\\TUNE+");
 
   // Advertising — exakt wie echte 123TUNE+ (aus nRF Connect Log)
   NimBLEAdvertising *adv = NimBLEDevice::getAdvertising();
