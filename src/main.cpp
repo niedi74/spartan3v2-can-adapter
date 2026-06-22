@@ -245,13 +245,16 @@ constexpr char kTuneNusRxUuid[] = "6e400002-b5a3-f393-e0a9-e50e24dcca9e";
 constexpr char kTuneNusTxUuid[] = "6e400003-b5a3-f393-e0a9-e50e24dcca9e";
 constexpr uint32_t kTuneScanWindowMs = 6000;
 constexpr uint32_t kTuneReconnectDelayMs = 5000;
-constexpr uint32_t kTunePingIntervalMs = 1650;
+constexpr uint32_t kTunePingIntervalMs = 1000;  // 1s: häufigere Keepalives (war 1650ms)
 constexpr uint32_t kBleHubAdvertiseFallbackMs = 30000;
-// 12 s statt 3 s: am Tisch liefert der Emu die 123 in Schüben (WLAN+BLE-Koexistenz
-// auf dem Emu). Mit 3 s kappte der Hub die voll funktionierende Verbindung bei jedem
-// kurzen Schub-Loch und verlor dabei auch BM6-Scanzeit. 12 s hält die Verbindung
-// stabil durch und reconnectet nur, wenn die 123 wirklich weg ist.
+// Stale-Timeout je nach Modus:
+// Emu (WLAN+BLE-Koexistenz): 12s für Schub-Lücken-Pufferung
+// Echte 123TUNE+ (nRF52810): kontinuierlich 8-12 Hz, 6s = 75× Sicherheitsmarge
+#if ENABLE_EMU123
 constexpr uint32_t kTuneStaleRxMs = 12000;
+#else
+constexpr uint32_t kTuneStaleRxMs = 6000;
+#endif
 constexpr uint32_t kTuneReconnectBackoffMaxMs = 30000;
 
 enum class TuneLinkState : uint8_t {
@@ -2518,7 +2521,9 @@ void connectTune()
     tuneClient = NimBLEDevice::createClient();
     tuneClient->setClientCallbacks(&tuneClientCallbacks, false);
   }
-  tuneClient->setConnectionParams(16, 32, 0, 400);
+  // Echte 123TUNE+ stabilisiert sich auf 30ms Interval, Supervision 4000ms.
+  // min=24(30ms) max=30(37.5ms) enger als vorher (16-40ms) → weniger Jitter.
+  tuneClient->setConnectionParams(24, 30, 0, 400);
   Serial.println("123TUNE BLE: connecting...");
   if (!tuneClient->connect(tuneTargetAddress, true, false, false)) {
     Serial.println("123TUNE BLE: connect failed");
@@ -2526,7 +2531,7 @@ void connectTune()
     scheduleTuneScan(false);
     return;
   }
-  delay(750);
+  delay(1000);  // 1s statt 750ms: gibt nRF52810 Zeit zur GATT-Stabilisierung
 
   NimBLERemoteService *service = tuneClient->getService(kTuneNusServiceUuid);
   if (service == nullptr) {
@@ -3018,6 +3023,22 @@ void updateTuneDebug()
   if (now - lastTuneDebugMs < 2000) return;
   lastTuneDebugMs = now;
   const TuneSnapshot tune = tuneSnapshot();
+#if !ENABLE_EMU123 && defined(ENABLE_BLE_HUB)
+  // Dynamische Coexistenz: Motor läuft = BLE Vorrang (kein WiFi-Jitter).
+  // Motor aus = Balance (WebGUI erreichbar für Konfiguration).
+  static bool lastEngineRunning = false;
+  const bool engineRunning = tune.rpm > ENGINE_RUNNING_RPM_THRESHOLD;
+  if (engineRunning != lastEngineRunning) {
+    lastEngineRunning = engineRunning;
+    if (engineRunning) {
+      esp_coex_preference_set(ESP_COEX_PREFER_BT);
+      Serial.println("Coex:        Motor läuft -> PREFER_BT (max BLE-Stabilität)");
+    } else {
+      esp_coex_preference_set(ESP_COEX_PREFER_BALANCE);
+      Serial.println("Coex:        Motor aus -> PREFER_BALANCE (WebGUI aktiv)");
+    }
+  }
+#endif
   Serial.printf("123TUNE BLE: conn=%d rx=%lu rpm=%d adv=%.1f map=%d age=%lu\n",
                 tuneConnected ? 1 : 0,
                 static_cast<unsigned long>(tune.rxCount),
