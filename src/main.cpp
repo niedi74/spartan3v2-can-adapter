@@ -226,16 +226,12 @@ constexpr uint32_t kBleNotifyIntervalMs = 250;
 // 40 ms = 25 Hz. Frames sind winzig (17 B), das ist für ESP-NOW unkritisch.
 constexpr uint32_t kEspNowSendIntervalMs = 40;
 constexpr uint32_t kCanStaleMs = 500;
-// BLE-Bridge UART: C6/AZ -> S3 GPIO6(RX)/GPIO7(TX), 115200 Baud.
-// GPIO4/5 am S3 sind JTAG-Pins -> nach Boot als UART-RX unzuverlaessig.
-// GPIO6/7 sind freie Standard-GPIOs ohne Sonderfunktion.
-// Protokoll: "T,rpm,adv,map,coil,volt,temp\n"
-#ifndef BRIDGE_UART_RX_PIN
-#define BRIDGE_UART_RX_PIN 21
-#endif
-#ifndef BRIDGE_UART_TX_PIN
-#define BRIDGE_UART_TX_PIN 20
-#endif
+// BLE-Bridge UART: optionaler zweiter ESP32 liefert 123-Daten per UART.
+// Pin-Belegung wird zur Laufzeit per Dev-Tab gesetzt und in NVS gespeichert.
+// RX-Pin 0 = UART-Bridge deaktiviert (Default nach Erase).
+// Protokoll: "T,rpm,adv,map,coil,volt,temp\n" oder "BLE: LIVE rpm=X adv=Y map=Z"
+static uint8_t bridgeUartRxPin = 0;   // 0 = aus; wird aus NVS geladen
+static uint8_t bridgeUartTxPin = 0;
 constexpr uint32_t kHomeWifiConnectWindowMs = 45000;  // 45s: BLE-Koexistenz verlangsamt den STA-Connect; 15s wuergte ihn ab
 constexpr float kLambdaAtZeroVolt = 0.68f;
 constexpr float kLambdaAtFiveVolt = 1.36f;
@@ -1638,6 +1634,10 @@ String statusJson()
   json += String(static_cast<unsigned long>(bm6RxCount));
   json += ",\"bm6_poll_sec\":";
   json += String(bm6PollIntervalMs / 1000);
+  json += ",\"uart_rx_pin\":";
+  json += String(bridgeUartRxPin);
+  json += ",\"uart_tx_pin\":";
+  json += String(bridgeUartTxPin);
   json += ",\"bm6_decode_fail\":";
   json += String(static_cast<unsigned long>(bm6DecodeFailCount));
   json += ",\"bm6_age_ms\":";
@@ -4251,6 +4251,18 @@ details.setup > .inside { padding: 0 16px 16px; }
 </div>
 </div>
 <div class="card">
+<h3>UART-Bridge (2. ESP32)</h3>
+<p class="hint">Optionaler zweiter ESP32 liefert 123-Daten per UART. RX-Pin eingeben, 0 = aus. Gilt nach Neustart.</p>
+<div class="row"><span>Status</span><strong id="dev_uart_status">-</strong></div>
+<div style="display:flex;gap:8px;margin-top:8px;align-items:center">
+<label style="margin:0">RX-Pin:</label>
+<input id="dev_uart_rx" type="number" min="0" max="48" value="0" style="width:60px;padding:6px;border-radius:6px;border:1px solid #3a5a3a;background:#1a2a1a;color:#eee">
+<label style="margin:0">TX-Pin:</label>
+<input id="dev_uart_tx" type="number" min="0" max="48" value="0" style="width:60px;padding:6px;border-radius:6px;border:1px solid #3a5a3a;background:#1a2a1a;color:#eee">
+<button type="button" onclick="devUartSave()">Speichern &amp; Neustart</button>
+</div>
+</div>
+<div class="card">
 <h3>BM6 Abfrageintervall</h3>
 <div class="row"><span>Aktuell</span><strong id="dev_bm6interval">-</strong></div>
 <div style="display:flex;gap:8px;margin-top:8px">
@@ -4295,6 +4307,11 @@ async function wifiConnect(){
 }
 async function devFeat(name,val){try{await fetch('/hub_feat?name='+name+'&val='+val);}catch(e){}}
 async function devLambda(mode){try{await fetch('/lambda_test',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'mode='+mode});}catch(e){}}
+async function devUartSave(){
+  const rx=document.getElementById('dev_uart_rx').value||'0';
+  const tx=document.getElementById('dev_uart_tx').value||'0';
+  try{await fetch('/uart_config?rx='+rx+'&tx='+tx);alert('Gespeichert – Hub startet neu');}catch(e){}
+}
 async function devBm6Interval(sec){try{await fetch('/bm6_interval?sec='+sec);document.getElementById('dev_bm6interval').textContent=sec+'s';}catch(e){}}
 let lastJson = {};
 function showTab(name) {
@@ -4533,6 +4550,9 @@ async function refresh() {
       sd('dev_espnow', d.hub_feat_espnow); sd('dev_log', d.hub_feat_log);
       const dl=document.getElementById('dev_lambda'); if(dl) dl.textContent=(d.lambda_test_mode||'off');
       const di=document.getElementById('dev_bm6interval'); if(di&&d.bm6_poll_sec) di.textContent=d.bm6_poll_sec+'s';
+      const us=document.getElementById('dev_uart_status'); if(us) us.textContent=d.uart_rx_pin>0?('RX=GPIO'+d.uart_rx_pin):'aus';
+      const ur=document.getElementById('dev_uart_rx'); if(ur&&document.activeElement!==ur) ur.value=d.uart_rx_pin||0;
+      const ut=document.getElementById('dev_uart_tx'); if(ut&&document.activeElement!==ut) ut.value=d.uart_tx_pin||0;
     }
     document.getElementById('tuneLinkState').textContent = d.tune_link_state ?? '-';
     document.getElementById('blename').textContent = d.ble_name || '-';
@@ -4700,6 +4720,16 @@ setInterval(() => {
   };
   server.on("/state", sendStatus);
   server.on("/api/status", sendStatus);
+  server.on("/uart_config", HTTP_GET, []() {
+    uint8_t rx = (uint8_t)server.arg("rx").toInt();
+    uint8_t tx = (uint8_t)server.arg("tx").toInt();
+    ensurePreferences();
+    networkPreferences.putUChar("uart_rx", rx);
+    networkPreferences.putUChar("uart_tx", tx);
+    Serial.printf("Bridge UART: konfiguriert RX=%d TX=%d -> Reboot\n", rx, tx);
+    server.send(200,"application/json","{\"ok\":true,\"rx\":"+String(rx)+",\"tx\":"+String(tx)+"}");
+    delay(300); ESP.restart();
+  });
   server.on("/bm6_interval", HTTP_GET, []() {
     uint32_t sec = server.arg("sec").toInt();
     if (sec >= 10 && sec <= 3600) {
@@ -4747,14 +4777,10 @@ setInterval(() => {
     server.send(200, "application/json", otaProgressJson());
   });
   server.on("/uart_test", HTTP_GET, []() {
-    // Loopback-Test: sendet auf Serial1 TX (GPIO39) und liest RX (GPIO38) zurück.
-    Serial1.printf("T,9999,45.0,100,3.0,14.0,80\n");
-    Serial1.flush();
-    delay(50);
-    String rx = "";
-    while (Serial1.available()) rx += (char)Serial1.read();
-    server.send(200, "application/json",
-      "{\"sent\":\"T,9999,45.0,100\",\"recv\":\"" + rx + "\",\"rx_gpio\":" + String(BRIDGE_UART_RX_PIN) + ",\"tx_gpio\":" + String(BRIDGE_UART_TX_PIN) + "}");
+    if (bridgeUartRxPin == 0) { server.send(200,"application/json","{\"ok\":false,\"msg\":\"UART nicht konfiguriert\"}"); return; }
+    Serial1.printf("T,9999,45.0,100,3.0,14.0,80\n"); Serial1.flush(); delay(50);
+    String rx = ""; while (Serial1.available()) rx += (char)Serial1.read();
+    server.send(200,"application/json","{\"sent\":\"T,9999\",\"recv\":\""+rx+"\",\"rx\":"+String(bridgeUartRxPin)+",\"tx\":"+String(bridgeUartTxPin)+"}");
   });
   server.on("/restart", HTTP_POST, []() {
     server.sendHeader("Connection", "close");
@@ -5587,9 +5613,15 @@ void setupUart()
 
 void setupBridgeUart()
 {
-  Serial1.begin(115200, SERIAL_8N1, BRIDGE_UART_RX_PIN, BRIDGE_UART_TX_PIN);
-  Serial.printf("Bridge UART: 115200 8N1 RX=GPIO%d TX=GPIO%d (AZ-ESP32 BLE-Bridge)\n",
-                BRIDGE_UART_RX_PIN, BRIDGE_UART_TX_PIN);
+  ensurePreferences();
+  bridgeUartRxPin = networkPreferences.getUChar("uart_rx", 0);
+  bridgeUartTxPin = networkPreferences.getUChar("uart_tx", 0);
+  if (bridgeUartRxPin > 0) {
+    Serial1.begin(115200, SERIAL_8N1, bridgeUartRxPin, bridgeUartTxPin > 0 ? bridgeUartTxPin : -1);
+    Serial.printf("Bridge UART: RX=GPIO%d TX=GPIO%d\n", bridgeUartRxPin, bridgeUartTxPin);
+  } else {
+    Serial.println("Bridge UART: aus (kein RX-Pin konfiguriert)");
+  }
 }
 
 // Parst eine Bridge-Zeile "T,rpm,adv,map,coil,volt,temp" und schreibt direkt
@@ -5640,6 +5672,7 @@ static String bridgeUartBuf;
 
 void updateBridgeUart()
 {
+  if (bridgeUartRxPin == 0) return;  // nicht konfiguriert
   while (Serial1.available()) {
     const char c = static_cast<char>(Serial1.read());
     if (c == '\n') {

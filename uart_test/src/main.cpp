@@ -1,37 +1,24 @@
 #include <Arduino.h>
-// Systematischer Pin-Test: testet UART TX auf GPIO4, 5, 6, 7, 15 nacheinander.
-// Jeder Pin sendet 10x, dann weiter. Loopback auf S3-GPIO38 zeigt welcher ankommt.
+// C6 sendet kontinuierlich T,rpm,adv,map auf GPIO5 (TX), kein Loopback.
+// Hub-S3 GPIO21 (RX) empfaengt und zeigt rpm/adv/map in Live-Seite.
 
-const int TX_PINS[] = {4, 5, 6, 7, 15, 0, 1, 2, 3};
-const int N_PINS = 9;
-int pinIdx = 0;
-int sendCount = 0;
-
-HardwareSerial testSer(1);  // UART1
+HardwareSerial uart1(1);
+uint32_t cnt = 0;
 
 void setup() {
   Serial.begin(115200);
-  delay(1000);
-  Serial.println("=== C6 TX-Pin-Scan ===");
+  delay(500);
+  Serial.println("=== C6 Bridge TX GPIO5 ===");
+  uart1.begin(115200, SERIAL_8N1, 4, 5); // RX=GPIO4, TX=GPIO5
 }
 
 void loop() {
-  int txPin = TX_PINS[pinIdx];
-  if (sendCount == 0) {
-    testSer.end();
-    delay(50);
-    testSer.begin(115200, SERIAL_8N1, -1, txPin); // nur TX, kein RX
-    delay(50);
-    Serial.printf("Testing TX on GPIO%d\n", txPin);
-  }
-  String msg = "P" + String(txPin) + "," + String(sendCount) + "\n";
-  testSer.print(msg);
-  testSer.flush();
-  Serial.printf("SENT GPIO%d: %s", txPin, msg.c_str());
-  delay(300);
-  sendCount++;
-  if (sendCount >= 6) {
-    sendCount = 0;
-    pinIdx = (pinIdx + 1) % N_PINS;
-  }
+  delay(500);
+  int rpm = 700 + (cnt % 50) * 50;  // 700-3150 sweep
+  float adv = 10.0 + (cnt % 30) * 0.8;
+  int map = 40 + (cnt % 60);
+  String msg = "T," + String(rpm) + "," + String(adv,1) + "," + String(map) + ",2.5,13.8,75\n";
+  uart1.print(msg);
+  Serial.printf("TX: %s", msg.c_str());
+  cnt++;
 }
