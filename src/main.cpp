@@ -632,6 +632,16 @@ void loadHubFeatures()
     hubFeatEspNow = false; hubFeatAp = false; hubFeatWifi = false; hubFeatLog = false;
     hubFeatBle123 = true;  hubFeatBleBm6 = true;  hubFeatEmu123 = false;
 #else
+#ifdef MINIMAL_123
+    // Minimal-Modus: NUR 123-BLE + Lambda(CAN) + Log + Web. KEIN BM6 (2. BLE-
+    // Verbindung), KEIN ESP-NOW. Das entlastet den NimBLE-ACL-Pool -> stabile 123.
+    hubFeatEspNow = false;
+    hubFeatAp = true;       // AP fuer Web/API-Zugriff waehrend Fahrt
+    hubFeatWifi = false;    // kein STA-Suchen waehrend Fahrt (entlastet Funk)
+    hubFeatLog = true;
+    hubFeatBle123 = true;
+    hubFeatBleBm6 = false;  // BM6 AUS -> nur EINE BLE-Verbindung = stabil
+#else
     hubFeatEspNow = true;
     hubFeatAp = true;
     hubFeatWifi = true;
@@ -642,6 +652,7 @@ void loadHubFeatures()
 #else
     hubFeatBle123 = false;
     hubFeatBleBm6 = false;
+#endif
 #endif
 #if ENABLE_EMU123
     hubFeatEmu123 = true;
@@ -3155,18 +3166,52 @@ void startEmu123() {
         emu123LastMs = 0;
         if (emu123PingSem) xSemaphoreGiveFromISR(emu123PingSem, nullptr);
       } else if (cmd[0] == '\r' || cmd[0] == 0x0D) {
-        // CR nach $ — v@-Response schicken (echte 123 antwortet auf $\r mit Status)
+        // CR — ignorieren, wird zusammen mit $ als Ping verarbeitet
+      } else if (cmd.find("v@") != std::string::npos) {
+        // v@\r → Firmware/Version/Live-Werte (aus Referenz-Impl)
         if (emu123Tx && emu123Subscribed) {
-          // v@\r Voltage/Temp/Pressure + Version (aus Referenz-Impl)
-          // Format: v@\r + Volt(2) + Temp(2) + Pressure(2) + Version(9)
-          const int voltRaw = (int)(13.8f * 4.54f + 0.5f);
-          const int tempRaw = (int)(75 + 30);
-          const int presRaw = 100;  // 100 kPa
-          char resp[32];
-          snprintf(resp, sizeof(resp), "v@\r%02X%02X%02X41-10-45 ",
-                   voltRaw, tempRaw, presRaw);
-          emu123Tx->notify((uint8_t*)resp, strlen(resp));
+          uint8_t r[18] = { 0x76,0x40,0x0D,
+            0x34,0x33,  // Volt: 13.8V
+            0x34,0x39,  // Temp: 75°C
+            0x37,0x34,  // Pressure: 100kPa
+            0x34,0x31,0x2D,0x31,0x30,0x2D,0x34,0x35,0x20 }; // "41-10-45 "
+          emu123Tx->notify(r, sizeof(r));
+          Serial.println("EMU123 TX:   v@ response");
           if (emu123PingSem) xSemaphoreGiveFromISR(emu123PingSem, nullptr);
+        }
+      } else if (cmd.find("I@") != std::string::npos) {
+        // I@\r → Device Info
+        if (emu123Tx && emu123Subscribed) {
+          std::string resp = "I@12345678,STANDARD,00\r";
+          emu123Tx->notify((uint8_t*)resp.c_str(), resp.length());
+          Serial.println("EMU123 TX:   I@ response");
+        }
+      } else if (cmd.find("10@") != std::string::npos || cmd.find("11@") != std::string::npos ||
+                 cmd.find("12@") != std::string::npos || cmd.find("13@") != std::string::npos) {
+        // EEPROM-Block-Antworten (Zündkurven) — 59 Bytes in 3x20 Fragmenten
+        if (emu123Tx && emu123Subscribed) {
+          // Aus Referenz-Impl ble.ino: Standard VW T2b 4-Zyl Kurve
+          // Block 10: RPM+Advance Punkte 1-7
+          uint8_t b10[59] = {
+            0x31,0x30,0x40,0x0D,  // header "10@\r"
+            0x46,0x46,0x20, 0x46,0x46,0x20,  // FF FF (leer)
+            0x30,0x41,0x20, 0x30,0x30,0x20,  // RPM500, Adv0
+            0x30,0x45,0x20, 0x30,0x35,0x20,  // RPM750, Adv5
+            0x31,0x30,0x20, 0x30,0x41,0x20,  // RPM1000, Adv10
+            0x31,0x34,0x20, 0x30,0x46,0x20,  // RPM1250, Adv15
+            0x31,0x45,0x20, 0x31,0x34,0x20,  // RPM1500, Adv20
+            0x32,0x34,0x20, 0x31,0x38,0x20,  // RPM2000, Adv24
+            0x33,0x43,0x20, 0x31,0x43,0x20,  // RPM3000, Adv28
+            0x31,0x30, 0x35,0x38,0x35,0x0D   // "10" + csum + CR
+          };
+          const char *hdr = cmd.c_str();
+          b10[0]=(uint8_t)hdr[0]; b10[1]=(uint8_t)hdr[1];  // richtigen Block-Header
+          emu123Tx->notify(&b10[0], 20);
+          vTaskDelay(pdMS_TO_TICKS(20));
+          emu123Tx->notify(&b10[20], 20);
+          vTaskDelay(pdMS_TO_TICKS(20));
+          emu123Tx->notify(&b10[40], 19);
+          Serial.printf("EMU123 TX:   %s response\n", hdr);
         }
       }
     }
@@ -3189,7 +3234,7 @@ void startEmu123() {
   srv->start();
 
   // Generic Access Device Name auf "123\TUNE+" setzen (App liest 0x2A00!)
-  NimBLEDevice::setDeviceName("123\\TUNE+");
+  NimBLEDevice::setDeviceName("123\\TUNE+ ");
 
   // Advertising — exakt wie echte 123TUNE+ (aus nRF Connect Log)
   NimBLEAdvertising *adv = NimBLEDevice::getAdvertising();
