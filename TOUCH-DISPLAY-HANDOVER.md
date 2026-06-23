@@ -5,27 +5,48 @@
 > **eigenständiges Gerät** und holt die Daten vom Hub — der Hub selbst bleibt unverändert
 > (Single-Purpose-123-Client, siehe unten).
 
-## Zuerst prüfen
-- **Branch `claude/esp32-s3-touch-display-abuiy3`** auf GitHub (`niedi74/spartan3v2-can-adapter`)
-  könnte bereits Vorarbeit enthalten — vor Neubeginn ansehen/auschecken.
-- Aktueller, sauberer Stand der Firmware liegt auf Branch **`test-hub-s3`**.
+## Status (Stand 2026-06-23) — **HTTP-Poll bereits implementiert und verifiziert**
 
-## Architektur-Entscheidung (Datenquelle)
+Die Kernarbeit ist erledigt. Das Display läuft auf Branch **`claude/cranky-proskuriakova-cafad7`**
+im Repo **`waveshare-vdo-clock`** (`D:\_claude\waveshare-vdo-clock`). Aktueller Commit:
+`9eb22e0 Add graphical cockpit dashboard + HTTP/CAN data paths + WebGUI WiFi entry`.
+
+Was bereits funktioniert (live getestet 2026-06-23):
+- Grafisches Cockpit-Dashboard (Zeiger-Instrumente) läuft auf dem Display.
+- **HTTP-Poll auf `GET /api/status`** des Hubs liefert Daten: Lambda, RPM, ADV, VOLT, TEMP, AMP.
+- CAN-Listen auf `id=0x510` (GPIO43/44, mode=listen) ist bereit.
+- WebGUI zum Einstellen der Hub-IP (WLAN-Profil wechseln: AP `192.168.4.1` ↔ Heimnetz).
+- Der frühere Architektur-Konflikt (Display versuchte selbst 123-BLE-Client → `err=13`) ist behoben —
+  Display holt Daten jetzt **ausschließlich** per HTTP vom Hub.
+
+## Noch offen / nächste Schritte
+
+1. **BLE-Scan im Display abschalten** — das Display scannt noch ins Leere nach `Spartan3-Hub`
+   (BLE rx = 0). Da HTTP die Quelle ist, kann der BLE-Client im Display entfernt werden.
+2. **CAN von Hub-Seite aktivieren** — Hub sendet noch keine CAN-Frames (kein `0x400`-Sender am Bus).
+   Wenn der Spartan/Lambda-Sender läuft: Hub-seitig `rx_err=128` / `source=TEST` werden sich klären.
+3. **Gauge-Layout verfeinern** — Rundinstrumente auf dem 480×480-Panel weiter optimieren.
+4. **Stromversorgung** — Einbau: 12 V (Auto) → 5 V → Display-Board.
+
+## Firmware-Stand im Repo
+
+- **Repo:** `waveshare-vdo-clock` (separates Repo, NICHT `spartan3v2-can-adapter`)
+- **Aktiver Branch:** `claude/cranky-proskuriakova-cafad7`
+- **Parallel-Branch:** `cursor/webgui-ota-c56e` (OTA-/WebGUI-Arbeit, Uhr-Fix committed)
+- **Veralteter Branch:** `claude/esp32-s3-touch-display-abuiy3` — ältere Variante, nicht mehr relevant
+
+## Architektur (implementiert)
+
 Der Hub (ESP32-S3, Env `motorraum_s3_test_com14`) ist bewusst **minimal**: nur 123-BLE +
-Lambda(CAN) + Logging + Web/API. ESP-NOW und BM6 sind dort **wegkompiliert**
-(`build_unflags` → `=0`). Für das Display daher der einfachste, robuste Weg:
+Lambda(CAN) + Logging + Web/API. ESP-NOW und BM6 sind dort **wegkompiliert**.
 
-**HTTP-Poll der Hub-JSON-API** — das Display verbindet sich mit dem Hub-WLAN und pollt
-`GET /api/status` (alle ~200–500 ms). Kein zusätzlicher Funk-Stress, kein Pairing.
-
+Das Display holt Daten per **HTTP-Poll `GET /api/status`** (alle ~200–500 ms):
 - Hub im Auto = **AP-only**: SSID `Spartan3-TestHub`, Passwort `lambda123`, `http://192.168.4.1/`
 - Hub am Schreibtisch = zusätzlich im Heimnetz (STA), z. B. `http://192.168.0.91/`
-- Alternative wäre ESP-NOW (Hub hat `include/spartan_cockpit_frame.h` + Broadcast-Code,
-  aber auf dem Minimal-Hub deaktiviert). HTTP-Poll ist für ein einzelnes Display einfacher.
-  → **Empfehlung: HTTP-Poll.** ESP-NOW nur wenn mehrere Displays/sehr niedrige Latenz nötig.
+- Display-IP im Heimnetz: `192.168.0.109`, Hostname `esp-touch2.8`
 
 ## Verfügbare Daten (`GET /api/status`, JSON)
-Relevante Felder (Stand test-hub-s3):
+
 | Feld | Bedeutung | 123TUNE+ Instrument |
 | --- | --- | --- |
 | `rpm` | Drehzahl | U/min |
@@ -45,6 +66,7 @@ Relevante Felder (Stand test-hub-s3):
 (Komplettes Beispiel-JSON per `curl http://192.168.4.1/api/status` ziehen.)
 
 ## Ziel-Layout (Original 123TUNE+ Dashboard nachbauen)
+
 Fünf Rundinstrumente + zentral Drehzahl:
 - **Kurbelwelle Vorverstellung °** (`advance`, ~0–50)
 - **U/min** (`rpm`, 0–8000) — zentral, groß; darin klein die **Reed-Geschwindigkeit** (`speed_kmh`)
@@ -53,10 +75,8 @@ Fünf Rundinstrumente + zentral Drehzahl:
 - **TEMP °C** (`tune_temp`, -20…100)
 - Zusätzlich prominenter **Lambda**-Wert (statt GPS)
 
-Die bestehende Web-GUI des Hubs zeigt diese Werte bereits als Kacheln (Live-Tab) — als
-Referenz für Wertebereiche/Beschriftung nutzen.
-
 ## Hardware — ERMITTELT (COM13, 2026-06-23)
+
 Board: **Waveshare ESP32-S3-Touch-LCD-2.8C** (Serial-Boot meldet sich als „Waveshare 2.8C VDO Clock").
 - **SoC:** ESP32-S3 (QFN56) rev v0.2 — WiFi+BLE, **8 MB PSRAM**, **16 MB Flash**, 40 MHz Crystal.
   MAC `a0:f2:62:e3:a9:84`, Hostname `esp-touch2.8`.
@@ -68,54 +88,16 @@ Board: **Waveshare ESP32-S3-Touch-LCD-2.8C** (Serial-Boot meldet sich als „Wav
 - Pin-Hinweise aus Boot-Log: CAN cockpit `TX=GPIO43 RX=GPIO44`. RGB/PCA-Pins aus Waveshare-Doku
   bzw. existierender Firmware übernehmen.
 
-### Es existiert bereits Firmware auf dem Board!
-Die aktuelle Firmware (vermutlich Branch `claude/esp32-s3-touch-display-abuiy3`) kann schon:
-- VDO-Uhr-Zifferblatt zeichnen (nutzt `assets/t2b-clock/` PNGs), RGB-Panel + GT911 + IMU + RTC laufen.
-- **CAN-RX** auf `id=0x510` (mode=listen) — TX=43, RX=44.
-- WiFi (STA), WebGUI auf Port 80, NTP.
-- **ABER:** versucht, **selbst** den 123 per BLE zu verbinden (`mode=123 dir mac=ef:a8:b2:de:e0:9e`)
-  und scheitert mit `connect FAIL err=13`.
-
-### ⚠️ Architektur-Konflikt unbedingt zuerst lösen
-Das Display darf **NICHT** zusätzlich 123-BLE-Client sein. Der **Hub hält die EINZIGE
-123-Verbindung** (123/Emu erlaubt nur einen Central). Doppelter Client = Dauerkampf → `err=13`.
-**Lösung:** im Display den eigenen 123-BLE-Client **entfernen/deaktivieren** und Daten stattdessen
-vom Hub ziehen:
-- **Variante A (empfohlen):** HTTP-Poll `GET http://<hub>/api/status` (Felder s. o.).
-- **Variante B:** CAN — der Display hört eh schon auf `0x510`. Dann muss der **Hub** die 123-Werte
-  als CAN-Frame senden (aktuell sendet der Minimal-Hub das nicht). Mehr Firmware-Arbeit am Hub.
-→ Start mit Variante A (Hub unverändert lassen).
-
-### Bestehende Display-Firmware (Web-GUI auf `http://<display>/`, Titel „VDO Uhr")
-Live ausgelesen (Display-IP im Heimnetz z. B. `192.168.0.109`). Vorhandene Endpunkte/Seiten:
-- **Anzeige-Seiten:** `GET /page?p=N` → 0=Uhr, 1=Menu, 2=**Motor**, 3=**Lambda**, 4=**Hub**, 5=Setup, 6=IMU.
-  D. h. Motor-/Lambda-/Hub-Screens sind schon angelegt.
-- **Daten kommen aktuell per BLE:** Karte „Spartan-Hub Live" zeigt „BLE scanning/wartet, RX: 0";
-  Feature-Schalter `GET /features?ble=1` („BLE-Hub Daten aktiv"). Das Display will also den
-  **BLE-GATT-Server des Hubs** abgreifen — funktioniert aber NICHT gegen den Minimal-Hub
-  (`ENABLE_BLE_DISPLAY=0`, kein GATT-Server) und kämpft mit dem direkten 123-Versuch (`err=13`).
-- Weitere Endpunkte: `/wifi` (SSID/Pass setzen, `?clear=1`), `/set?rot=…&scale=…` (Zifferblatt
-  Rotation/Größe), `/features` (wifi/ble/buzzer).
-- Hostname `esp-touch2.8`, WebGUI Port 80.
-
-→ **Empfohlene Umstellung:** den BLE-Datenpfad des Displays durch **HTTP-Poll auf
-`http://<hub>/api/status`** ersetzen (Display hat WiFi/WebGUI schon). Motor/Lambda/Hub-Seiten
-mit den JSON-Feldern aus der Tabelle oben füllen. Hub bleibt dabei unverändert.
-
-### Offen
-- Stromversorgung/Einbau (Auto 12 V → 5 V).
-- Rundes 480×480-Panel: Gauge-Layout aufs runde Format anpassen (passt gut zum VDO-Look).
-- Hub-Adresse fürs Display: Auto = AP `192.168.4.1`, Heimnetz = `192.168.0.91`.
-
-## Repo-Konventionen
-- PlatformIO; neue Env z. B. `[env:touch_display]` (eigenes Board).
-- **Keine Secrets committen** (WLAN-Passwörter etc.). AP-Passwort `lambda123` ist das
-  Geräte-AP-Passwort und bereits im Repo — kein echtes Geheimnis.
-- Toolchain für die zugehörige Android-WebView-App liegt unter `android/hubdisplay/`
-  (nicht relevant fürs Display, nur zur Info).
-
 ## Kontext „warum der Hub minimal ist" (Hintergrund)
+
 Die 123-BLE-Verbindung war instabil, weil der NimBLE-Host durch WiFi/ESP-NOW/BM6
-verhungerte (ACL-Buffer-Erschöpfung) und ein Write-MIT-Response-Ping mit dem Notify-Flut
+verhungerte (ACL-Buffer-Erschöpfung) und ein Write-MIT-Response-Ping mit der Notify-Flut
 kollidierte. Fix: Minimal-Modus (BM6/ESP-NOW raus, Buffer verdoppelt) + Write-OHNE-Response.
 Darum soll der Hub schlank bleiben — **Display zieht Daten, statt den Hub zu belasten.**
+
+## Repo-Konventionen
+
+- PlatformIO; neue Env im `waveshare-vdo-clock`-Repo (eigenes Board, eigene platformio.ini).
+- **Keine Secrets committen** (WLAN-Passwörter etc.). AP-Passwort `lambda123` ist das
+  Geräte-AP-Passwort und bereits im Repo — kein echtes Geheimnis.
+- Hub-Repo (`spartan3v2-can-adapter`) bleibt unverändert — kein Grund, dort etwas anzufassen.
