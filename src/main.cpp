@@ -635,12 +635,12 @@ void loadHubFeatures()
 #ifdef MINIMAL_123
     // Minimal-Modus: NUR 123-BLE + Lambda(CAN) + Log + Web. KEIN BM6 (2. BLE-
     // Verbindung), KEIN ESP-NOW. Das entlastet den NimBLE-ACL-Pool -> stabile 123.
-    hubFeatEspNow = false;
+    hubFeatEspNow = false;  // kein ESP-NOW (entlastet Funk + NimBLE-Host)
     hubFeatAp = true;       // AP fuer Web/API-Zugriff waehrend Fahrt
-    hubFeatWifi = false;    // kein STA-Suchen waehrend Fahrt (entlastet Funk)
+    hubFeatWifi = true;     // STA an: Hub im Heimnetz erreichbar (Verifikation + Zugriff)
     hubFeatLog = true;
     hubFeatBle123 = true;
-    hubFeatBleBm6 = false;  // BM6 AUS -> nur EINE BLE-Verbindung = stabil
+    hubFeatBleBm6 = false;  // BM6 AUS -> nur EINE BLE-Verbindung = stabiler ACL-Pool
 #else
     hubFeatEspNow = true;
     hubFeatAp = true;
