@@ -2608,9 +2608,9 @@ void connectTune()
   if (tuneNusRx != nullptr) {
     const uint8_t ping = '$';
     const uint8_t enter = '\r';
-    const bool pingOk = tuneNusRx->writeValue(&ping, 1, true);
+    const bool pingOk = tuneNusRx->writeValue(&ping, 1, false);
     vTaskDelay(pdMS_TO_TICKS(120));
-    const bool enterOk = tuneNusRx->writeValue(&enter, 1, true);
+    const bool enterOk = tuneNusRx->writeValue(&enter, 1, false);
     tuneLastPingMs = millis();
     Serial.printf("123TUNE BLE: wake '$' %s, CR %s\n",
                   pingOk ? "OK" : "FAIL",
@@ -2626,7 +2626,10 @@ void sendTunePing()
   tuneLastPingMs = now;
 
   const uint8_t ping = '$';
-  const bool ok = tuneNusRx->writeValue(&ping, 1, true);
+  // Write OHNE Response (false): unter Notify-Flut (Motor laeuft) kollidiert ein
+  // Write-MIT-Response mit dem Notify-Strom -> GATT-Prozedurfehler -> lokale
+  // Terminierung (reason 534). Die 123-RX unterstuetzt WRITE_NO_RESPONSE.
+  const bool ok = tuneNusRx->writeValue(&ping, 1, false);
   Serial.printf("123TUNE BLE: ping -> %s\n", ok ? "OK" : "FAIL");
 }
 
