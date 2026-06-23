@@ -2077,11 +2077,25 @@ void ensureLogHeader()
   if (!needsHeader) return;
   File f = SPIFFS.open(kLogFile, FILE_WRITE);
   if (!f) {
-    logFsReady = false;
-    logCurrentBytes = 0;
-    logOldBytes = 0;
-    setLogError("header_open_failed");
-    return;
+    // Stale SPIFFS from previous flash — force format once and retry.
+    Serial.println("Logs:        header_open_failed, forcing SPIFFS format recovery");
+    SPIFFS.end();
+    if (!SPIFFS.format() || !SPIFFS.begin(false)) {
+      logFsReady = false;
+      logCurrentBytes = 0;
+      logOldBytes = 0;
+      setLogError("header_open_failed");
+      return;
+    }
+    f = SPIFFS.open(kLogFile, FILE_WRITE);
+    if (!f) {
+      logFsReady = false;
+      logCurrentBytes = 0;
+      logOldBytes = 0;
+      setLogError("header_open_failed");
+      return;
+    }
+    logHubEvent("log_fs", "format_recovered_header");
   }
   f.println(expectedHeader);
   logCurrentBytes = f.size();
