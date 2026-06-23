@@ -86,9 +86,26 @@ vom Hub ziehen:
   als CAN-Frame senden (aktuell sendet der Minimal-Hub das nicht). Mehr Firmware-Arbeit am Hub.
 → Start mit Variante A (Hub unverändert lassen).
 
+### Bestehende Display-Firmware (Web-GUI auf `http://<display>/`, Titel „VDO Uhr")
+Live ausgelesen (Display-IP im Heimnetz z. B. `192.168.0.109`). Vorhandene Endpunkte/Seiten:
+- **Anzeige-Seiten:** `GET /page?p=N` → 0=Uhr, 1=Menu, 2=**Motor**, 3=**Lambda**, 4=**Hub**, 5=Setup, 6=IMU.
+  D. h. Motor-/Lambda-/Hub-Screens sind schon angelegt.
+- **Daten kommen aktuell per BLE:** Karte „Spartan-Hub Live" zeigt „BLE scanning/wartet, RX: 0";
+  Feature-Schalter `GET /features?ble=1` („BLE-Hub Daten aktiv"). Das Display will also den
+  **BLE-GATT-Server des Hubs** abgreifen — funktioniert aber NICHT gegen den Minimal-Hub
+  (`ENABLE_BLE_DISPLAY=0`, kein GATT-Server) und kämpft mit dem direkten 123-Versuch (`err=13`).
+- Weitere Endpunkte: `/wifi` (SSID/Pass setzen, `?clear=1`), `/set?rot=…&scale=…` (Zifferblatt
+  Rotation/Größe), `/features` (wifi/ble/buzzer).
+- Hostname `esp-touch2.8`, WebGUI Port 80.
+
+→ **Empfohlene Umstellung:** den BLE-Datenpfad des Displays durch **HTTP-Poll auf
+`http://<hub>/api/status`** ersetzen (Display hat WiFi/WebGUI schon). Motor/Lambda/Hub-Seiten
+mit den JSON-Feldern aus der Tabelle oben füllen. Hub bleibt dabei unverändert.
+
 ### Offen
 - Stromversorgung/Einbau (Auto 12 V → 5 V).
 - Rundes 480×480-Panel: Gauge-Layout aufs runde Format anpassen (passt gut zum VDO-Look).
+- Hub-Adresse fürs Display: Auto = AP `192.168.4.1`, Heimnetz = `192.168.0.91`.
 
 ## Repo-Konventionen
 - PlatformIO; neue Env z. B. `[env:touch_display]` (eigenes Board).
