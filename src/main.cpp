@@ -4109,12 +4109,14 @@ details.setup > .inside { padding: 0 16px 16px; }
   .tabs { gap: 6px; margin: 2px 0 8px; padding-top: 3px; padding-bottom: 3px; }
   .tab { padding: 8px 12px; }
   .card { padding: 10px; }
-  .lambda { font-size: 1.9rem; margin: 0 0 6px; }
-  .metrics { grid-template-columns: repeat(auto-fit,minmax(150px,1fr)); gap: 8px; margin: 8px 0 4px; }
-  .metric { min-height: 0; padding: 8px 10px; }
-  .metric span { font-size: .7rem; }
-  .metric strong { font-size: 1.05rem; margin-top: 3px; }
-  .metric.wide { grid-column: span 2; }
+  #featBadges { display: none; }
+  .lambda { font-size: 1.5rem; margin: 0; display: inline-block; }
+  .topline { margin-bottom: 4px; }
+  .metrics { grid-template-columns: repeat(auto-fit,minmax(135px,1fr)); gap: 6px; margin: 6px 0 4px; }
+  .metric { min-height: 0; padding: 6px 9px; }
+  .metric span { font-size: .68rem; }
+  .metric strong { font-size: 1rem; margin-top: 2px; }
+  .metric.wide { grid-column: auto; }
 }
 </style>
 </head>
@@ -4130,7 +4132,7 @@ details.setup > .inside { padding: 0 16px 16px; }
 <div class="tab-section" data-tab="live">
 <div class="card">
 <div class="topline"><span id="source" class="tag">START</span><span id="wifiTop" class="mono">offline</span></div>
-<p class="hint" style="margin:0 0 10px;line-height:1.9">
+<p class="hint" id="featBadges" style="margin:0 0 10px;line-height:1.9">
 <span class="tag" id="featAp">AP -</span>
 <span class="tag" id="featWifi">WLAN -</span>
 <span class="tag" id="featBle123">123 -</span>
