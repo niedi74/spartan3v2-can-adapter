@@ -56,12 +56,39 @@ Fünf Rundinstrumente + zentral Drehzahl:
 Die bestehende Web-GUI des Hubs zeigt diese Werte bereits als Kacheln (Live-Tab) — als
 Referenz für Wertebereiche/Beschriftung nutzen.
 
-## Hardware — offene Punkte (im neuen Chat klären)
-- **Exaktes Panel-Modell** des „2.8" ESP32-S3 Touch" bestimmen (Hersteller/Treiber):
-  Display-Controller (z. B. ST7789 / ILI9341), Touch (CST816 / FT6236 / XPT2046),
-  Auflösung (240x320?), Pin-Mapping. Davon hängt die Lib ab (LVGL + TFT_eSPI o. ä.).
-- Stromversorgung / Einbau (Auto, 12 V → 5 V).
-- Quer- oder Hochformat (Cockpit eher quer).
+## Hardware — ERMITTELT (COM13, 2026-06-23)
+Board: **Waveshare ESP32-S3-Touch-LCD-2.8C** (Serial-Boot meldet sich als „Waveshare 2.8C VDO Clock").
+- **SoC:** ESP32-S3 (QFN56) rev v0.2 — WiFi+BLE, **8 MB PSRAM**, **16 MB Flash**, 40 MHz Crystal.
+  MAC `a0:f2:62:e3:a9:84`, Hostname `esp-touch2.8`.
+- **Display: RGB-Panel** (NICHT SPI/ST7789!) — RGB-Interface über das S3-LCD-Peripheral,
+  Steuerleitungen über **PCA9554 I/O-Expander** (I2C), Init per SPI. Framebuffer im PSRAM.
+  → Treiber: ESP-IDF `esp_lcd` RGB-Panel bzw. LVGL mit RGB-Bus (Klasse ST7701S). **Kein TFT_eSPI.**
+- **Touch: GT911** (I2C-Adresse 0x5D, id 911).
+- **IMU: QMI8658** (I2C 0x6B). **Onboard-RTC** (läuft). PCA9554 für Backlight/Reset/CS.
+- Pin-Hinweise aus Boot-Log: CAN cockpit `TX=GPIO43 RX=GPIO44`. RGB/PCA-Pins aus Waveshare-Doku
+  bzw. existierender Firmware übernehmen.
+
+### Es existiert bereits Firmware auf dem Board!
+Die aktuelle Firmware (vermutlich Branch `claude/esp32-s3-touch-display-abuiy3`) kann schon:
+- VDO-Uhr-Zifferblatt zeichnen (nutzt `assets/t2b-clock/` PNGs), RGB-Panel + GT911 + IMU + RTC laufen.
+- **CAN-RX** auf `id=0x510` (mode=listen) — TX=43, RX=44.
+- WiFi (STA), WebGUI auf Port 80, NTP.
+- **ABER:** versucht, **selbst** den 123 per BLE zu verbinden (`mode=123 dir mac=ef:a8:b2:de:e0:9e`)
+  und scheitert mit `connect FAIL err=13`.
+
+### ⚠️ Architektur-Konflikt unbedingt zuerst lösen
+Das Display darf **NICHT** zusätzlich 123-BLE-Client sein. Der **Hub hält die EINZIGE
+123-Verbindung** (123/Emu erlaubt nur einen Central). Doppelter Client = Dauerkampf → `err=13`.
+**Lösung:** im Display den eigenen 123-BLE-Client **entfernen/deaktivieren** und Daten stattdessen
+vom Hub ziehen:
+- **Variante A (empfohlen):** HTTP-Poll `GET http://<hub>/api/status` (Felder s. o.).
+- **Variante B:** CAN — der Display hört eh schon auf `0x510`. Dann muss der **Hub** die 123-Werte
+  als CAN-Frame senden (aktuell sendet der Minimal-Hub das nicht). Mehr Firmware-Arbeit am Hub.
+→ Start mit Variante A (Hub unverändert lassen).
+
+### Offen
+- Stromversorgung/Einbau (Auto 12 V → 5 V).
+- Rundes 480×480-Panel: Gauge-Layout aufs runde Format anpassen (passt gut zum VDO-Look).
 
 ## Repo-Konventionen
 - PlatformIO; neue Env z. B. `[env:touch_display]` (eigenes Board).
