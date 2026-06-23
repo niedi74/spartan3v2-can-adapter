@@ -1641,6 +1641,8 @@ String statusJson()
   json += String(static_cast<int>(tune.temperature));
   json += ",\"volt\":";
   json += String(tune.voltage, 1);
+  json += ",\"tune_amp\":";
+  json += String(tune.coilCurrent, 2);
 #if ENABLE_BM6
   json += ",\"bm6_connected\":";
   json += bm6Connected ? "true" : "false";
@@ -1825,7 +1827,7 @@ String logHeader()
 {
   String header = "ms;epoch;time";
   if (logCol(kLogColSpartan)) header += ";source;lambda_valid;lambda;spartan_temp_c;spartan_status";
-  if (logCol(kLogColTune)) header += ";rpm;advance;map;tune_volt";
+  if (logCol(kLogColTune)) header += ";rpm;advance;map;tune_volt;tune_temp;tune_amp";
   if (logCol(kLogColBm6)) header += ";bm6_volt;bm6_temp";
   if (logCol(kLogColSpeed)) header += ";speed_kmh;speed_hz;speed_pulses";
   if (logCol(kLogColHeater)) header += ";heater_v";
@@ -2150,11 +2152,13 @@ void appendLiveCsv()
              spartan.status);
   }
   if (logCol(kLogColTune)) {
-    f.printf(";%.0f;%.1f;%.0f;%.1f",
+    f.printf(";%.0f;%.1f;%.0f;%.1f;%.0f;%.2f",
              tune.rpm,
              tune.advance,
              tune.map,
-             tune.voltage);
+             tune.voltage,
+             tune.temperature,
+             tune.coilCurrent);
   }
   if (logCol(kLogColBm6)) {
 #if ENABLE_BLE_HUB && ENABLE_BM6
@@ -4069,11 +4073,11 @@ button.danger { background: #8b3c2e; color: #ffe8dc; }
 .ok { color: #9ed85b; }
 .warn { color: #ffd166; }
 .bad { color: #ff6b6b; }
-.metrics { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 10px; margin: 12px 0 4px; }
+.metrics { display: grid; grid-template-columns: repeat(auto-fit,minmax(150px,1fr)); gap: 10px; margin: 12px 0 4px; }
 .metric { min-height: 64px; padding: 12px; border: 1px solid #26372e; border-radius: 8px; background: #0d1712; }
 .metric span { display: block; color: #9ca99f; font-size: .78rem; }
 .metric strong { display: block; margin-top: 5px; font-size: 1.35rem; color: #e6ede8; overflow-wrap: anywhere; }
-.metric.wide { grid-column: 1 / -1; }
+.metric.wide { grid-column: span 2; }
 .file { width: 100%; padding: 12px; background: #0b1210; border: 1px solid #35453c; border-radius: 8px; color: #e6ede8; }
 .ota-track { height: 10px; margin-top: 10px; background: #1b2922; border: 1px solid #35453c; border-radius: 999px; overflow: hidden; }
 .ota-bar { height: 100%; width: 0; background: #9ed85b; transition: width .2s; }
@@ -4097,6 +4101,21 @@ details.setup > .inside { padding: 0 16px 16px; }
   .grid { grid-template-columns: 1fr; }
   button { width: 100%; margin: 0 0 8px; }
 }
+/* Querformat (kurze Hoehe, z.B. Handy in Auto-Halterung): kompakt + volle Breite,
+   Kacheln fliessen in viele Spalten -> alles ohne Scrollen sichtbar. */
+@media (orientation: landscape) and (max-height: 600px) {
+  main { max-width: 100%; padding: 8px 16px 16px; }
+  h1 { font-size: 1rem; margin: 2px 0 8px; }
+  .tabs { gap: 6px; margin: 2px 0 8px; padding-top: 3px; padding-bottom: 3px; }
+  .tab { padding: 8px 12px; }
+  .card { padding: 10px; }
+  .lambda { font-size: 1.9rem; margin: 0 0 6px; }
+  .metrics { grid-template-columns: repeat(auto-fit,minmax(150px,1fr)); gap: 8px; margin: 8px 0 4px; }
+  .metric { min-height: 0; padding: 8px 10px; }
+  .metric span { font-size: .7rem; }
+  .metric strong { font-size: 1.05rem; margin-top: 3px; }
+  .metric.wide { grid-column: span 2; }
+}
 </style>
 </head>
 <body><main>
@@ -4112,23 +4131,22 @@ details.setup > .inside { padding: 0 16px 16px; }
 <div class="card">
 <div class="topline"><span id="source" class="tag">START</span><span id="wifiTop" class="mono">offline</span></div>
 <p class="hint" style="margin:0 0 10px;line-height:1.9">
-<span class="tag" id="featEspnow">ESP -</span>
 <span class="tag" id="featAp">AP -</span>
 <span class="tag" id="featWifi">WLAN -</span>
 <span class="tag" id="featBle123">123 -</span>
-<span class="tag" id="featBleBm6">BM6 -</span>
 <span class="tag" id="featLog">LOG -</span>
 </p>
 <div class="lambda" id="lambda">-.---</div>
 <div class="metrics">
 <div class="metric"><span>Status</span><strong id="status">warte</strong></div>
 <div class="metric"><span>CAN</span><strong id="can">-</strong></div>
-<div class="metric"><span>Temp</span><strong id="temp">- C</strong></div>
-<div class="metric"><span>Speed</span><strong id="liveSpeed">0.0 km/h</strong></div>
-<div class="metric wide"><span>123 RPM / ADV / MAP</span><strong id="main123">0 / 0.0 / 0</strong></div>
+<div class="metric"><span>Abgas &deg;C</span><strong id="temp">- C</strong></div>
+<div class="metric"><span>Speed (Reed)</span><strong id="liveSpeed">0.0 km/h</strong></div>
+<div class="metric wide"><span>123 RPM / ADV&deg; / kPa</span><strong id="main123">0 / 0.0 / 0</strong></div>
+<div class="metric"><span>123 Volt</span><strong id="liveTuneVolt">- V</strong></div>
+<div class="metric"><span>123 AMP</span><strong id="liveTuneAmp">- A</strong></div>
+<div class="metric"><span>Verteiler &deg;C</span><strong id="liveTuneTemp">- C</strong></div>
 <div class="metric"><span>123 BLE</span><strong id="liveTuneConn">scan</strong></div>
-<div class="metric"><span>BM6</span><strong id="liveBm6">- V</strong></div>
-<div class="metric"><span>BM6 BLE</span><strong id="liveBm6Conn">scan</strong></div>
 <div class="metric"><span>Sonde h</span><strong id="liveHours">0.00</strong></div>
 </div>
 <p class="hint">Messstelle hinten im Auspuff: Lambda kann bei Falschluft magerer wirken als der Motor wirklich laeuft.</p>
@@ -4147,26 +4165,12 @@ details.setup > .inside { padding: 0 16px 16px; }
 <div class="row"><span>123 Adresse</span><strong id="taddr" class="mono">-</strong></div>
 </div>
 </details>
-<details class="setup" open>
-<summary>BM6 Batteriemonitor</summary>
-<div class="inside">
-<p class="hint">Leagend BM6 V2.0. Liefert Bordnetz-Spannung und Umgebungstemperatur per BLE.</p>
-<div class="row"><span>Verbindung</span><strong id="bm6conn">-</strong></div>
-<div class="row"><span>Spannung</span><strong id="bm6volt">- V</strong></div>
-<div class="row"><span>Temperatur</span><strong id="bm6temp">- C</strong></div>
-<div class="row"><span>RX Frames</span><strong id="bm6rx">0</strong></div>
-<div class="row"><span>RX Alter</span><strong id="bm6age">0 ms</strong></div>
-<div class="row"><span>Decode Fehler</span><strong id="bm6err">0</strong></div>
-<div class="row"><span>BM6 Adresse</span><strong class="mono">3c:ab:72:80:06:6a</strong></div>
-</div>
-</details>
 <details class="setup">
 <summary>Live Meta</summary>
 <div class="inside">
 <div class="row"><span>WLAN / IP</span><strong id="liveWifiMeta" class="mono">-</strong></div>
 <div class="row"><span>Speed Hz / Pulse</span><strong id="liveSpeedMeta">0.00 / 0</strong></div>
 <div class="row"><span>123 Alter / RX</span><strong id="liveTuneMeta">0 ms / 0</strong></div>
-<div class="row"><span>BM6 Alter / RX</span><strong id="liveBm6Meta">0 ms / 0</strong></div>
 <div class="row"><span>Geraet / Motor / Sonde</span><strong id="liveHoursMeta">0 / 0 / 0 h</strong></div>
 </div>
 </details>
@@ -4180,31 +4184,6 @@ details.setup > .inside { padding: 0 16px 16px; }
 <div class="row"><span>Server</span><strong id="ntpServer" class="mono">-</strong></div>
 <div class="row"><span>Letzter Sync</span><strong id="ntpLastSync">-</strong></div>
 <button type="button" class="secondary" id="ntpSyncBtn" onclick="ntpSyncNow()">Jetzt synchronisieren</button>
-</div>
-</details>
-<details class="setup" open>
-<summary>Cockpit Link (ESP-NOW)</summary>
-<div class="inside">
-<p class="hint">M5/Waveshare hoeren auf ESP-NOW Broadcast. Alle Geraete brauchen denselben Kanal: Auto im Heimnetz, Bus auf Kanal 6, Handy-Test auf Kanal 11.</p>
-<div class="row"><span>Status</span><strong id="espnowready">-</strong></div>
-<div class="row"><span>Kanal</span><strong id="espnowch">-</strong></div>
-<div class="row"><span>Frames gesendet / Fehler</span><strong id="espnowtx">0 / 0</strong></div>
-<div class="row"><span>Sequenz</span><strong id="espnowseq">0</strong></div>
-</div>
-</details>
-<details class="setup" open>
-<summary>BLE Hub Clients</summary>
-<div class="inside">
-<p class="hint">Geraete per BLE-GATT (nur wenn ENABLE_BLE_DISPLAY=1). Im ESP-NOW-Build aus — Cockpit hoert per Broadcast.</p>
-<div class="row"><span>Display per BLE</span><strong id="bledisplay">-</strong></div>
-<div class="row"><span>Status</span><strong id="bleenabled">-</strong></div>
-<div class="row"><span>Name</span><strong id="blename" class="mono">-</strong></div>
-<div class="row"><span>Adresse</span><strong id="bleaddr" class="mono">-</strong></div>
-<div class="row"><span>Clients</span><strong id="bleclients">0</strong></div>
-<div class="row"><span>Client-Liste</span><strong id="blehubclients" class="mono">-</strong></div>
-<div class="row"><span>Service</span><strong class="mono">7f510001-5a6b-4d2a-9f20-14a7f3e20000</strong></div>
-<div class="row"><span>Status Notify</span><strong class="mono">7f510002-5a6b-4d2a-9f20-14a7f3e20000</strong></div>
-<div class="row"><span>Command Write</span><strong class="mono">7f510003-5a6b-4d2a-9f20-14a7f3e20000</strong></div>
 </div>
 </details>
 <details class="setup" open>
@@ -4369,7 +4348,7 @@ details.setup > .inside { padding: 0 16px 16px; }
 <details class="setup" open>
 <summary>BLE Zielgeraete</summary>
 <div class="inside">
-<p class="hint">Feste Favoriten fuer 123 und BM6. Manuell bleibt moeglich, damit wir spaeter weitere Geraete schnell aufnehmen koennen.</p>
+<p class="hint">Festes 123-Profil. Manuell bleibt moeglich, damit wir spaeter weitere Geraete schnell aufnehmen koennen.</p>
 <div class="row"><span>123 aktuell</span><strong id="taddrsetup" class="mono">-</strong></div>
 <form action="/ble_target" method="post">
 <label for="tunePreset">123 Profil</label><select id="tunePreset">
@@ -4379,20 +4358,6 @@ details.setup > .inside { padding: 0 16px 16px; }
 </select>
 <label for="tune_mac">123 BLE-Adresse</label><input id="tune_mac" name="tune_mac" placeholder="aa:bb:cc:dd:ee:ff">
 <button type="submit">123 Ziel speichern</button>
-</form>
-<div class="row"><span>BM6 aktuell</span><strong id="bm6addrsetup" class="mono">-</strong></div>
-<form action="/bm6_target" method="post">
-<label for="bm6Preset">BM6 Profil</label><select id="bm6Preset">
-<option value="">Manuell</option>
-<option value="3c:ab:72:7f:d0:bc">BM6 #1 3c:ab:72:7f:d0:bc</option>
-<option value="3c:ab:72:80:06:6a">BM6 #1 3c:ab:72:80:06:6a</option>
-</select>
-<label for="bm6_mac">BM6 BLE-Adresse</label><input id="bm6_mac" name="bm6_mac" placeholder="aa:bb:cc:dd:ee:ff">
-<button type="submit">BM6 Ziel speichern</button>
-</form>
-<form action="/bm6_aux_target" method="post">
-<label for="bm6_aux_mac">BM6 Zusatzbatterie (Aux)</label><input id="bm6_aux_mac" name="bm6_aux_mac" placeholder="aa:bb:cc:dd:ee:ff (leer=aus)">
-<button type="submit">BM6 Aux speichern</button>
 </form>
 <div class="row"><span>Scanliste</span><strong id="blescancount">-</strong></div>
 <div id="blescan" class="mono"></div>
@@ -4450,8 +4415,6 @@ details.setup > .inside { padding: 0 16px 16px; }
 <div class="card">
 <h3>Schalter</h3>
 <div class="row"><span>123 BLE</span><span><button type="button" onclick="devFeat('ble123','on')">AN</button> <button type="button" onclick="devFeat('ble123','off')">AUS</button> <strong id="dev_ble123" style="margin-left:8px">-</strong></span></div>
-<div class="row"><span>BM6 BLE</span><span><button type="button" onclick="devFeat('blebm6','on')">AN</button> <button type="button" onclick="devFeat('blebm6','off')">AUS</button> <strong id="dev_blebm6" style="margin-left:8px">-</strong></span></div>
-<div class="row"><span>ESP-NOW</span><span><button type="button" onclick="devFeat('espnow','on')">AN</button> <button type="button" onclick="devFeat('espnow','off')">AUS</button> <strong id="dev_espnow" style="margin-left:8px">-</strong></span></div>
 <div class="row"><span>Logging</span><span><button type="button" onclick="devFeat('log','on')">AN</button> <button type="button" onclick="devFeat('log','off')">AUS</button> <strong id="dev_log" style="margin-left:8px">-</strong></span></div>
 </div>
 <div class="card">
@@ -4473,28 +4436,6 @@ details.setup > .inside { padding: 0 16px 16px; }
 <button type="button" onclick="setPollInterval(1000);document.getElementById('dev_poll_freq').textContent='1 Hz'">1 Hz</button>
 </div>
 <p class="hint">10 Hz = sehr flüssig (wie 123TUNE+ App). 2 Hz = sparsam für Langzeit.</p>
-</div>
-<div class="card">
-<h3>UART-Bridge (2. ESP32)</h3>
-<p class="hint">Optionaler zweiter ESP32 liefert 123-Daten per UART. RX-Pin eingeben, 0 = aus. Gilt nach Neustart.</p>
-<div class="row"><span>Status</span><strong id="dev_uart_status">-</strong></div>
-<div style="display:flex;gap:8px;margin-top:8px;align-items:center">
-<label style="margin:0">RX-Pin:</label>
-<input id="dev_uart_rx" type="number" min="0" max="48" value="0" style="width:60px;padding:6px;border-radius:6px;border:1px solid #3a5a3a;background:#1a2a1a;color:#eee">
-<label style="margin:0">TX-Pin:</label>
-<input id="dev_uart_tx" type="number" min="0" max="48" value="0" style="width:60px;padding:6px;border-radius:6px;border:1px solid #3a5a3a;background:#1a2a1a;color:#eee">
-<button type="button" onclick="devUartSave()">Speichern &amp; Neustart</button>
-</div>
-</div>
-<div class="card">
-<h3>BM6 Abfrageintervall</h3>
-<div class="row"><span>Aktuell</span><strong id="dev_bm6interval">-</strong></div>
-<div style="display:flex;gap:8px;margin-top:8px">
-<button type="button" onclick="devBm6Interval(30)">30s</button>
-<button type="button" onclick="devBm6Interval(60)">1 Min</button>
-<button type="button" onclick="devBm6Interval(300)">5 Min</button>
-</div>
-<p class="hint">BM6-Spannung aendert sich langsam — 1-5 Min reichen fuer Logging.</p>
 </div>
 <div class="card">
 <h3>System</h3>
@@ -4557,15 +4498,6 @@ async function devBleScan(){
 async function devSetTune(mac){
   try{const fd=new FormData();fd.set('tune_mac',mac);await fetch('/ble_target',{method:'POST',body:fd});alert('123-Ziel gesetzt: '+mac);}catch(e){}
 }
-async function devSetBm6(mac){
-  try{const fd=new FormData();fd.set('bm6_mac',mac);await fetch('/bm6_target',{method:'POST',body:fd});alert('BM6-Ziel gesetzt: '+mac);}catch(e){}
-}
-async function devUartSave(){
-  const rx=document.getElementById('dev_uart_rx').value||'0';
-  const tx=document.getElementById('dev_uart_tx').value||'0';
-  try{await fetch('/uart_config?rx='+rx+'&tx='+tx);alert('Gespeichert – Hub startet neu');}catch(e){}
-}
-async function devBm6Interval(sec){try{await fetch('/bm6_interval?sec='+sec);document.getElementById('dev_bm6interval').textContent=sec+'s';}catch(e){}}
 let lastJson = {};
 function showTab(name) {
   document.querySelectorAll('.tab-section').forEach(s => {
@@ -4584,9 +4516,6 @@ try {
 } catch (e) {}
 document.getElementById('tunePreset')?.addEventListener('change', (e) => {
   document.getElementById('tune_mac').value = e.target.value || '';
-});
-document.getElementById('bm6Preset')?.addEventListener('change', (e) => {
-  document.getElementById('bm6_mac').value = e.target.value || '';
 });
 async function saveBleTarget(kind, addr) {
   const isBm6 = kind === 'bm6';
@@ -4762,23 +4691,15 @@ async function refresh() {
     const lts=document.getElementById('lambdaTestStatus'); if(lts) lts.textContent = d.lambda_test_mode || 'off';
     document.getElementById('temp').textContent = d.valid ? d.temperature + ' C' : '- C';
     document.getElementById('main123').textContent = (d.rpm ?? 0) + ' / ' + Number(d.advance ?? 0).toFixed(1) + ' / ' + (d.map ?? 0);
+    document.getElementById('liveTuneVolt').textContent = Number(d.volt ?? 0).toFixed(1) + ' V';
+    document.getElementById('liveTuneAmp').textContent = Number(d.tune_amp ?? 0).toFixed(2) + ' A';
+    document.getElementById('liveTuneTemp').textContent = (d.tune_temp ?? 0) + ' C';
     document.getElementById('can').textContent = d.can_ready ? 'aktiv' : 'Fehler';
     document.getElementById('wifiTop').textContent = d.wifi_connected ? d.wifi_ip : (d.ap_ip || 'offline');
     cls(document.getElementById('source'), d.source === 'CAN' ? 'tag ok' : (d.source === 'DEMO' ? 'tag warn' : 'tag bad'));
     cls(document.getElementById('status'), d.status === 'OK' ? 'ok' : (d.status === 'HEAT' || d.source === 'DEMO' ? 'warn' : 'bad'));
     cls(document.getElementById('can'), d.can_ready && d.can_state === 1 ? 'ok' : 'bad');
-    document.getElementById('bleenabled').textContent = d.ble_name ? 'aktiv' : 'nicht im Build';
-    document.getElementById('bledisplay').textContent = d.ble_display ? 'aktiv' : 'aus (ESP-NOW)';
-    document.getElementById('espnowready').textContent = d.esp_now_ready ? 'broadcast aktiv' : (d.esp_now_channel ? 'initialisiert' : 'nicht im Build');
-    cls(document.getElementById('espnowready'), d.esp_now_ready ? 'ok' : 'warn');
-    document.getElementById('espnowch').textContent = d.esp_now_channel ?? '-';
-    document.getElementById('espnowtx').textContent = (d.esp_now_tx ?? 0) + ' / ' + (d.esp_now_tx_fail ?? 0);
-    document.getElementById('espnowseq').textContent = d.esp_now_seq ?? 0;
     if (!hubFeaturesEditing) {
-      const hfEsp = document.getElementById('hfEspnow');
-      if (hfEsp) hfEsp.checked = !!d.hub_feat_espnow;
-      const espCh = document.getElementById('espnow_ch');
-      if (espCh && document.activeElement !== espCh) espCh.value = String(d.esp_now_channel_pref ?? 0);
       const hfAp = document.getElementById('hfAp');
       if (hfAp) hfAp.checked = !!d.hub_feat_ap;
       const hfWifi = document.getElementById('hfWifi');
@@ -4787,35 +4708,18 @@ async function refresh() {
       if (hfLog) hfLog.checked = !!d.hub_feat_log;
       const hf123 = document.getElementById('hfBle123');
       if (hf123) hf123.checked = !!d.hub_feat_ble123;
-      const hfBm6 = document.getElementById('hfBleBm6');
-      if (hfBm6) hfBm6.checked = !!d.hub_feat_blebm6;
     }
-    setFeatBadge('featEspnow', 'ESP', d.hub_feat_espnow);
     setFeatBadge('featAp', 'AP', d.hub_feat_ap);
     setFeatBadge('featWifi', 'WLAN', d.hub_feat_wifi);
     setFeatBadge('featBle123', '123', d.hub_feat_ble123);
-    setFeatBadge('featBleBm6', 'BM6', d.hub_feat_blebm6);
     setFeatBadge('featLog', 'LOG', d.hub_feat_log);
     // Dev-Tab Schalterzustände spiegeln
     {
       const sd=(id,on)=>{const e=document.getElementById(id);if(e){e.textContent=on?'AN':'AUS';e.style.color=on?'#54d273':'#ff6a5a';}};
-      sd('dev_ble123', d.hub_feat_ble123); sd('dev_blebm6', d.hub_feat_blebm6);
-      sd('dev_espnow', d.hub_feat_espnow); sd('dev_log', d.hub_feat_log);
+      sd('dev_ble123', d.hub_feat_ble123); sd('dev_log', d.hub_feat_log);
       const dl=document.getElementById('dev_lambda'); if(dl) dl.textContent=(d.lambda_test_mode||'off');
-      const di=document.getElementById('dev_bm6interval'); if(di&&d.bm6_poll_sec) di.textContent=d.bm6_poll_sec+'s';
-      const us=document.getElementById('dev_uart_status'); if(us) us.textContent=d.uart_rx_pin>0?('RX=GPIO'+d.uart_rx_pin):'aus';
-      const ur=document.getElementById('dev_uart_rx'); if(ur&&document.activeElement!==ur) ur.value=d.uart_rx_pin||0;
-      const ut=document.getElementById('dev_uart_tx'); if(ut&&document.activeElement!==ut) ut.value=d.uart_tx_pin||0;
     }
     document.getElementById('tuneLinkState').textContent = d.tune_link_state ?? '-';
-    document.getElementById('blename').textContent = d.ble_name || '-';
-    document.getElementById('bleaddr').textContent = d.ble_address || '-';
-    document.getElementById('bleclients').textContent = d.ble_clients ?? '0';
-    const hubClients = Array.isArray(d.ble_hub_clients) ? d.ble_hub_clients : [];
-    document.getElementById('blehubclients').innerHTML = hubClients.length ? hubClients.map(c =>
-      escHtml(c.addr || '-') + '<br>h' + (c.handle ?? '-') + ' / MTU ' + (c.mtu ?? '-') +
-      ' / ' + Number(c.interval_ms ?? 0).toFixed(1) + ' ms / ' + Math.round((c.age_ms ?? 0) / 1000) + ' s'
-    ).join('<br><br>') : '-';
     const apStations = Array.isArray(d.wifi_ap_stations) ? d.wifi_ap_stations : [];
     document.getElementById('wifiApSsid').textContent = d.wifi_ap_ssid || '-';
     document.getElementById('wifiApIp').textContent = d.ap_ip || '-';
@@ -4844,16 +4748,14 @@ async function refresh() {
     ).join('<br><br>') : '-';
     const scan = Array.isArray(d.ble_scan) ? d.ble_scan : [];
     syncBlePresetOptions('tunePreset', scan, 'tune', d.tune_saved_address);
-    syncBlePresetOptions('bm6Preset', scan, 'bm6', d.bm6_saved_address);
     document.getElementById('blescancount').textContent = scan.length + ' Geraete';
     document.getElementById('blescan').innerHTML = scan.map(x => {
       const name = escHtml(x.name || '-');
       const addr = escHtml(x.addr || '');
-      const tag = x.bm6 ? 'BM6' : (x.tune ? '123?' : 'BLE');
+      const tag = x.tune ? '123?' : 'BLE';
       return '<div class="row"><span>' + tag + ' ' + name + '<br>' + addr + '</span><strong>' +
              (x.rssi ?? 0) + ' dBm<br><button type="button" data-kind="tune" data-addr="' +
-             addr + '">123</button> <button type="button" data-kind="bm6" data-addr="' +
-             addr + '">BM6</button></strong></div>';
+             addr + '">123</button></strong></div>';
     }).join('');
     document.getElementById('wifi').textContent = d.wifi_connected ? d.wifi_ssid : (d.wifi_prof===0 ? 'Bus (AP only)' : (d.wifi_saved ? 'verbindet...' : 'nicht eingerichtet'));
     document.getElementById('wifiProfLabel').textContent = (d.wifi_prof_labels||['Bus','Zuhause','Handy'])[d.wifi_prof||0];
@@ -4926,22 +4828,7 @@ async function refresh() {
     document.getElementById('liveHours').textContent = Number(d.sensor_hours ?? 0).toFixed(2) + ' h';
     document.getElementById('liveHoursMeta').textContent = Number(d.device_hours ?? 0).toFixed(2) + ' / ' + Number(d.engine_hours ?? 0).toFixed(2) + ' / ' + Number(d.sensor_hours ?? 0).toFixed(2) + ' h';
     const apd=document.getElementById('apdiag'); if(apd) apd.textContent = (d.ap_ip || '-') + ' / ' + (d.ap_retry_count ?? 0);
-    document.getElementById('bm6conn').textContent = d.bm6_connected ? 'verbunden' : 'scan/retry';
-    cls(document.getElementById('bm6conn'), d.bm6_connected ? 'ok' : 'warn');
-    document.getElementById('liveBm6Conn').textContent = d.bm6_connected ? 'verbunden' : 'scan';
-    cls(document.getElementById('liveBm6Conn'), d.bm6_connected ? 'ok' : 'warn');
-    document.getElementById('bm6volt').textContent = Number(d.bm6_voltage ?? 0).toFixed(2) + ' V';
-    document.getElementById('liveBm6').textContent = Number(d.bm6_voltage ?? 0).toFixed(2) + ' V';
-    document.getElementById('bm6temp').textContent = (d.bm6_temperature ?? 0) + ' C';
-    document.getElementById('bm6rx').textContent = d.bm6_rx_count ?? 0;
-    document.getElementById('bm6age').textContent = (d.bm6_age_ms ?? 0) + ' ms';
-    document.getElementById('bm6err').textContent = d.bm6_decode_fail ?? 0;
     document.getElementById('liveTuneMeta').textContent = (d.tune_age_ms ?? 0) + ' ms / ' + (d.tune_rx ?? 0);
-    document.getElementById('liveBm6Meta').textContent = (d.bm6_age_ms ?? 0) + ' ms / ' + (d.bm6_rx_count ?? 0);
-    var bm6AddrSetup = document.getElementById('bm6addrsetup');
-    if (bm6AddrSetup) bm6AddrSetup.textContent = d.bm6_saved_address || '-';
-    var bm6Mac = document.getElementById('bm6_mac');
-    if (bm6Mac && document.activeElement !== bm6Mac) bm6Mac.value = d.bm6_saved_address || '';
     var spdHz = document.getElementById('spdhz');
     if (spdHz) {
       spdHz.textContent = Number(d.speed_hz ?? 0).toFixed(2) + ' Hz';
