@@ -520,7 +520,7 @@ bool ntpResyncRequested = false;
 uint32_t lastNtpSyncMs = 0;
 const char *kLogFile = "/drive.csv";
 const char *kOldLogFile = "/drive_old.csv";
-const size_t kMaxLogBytes = 1200000;
+const size_t kMaxLogBytes = 200000;  // 200 KB: kleine Dateien halten SPIFFS schnell (grosse Logs blockieren loop() -> Webserver/Display-Timeouts)
 const uint32_t kLogIntervalMs = 500;
 const uint16_t kLogColSpartan = 0x0001;
 const uint16_t kLogColTune = 0x0002;
@@ -4134,12 +4134,32 @@ details.setup > .inside { padding: 0 16px 16px; }
   .metric strong { font-size: 1rem; margin-top: 2px; }
   .metric.wide { grid-column: auto; }
 }
+/* 123-Cockpit-Tab: VDO-Look wie die 123TUNE+ App (schwarz, Chrom-Gauges) */
+.g123-card { background: #000; border-color: #1c1c1c; }
+.g123-clock { margin: 0 auto 14px; width: 120px; text-align: center; background: #181818; border: 2px solid #5a5a5a; border-radius: 8px; padding: 3px 0; color: #d6d6d6; font-family: 'Courier New', monospace; font-size: 1.5rem; letter-spacing: 3px; }
+.g123-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; justify-items: center; align-items: center; }
+.g123-center { display: flex; justify-content: center; margin: 6px 0; }
+.g123-gv { width: 100%; max-width: 165px; height: auto; display: block; }
+.g123-gv.big { max-width: 300px; }
+.g123-tunebar { display: flex; align-items: center; justify-content: center; gap: 14px; margin: 4px 0 2px; }
+.g123-lock { width: 40px; height: 40px; border-radius: 50%; background: #1a1a1a; border: 1px solid #333; display: flex; align-items: center; justify-content: center; }
+.g123-lockico { width: 11px; height: 9px; border: 2px solid #cfcfcf; border-radius: 0 0 2px 2px; position: relative; margin-top: 5px; }
+.g123-lockico::before { content: ""; position: absolute; left: 1px; top: -7px; width: 5px; height: 7px; border: 2px solid #cfcfcf; border-bottom: 0; border-radius: 5px 5px 0 0; }
+.g123-tunebtn { padding: 7px 20px; background: #1c1c1c; border: 1px solid #333; border-radius: 6px; color: #cfcfcf; font-weight: 700; font-size: .85rem; }
+.g123-conn { padding: 5px 16px; border-radius: 20px; background: #3a2a24; color: #ffb39e; font-weight: 700; font-size: .85rem; text-align: center; }
+.g123-conn.on { background: #16320f; color: #7be07b; }
+@media (orientation: landscape) and (max-height: 600px) {
+  .g123-clock { margin-bottom: 6px; }
+  .g123-gv { max-width: 120px; }
+  .g123-gv.big { max-width: 150px; }
+}
 </style>
 </head>
 <body><main>
 <h1>SPARTAN 3 v2 Motorraum Hub</h1>
 <div class="tabs">
 <button type="button" id="tabLive" class="tab on" onclick="showTab('live')">Live</button>
+<button type="button" id="tab123" class="tab" onclick="showTab('g123')">123</button>
 <button type="button" id="tabDiag" class="tab" onclick="showTab('diag')">Diagnose</button>
 <button type="button" id="tabLog" class="tab" onclick="showTab('log')">Log</button>
 <button type="button" id="tabSetup" class="tab" onclick="showTab('setup')">Setup</button>
@@ -4170,6 +4190,37 @@ details.setup > .inside { padding: 0 16px 16px; }
 <p class="hint">Messstelle hinten im Auspuff: Lambda kann bei Falschluft magerer wirken als der Motor wirklich laeuft.</p>
 </div>
 </div><!-- /tab live -->
+<div class="tab-section" data-tab="g123" hidden>
+<div class="card g123-card">
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+<radialGradient id="g123chrome" cx="50%" cy="32%" r="75%">
+<stop offset="0%" stop-color="#fcfcfc"/><stop offset="38%" stop-color="#9a9a9a"/>
+<stop offset="55%" stop-color="#eaeaea"/><stop offset="78%" stop-color="#7d7d7d"/><stop offset="100%" stop-color="#4a4a4a"/>
+</radialGradient>
+<radialGradient id="g123face" cx="50%" cy="28%" r="80%">
+<stop offset="0%" stop-color="#363636"/><stop offset="55%" stop-color="#161616"/><stop offset="100%" stop-color="#000"/>
+</radialGradient>
+<linearGradient id="g123needle" x1="0" y1="0" x2="0" y2="1">
+<stop offset="0%" stop-color="#f08a22"/><stop offset="100%" stop-color="#8f4408"/>
+</linearGradient>
+<radialGradient id="g123hub" cx="42%" cy="35%" r="70%">
+<stop offset="0%" stop-color="#f0a04a"/><stop offset="100%" stop-color="#7a3c08"/>
+</radialGradient>
+</defs></svg>
+<div class="g123-clock" id="g123Clock">--:--</div>
+<div class="g123-grid">
+<svg id="g123gAdv" class="g123-gv" viewBox="0 0 240 240"></svg>
+<svg id="g123gMap" class="g123-gv" viewBox="0 0 240 240"></svg>
+</div>
+<div class="g123-center"><svg id="g123gRpm" class="g123-gv big" viewBox="0 0 240 240"></svg></div>
+<div class="g123-tunebar"><span class="g123-lock"><i class="g123-lockico"></i></span><span class="g123-tunebtn">Tune</span></div>
+<div class="g123-grid">
+<svg id="g123gVA" class="g123-gv" viewBox="0 0 240 240"></svg>
+<svg id="g123gTemp" class="g123-gv" viewBox="0 0 240 240"></svg>
+</div>
+<div id="g123Conn" class="g123-conn" style="margin-top:14px">123 &mdash;</div>
+</div>
+</div><!-- /tab g123 -->
 <div class="tab-section" data-tab="diag" hidden>
 <details class="setup">
 <summary>123Tune BLE Diagnose</summary>
@@ -4522,6 +4573,7 @@ function showTab(name) {
     s.hidden = s.dataset.tab !== name;
   });
   document.getElementById('tabLive').classList.toggle('on', name === 'live');
+  document.getElementById('tab123').classList.toggle('on', name === 'g123');
   document.getElementById('tabDiag').classList.toggle('on', name === 'diag');
   document.getElementById('tabLog').classList.toggle('on', name === 'log');
   document.getElementById('tabSetup').classList.toggle('on', name === 'setup');
@@ -4530,7 +4582,7 @@ function showTab(name) {
 }
 try {
   const saved = localStorage.getItem('spartanTab');
-  if (saved === 'setup' || saved === 'log' || saved === 'diag' || saved === 'dev') showTab(saved);
+  if (saved === 'setup' || saved === 'log' || saved === 'diag' || saved === 'dev' || saved === 'g123') showTab(saved);
 } catch (e) {}
 document.getElementById('tunePreset')?.addEventListener('change', (e) => {
   document.getElementById('tune_mac').value = e.target.value || '';
@@ -4698,6 +4750,53 @@ document.addEventListener('focusin', (ev) => {
   if (ev.target && ev.target.closest && ev.target.closest('#hubFeaturesForm')) hubFeaturesEditing = true;
   if (ev.target && ev.target.closest && ev.target.closest('#apConfigForm')) apConfigEditing = true;
 });
+const G123NS = 'http://www.w3.org/2000/svg';
+function g123E(t, a) { const e = document.createElementNS(G123NS, t); for (const k in a) e.setAttribute(k, a[k]); return e; }
+function g123P(r, deg) { const a = deg * Math.PI / 180; return [120 + r * Math.sin(a), 120 - r * Math.cos(a)]; }
+function g123Build(id, cfg) {
+  const s = document.getElementById(id); if (!s) return;
+  while (s.firstChild) s.removeChild(s.firstChild);
+  const A0 = -135, SW = 270;
+  s.appendChild(g123E('circle', { cx: 120, cy: 120, r: 118, fill: 'url(#g123chrome)' }));
+  s.appendChild(g123E('circle', { cx: 120, cy: 120, r: 104, fill: 'url(#g123face)' }));
+  const div = cfg.minor || 40, me = cfg.majorEvery || 5;
+  for (let i = 0; i <= div; i++) {
+    const f = i / div, deg = A0 + f * SW, mj = (i % me === 0);
+    const p1 = g123P(mj ? 85 : 94, deg), p2 = g123P(101, deg);
+    s.appendChild(g123E('line', { x1: p1[0].toFixed(1), y1: p1[1].toFixed(1), x2: p2[0].toFixed(1), y2: p2[1].toFixed(1), stroke: '#fff', 'stroke-width': mj ? 3 : 1.3, 'stroke-linecap': 'round', opacity: mj ? '1' : '0.6' }));
+  }
+  (cfg.labels || []).forEach(l => {
+    const f = (l - cfg.min) / (cfg.max - cfg.min), deg = A0 + f * SW, p = g123P(72, deg);
+    const t = g123E('text', { x: p[0].toFixed(1), y: (p[1] + 5).toFixed(1), 'text-anchor': 'middle', fill: '#efefef', 'font-size': cfg.lbl || 15, 'font-weight': '600' }); t.textContent = l; s.appendChild(t);
+  });
+  (cfg.title || []).forEach((tl, i) => { const t = g123E('text', { x: 120, y: 78 + i * 15, 'text-anchor': 'middle', fill: '#d8d8d8', 'font-size': cfg.tsz || 13, 'font-style': 'italic' }); t.textContent = tl; s.appendChild(t); });
+  (cfg.texts || []).forEach(o => { const t = g123E('text', { x: o.x, y: o.y, 'text-anchor': o.a || 'middle', fill: o.c || '#9a9a9a', 'font-size': o.s || 11, 'font-family': o.mono ? "Courier New, monospace" : 'Arial', 'font-weight': o.w || '400' }); if (o.id) t.setAttribute('id', o.id); t.textContent = o.t || ''; s.appendChild(t); });
+  const g = g123E('g', { id: id + 'N', transform: 'rotate(-135 120 120)' });
+  g.appendChild(g123E('polygon', { points: '120,40 123.5,124 116.5,124', fill: 'url(#g123needle)' }));
+  g.appendChild(g123E('rect', { x: '116.5', y: '120', width: '7', height: '34', rx: '2.5', fill: 'url(#g123needle)' }));
+  g.appendChild(g123E('circle', { cx: 120, cy: 120, r: 13, fill: 'url(#g123hub)' }));
+  g.appendChild(g123E('circle', { cx: 120, cy: 120, r: 5, fill: '#2a1c0c' }));
+  s.appendChild(g);
+}
+function g123Set(id, frac) { const n = document.getElementById(id + 'N'); if (!n) return; frac = Math.max(0, Math.min(1, frac || 0)); n.setAttribute('transform', 'rotate(' + (-135 + frac * 270).toFixed(1) + ' 120 120)'); }
+function g123InitGauges() {
+  g123Build('g123gAdv', { min: 0, max: 55, minor: 33, majorEvery: 3, labels: [10, 20, 30, 40, 50], lbl: 13, title: ['Kurbelwelle °', 'Vorverstellung'], tsz: 11,
+    texts: [{ id: 'g123dAdv', t: '0', x: 150, y: 160, a: 'middle', c: '#7a7a7a', s: 24, mono: true, w: '700' }] });
+  g123Build('g123gMap', { min: 0, max: 220, minor: 44, majorEvery: 4, labels: [20, 60, 100, 140, 180, 200], lbl: 12, title: ['kPa'],
+    texts: [{ id: 'g123dMap', t: '0', x: 120, y: 162, a: 'middle', c: '#7a7a7a', s: 24, mono: true, w: '700' }] });
+  g123Build('g123gRpm', { min: 0, max: 8, minor: 40, majorEvery: 5, labels: [1, 2, 3, 4, 5, 6, 7, 8], lbl: 17, title: ['U/min'], tsz: 15,
+    texts: [
+      { id: 'g123dRpm', t: '0', x: 110, y: 150, a: 'end', c: '#cfcfcf', s: 30, mono: true, w: '700' },
+      { id: 'g123dSpeed', t: '0', x: 138, y: 142, a: 'start', c: '#54d273', s: 20, mono: true, w: '700' },
+      { t: 'km/h', x: 138, y: 156, a: 'start', c: '#7a8579', s: 10 },
+      { id: 'g123dLam', t: '-.--', x: 120, y: 184, a: 'middle', c: '#ff5630', s: 24, mono: true, w: '700' }
+    ] });
+  g123Build('g123gVA', { min: 11.5, max: 14.5, minor: 36, majorEvery: 6, labels: [12, 13, 14], lbl: 13, title: ['VOLT'],
+    texts: [{ t: 'AMP', x: 120, y: 150, a: 'middle', c: '#cfcfcf', s: 12 }, { id: 'g123dVolt', t: '0', x: 120, y: 176, a: 'middle', c: '#7a7a7a', s: 18, mono: true, w: '700' }] });
+  g123Build('g123gTemp', { min: -20, max: 100, minor: 36, majorEvery: 6, labels: [-20, 0, 20, 40, 60, 80, 100], lbl: 12, title: ['TEMP °C'],
+    texts: [{ id: 'g123dTemp', t: '0', x: 120, y: 166, a: 'middle', c: '#7a7a7a', s: 22, mono: true, w: '700' }] });
+}
+try { g123InitGauges(); } catch (e) {}
 async function refresh() {
   try {
     const r = await fetch('/state?client=hub-webgui', {cache:'no-store'});
@@ -4712,6 +4811,27 @@ async function refresh() {
     document.getElementById('liveTuneVolt').textContent = Number(d.volt ?? 0).toFixed(1) + ' V';
     document.getElementById('liveTuneAmp').textContent = Number(d.tune_amp ?? 0).toFixed(2) + ' A';
     document.getElementById('liveTuneTemp').textContent = (d.tune_temp ?? 0) + ' C';
+    // 123-Cockpit-Tab (VDO-Look) — Nadeln + Digital-Insets
+    if (window.g123Set) {
+      const rpm = Number(d.rpm ?? 0);
+      g123Set('g123gAdv', Number(d.advance ?? 0) / 55);
+      g123Set('g123gMap', Number(d.map ?? 0) / 220);
+      g123Set('g123gRpm', rpm / 8000);
+      g123Set('g123gVA', (Number(d.volt ?? 0) - 11.5) / 3);
+      g123Set('g123gTemp', (Number(d.tune_temp ?? 0) + 20) / 120);
+      const gid = id => document.getElementById(id);
+      let e;
+      if (e = gid('g123dAdv')) e.textContent = Number(d.advance ?? 0).toFixed(0);
+      if (e = gid('g123dMap')) e.textContent = Math.round(Number(d.map ?? 0));
+      if (e = gid('g123dRpm')) e.textContent = Math.round(rpm);
+      if (e = gid('g123dSpeed')) e.textContent = Number(d.speed_kmh ?? 0).toFixed(0);
+      if (e = gid('g123dLam')) e.textContent = d.valid ? Number(d.lambda).toFixed(2) : '-.--';
+      if (e = gid('g123dVolt')) e.textContent = Number(d.volt ?? 0).toFixed(1);
+      if (e = gid('g123dTemp')) e.textContent = Math.round(Number(d.tune_temp ?? 0));
+      const ck = gid('g123Clock'); if (ck && d.time_text) ck.textContent = String(d.time_text).slice(11, 16);
+      const gc = gid('g123Conn');
+      if (gc) { const on = !!d.tune_connected; gc.textContent = on ? ('123 ' + (d.tune_link_state || 'verbunden')) : '123 getrennt'; gc.classList.toggle('on', on); }
+    }
     document.getElementById('can').textContent = d.can_ready ? 'aktiv' : 'Fehler';
     document.getElementById('wifiTop').textContent = d.wifi_connected ? d.wifi_ip : (d.ap_ip || 'offline');
     cls(document.getElementById('source'), d.source === 'CAN' ? 'tag ok' : (d.source === 'DEMO' ? 'tag warn' : 'tag bad'));
