@@ -544,7 +544,8 @@ WifiApStation wifiApStations[kWifiApStationMax];
 uint8_t wifiApStationCount = 0;
 String hubApSsid = WEB_AP_SSID;
 String hubApPassword = WEB_AP_PASSWORD;
-String hubApIp = "192.168.8.1";  // NICHT 192.168.4.x (kollidiert mit S24-Hotspot-Subnetz)
+String hubApIp = "192.168.4.1";  // in WebGUI (Dev -> Access Point) frei einstellbar
+String hubHostname = "spartanhub";  // mDNS-Name -> http://<name>.local, in WebGUI editierbar
 String hubApMask = "255.255.255.0";
 struct WifiHttpPoller {
   String ip;
@@ -626,14 +627,11 @@ void loadHubFeatures()
   ensurePreferences();
   hubApSsid = networkPreferences.getString("ap_ssid", WEB_AP_SSID);
   hubApPassword = networkPreferences.getString("ap_pass", WEB_AP_PASSWORD);
-  hubApIp = networkPreferences.getString("ap_ip", "192.168.8.1");
-  // Migration: alter Default 192.168.4.1 kollidiert mit dem S24-Hotspot-Subnetz
-  // (192.168.4.x) -> AP+STA bekommt dann keine IP. Auf 192.168.8.1 anheben.
-  if (hubApIp == "192.168.4.1") {
-    hubApIp = "192.168.8.1";
-    networkPreferences.putString("ap_ip", hubApIp);
-  }
+  hubApIp = networkPreferences.getString("ap_ip", "192.168.4.1");
   hubApMask = networkPreferences.getString("ap_mask", "255.255.255.0");
+  hubHostname = networkPreferences.getString("mdns_host", "spartanhub");
+  hubHostname.trim();
+  if (hubHostname.length() == 0) hubHostname = "spartanhub";
   if (hubApSsid.length() == 0) hubApSsid = WEB_AP_SSID;
   if (hubApMask.length() == 0) hubApMask = "255.255.255.0";
   if (!networkPreferences.isKey("hf_ver")) {
@@ -765,7 +763,7 @@ void ensureHubSoftAp()
     WiFi.mode(WIFI_AP);
   }
   IPAddress apIp, apMask;
-  parseApAddress(hubApIp, "192.168.8.1", apIp);
+  parseApAddress(hubApIp, "192.168.4.1", apIp);
   parseApAddress(hubApMask, "255.255.255.0", apMask);
   WiFi.softAPConfig(apIp, apIp, apMask);
   if (WiFi.softAP(apSsid, hubApPassword.c_str(), 6, 0, 4)) {
@@ -775,17 +773,16 @@ void ensureHubSoftAp()
 #endif
 }
 
-const char *kHubHostname = "spartanhub";  // -> http://spartanhub.local
 bool mdnsStarted = false;
-// mDNS-Responder (neu)starten: Hub bleibt als http://spartanhub.local erreichbar,
-// egal ob ueber Hub-AP (192.168.4.1) oder S24-Hotspot (wechselnde IP).
+// mDNS-Responder (neu)starten: Hub bleibt als http://<hubHostname>.local erreichbar,
+// egal ob ueber Hub-AP oder S24-Hotspot (wechselnde IP).
 void startHubMdns()
 {
   MDNS.end();
-  if (MDNS.begin(kHubHostname)) {
+  if (MDNS.begin(hubHostname.c_str())) {
     MDNS.addService("http", "tcp", 80);
     mdnsStarted = true;
-    Serial.printf("mDNS:        http://%s.local/\n", kHubHostname);
+    Serial.printf("mDNS:        http://%s.local/\n", hubHostname.c_str());
   } else {
     mdnsStarted = false;
     Serial.println("mDNS:        start failed");
@@ -1573,7 +1570,9 @@ String statusJson()
   json += ",\"ntp_last_sync_age_s\":";
   json += lastNtpSyncMs == 0 ? "0" : String((now - lastNtpSyncMs) / 1000UL);
   refreshWifiApStations();
-  json += ",\"wifi_ap_ssid\":\"";
+  json += ",\"mdns_host\":\"";
+  json += jsonEscape(hubHostname);
+  json += "\",\"wifi_ap_ssid\":\"";
   json += jsonEscape(hubApSsid);
   json += "\",\"wifi_ap_password\":\"";
   json += jsonEscape(hubApPassword);
@@ -4028,7 +4027,7 @@ void setupWebGui()
   savedWifiSsid = String(staSsid);
   haveSavedWifi = !busMode && strlen(staSsid) > 0;
 
-  WiFi.setHostname(kHubHostname);
+  WiFi.setHostname(hubHostname.c_str());
   WiFi.mode(WIFI_AP_STA);
 #if ENABLE_BLE_HUB
   WiFi.setSleep(true);
@@ -4363,19 +4362,6 @@ details.setup > .inside { padding: 0 16px 16px; }
 </details>
 </div><!-- /tab log -->
 <div class="tab-section" data-tab="setup" hidden>
-<details class="setup">
-<summary>SoftAP Name / Passwort / IP</summary>
-<div class="inside">
-<form action="/ap_config" method="post" id="apConfigForm">
-<label for="ap_ssid">AP Name</label><input id="ap_ssid" name="ssid" value="">
-<label for="ap_pass">AP Passwort</label><input id="ap_pass" name="pass" type="text" value="">
-<label for="ap_ip">AP IP / Gateway</label><input id="ap_ip" name="ip" value="">
-<label for="ap_mask">Netzmaske</label><input id="ap_mask" name="mask" value="">
-<p class="hint">Passwort leer = offener AP. Sonst mindestens 8 Zeichen. Nach Speichern startet der AP neu.</p>
-<button type="submit">AP speichern</button>
-</form>
-</div>
-</details>
 <details class="setup" open>
 <summary>OTA Firmware Update</summary>
 <div class="inside">
@@ -4443,7 +4429,7 @@ details.setup > .inside { padding: 0 16px 16px; }
 <button type="button" onclick="wifiConnect()">Verbinden &amp; speichern (Reboot)</button>
 </details>
 
-<p class="hint">In JEDEM Modus l&auml;uft der Hub-AP (Spartan3-TestHub, 192.168.8.1) parallel weiter &mdash; der Hub ist immer unter <b>http://spartanhub.local</b> erreichbar.</p>
+<p class="hint">In JEDEM Modus l&auml;uft der Hub-AP parallel weiter (Name/Passwort/IP frei einstellbar unter „SoftAP Name / Passwort / IP"). Der Hub ist immer unter <b>http://spartanhub.local</b> erreichbar.</p>
 </div>
 </details>
 <details class="setup" open>
@@ -4555,6 +4541,18 @@ details.setup > .inside { padding: 0 16px 16px; }
 <button type="button" onclick="setPollInterval(1000);document.getElementById('dev_poll_freq').textContent='1 Hz'">1 Hz</button>
 </div>
 <p class="hint">10 Hz = sehr flüssig (wie 123TUNE+ App). 2 Hz = sparsam für Langzeit.</p>
+</div>
+<div class="card">
+<h3>Access Point / mDNS</h3>
+<form action="/ap_config" method="post" id="apConfigForm">
+<label for="ap_ssid">AP Name (SSID)</label><input id="ap_ssid" name="ssid" value="">
+<label for="ap_pass">AP Passwort</label><input id="ap_pass" name="pass" type="text" value="">
+<label for="ap_ip">AP IP / Gateway (IP-Range)</label><input id="ap_ip" name="ip" value="">
+<label for="ap_mask">Netzmaske</label><input id="ap_mask" name="mask" value="">
+<label for="mdns_host">DNS-Name (mDNS)</label><input id="mdns_host" name="mdns" value="" placeholder="spartanhub">
+<p class="hint">Passwort leer = offener AP, sonst &ge;8 Zeichen. DNS-Name ergibt <b>http://&lt;name&gt;.local</b> (nur a-z, 0-9, „-"). Nach Speichern starten AP &amp; mDNS neu.</p>
+<button type="submit">AP &amp; mDNS speichern</button>
+</form>
 </div>
 <div class="card">
 <h3>System</h3>
@@ -4916,10 +4914,12 @@ async function refresh() {
       const apPass = document.getElementById('ap_pass');
       const apIp = document.getElementById('ap_ip');
       const apMask = document.getElementById('ap_mask');
+      const apMdns = document.getElementById('mdns_host');
       if (apSsid) apSsid.value = d.wifi_ap_ssid || '';
       if (apPass) apPass.value = d.wifi_ap_password || '';
-      if (apIp) apIp.value = d.wifi_ap_ip || '192.168.8.1';
+      if (apIp) apIp.value = d.wifi_ap_ip || '192.168.4.1';
       if (apMask) apMask.value = d.wifi_ap_mask || '255.255.255.0';
+      if (apMdns) apMdns.value = d.mdns_host || 'spartanhub';
     }
     document.getElementById('wifiApCount').textContent = d.wifi_ap_station_count ?? apStations.length;
     document.getElementById('wifiApTable').innerHTML = apStations.length ? apStations.map(s =>
@@ -5637,17 +5637,31 @@ setInterval(() => {
       server.send(400, "text/plain", "AP-Passwort muss leer oder mindestens 8 Zeichen lang sein.");
       return;
     }
-    if (!parseApAddress(ip, "192.168.8.1", parsedIp) ||
+    if (!parseApAddress(ip, "192.168.4.1", parsedIp) ||
         !parseApAddress(mask, "255.255.255.0", parsedMask)) {
       server.send(400, "text/plain", "AP-IP oder Netzmaske ungueltig.");
       return;
     }
     saveHubApConfig(ssid, password, ip, mask);
+    // mDNS-Name (optional): sanitisieren auf a-z 0-9 '-', speichern, Responder neu starten.
+    String mdns = server.arg("mdns");
+    mdns.trim();
+    mdns.toLowerCase();
+    String clean;
+    for (size_t i = 0; i < mdns.length(); i++) {
+      char c = mdns[i];
+      if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-') clean += c;
+    }
+    if (clean.length() > 0 && clean != hubHostname) {
+      hubHostname = clean;
+      networkPreferences.putString("mdns_host", hubHostname);
+    }
     if (hubFeatAp) {
       WiFi.softAPdisconnect(true);
       delay(100);
       ensureHubSoftAp();
     }
+    startHubMdns();
     logHubEvent("ap_config", "saved");
     server.sendHeader("Location", "/", true);
     server.send(303, "text/plain", "");
