@@ -2077,25 +2077,15 @@ void ensureLogHeader()
   if (!needsHeader) return;
   File f = SPIFFS.open(kLogFile, FILE_WRITE);
   if (!f) {
-    // Stale SPIFFS from previous flash — force format once and retry.
-    Serial.println("Logs:        header_open_failed, forcing SPIFFS format recovery");
-    SPIFFS.end();
-    if (!SPIFFS.format() || !SPIFFS.begin(false)) {
-      logFsReady = false;
-      logCurrentBytes = 0;
-      logOldBytes = 0;
-      setLogError("header_open_failed");
-      return;
-    }
-    f = SPIFFS.open(kLogFile, FILE_WRITE);
-    if (!f) {
-      logFsReady = false;
-      logCurrentBytes = 0;
-      logOldBytes = 0;
-      setLogError("header_open_failed");
-      return;
-    }
-    logHubEvent("log_fs", "format_recovered_header");
+    // Do NOT call SPIFFS.format() here — this is called from appendLiveCsv()
+    // every 500 ms; a blocking format (3-10 s) mid-drive would trigger BLE
+    // supervision timeout and TWAI FIFO overflow. Boot-time recovery is
+    // handled in initializeLogFilesystem().
+    logFsReady = false;
+    logCurrentBytes = 0;
+    logOldBytes = 0;
+    setLogError("header_open_failed");
+    return;
   }
   f.println(expectedHeader);
   logCurrentBytes = f.size();
@@ -3967,6 +3957,18 @@ void setupWebGui()
                 humanBytes(logFileSize(kLogFile)).c_str(),
                 humanBytes(logFileSize(kOldLogFile)).c_str());
   ensureLogHeader();
+  // Boot-time only: if ensureLogHeader() failed to open the log file (e.g.
+  // power-loss corrupted the SPIFFS FAT), recover once via format here where
+  // blocking for 3-10 s is acceptable.
+  if (!logFsReady) {
+    Serial.println("Logs:        boot format-recovery (header_open_failed)");
+    if (initializeLogFilesystem(true)) {
+      logFsReady = true;
+      refreshLogSizeCache();
+      ensureLogHeader();
+      logHubEvent("log_fs", "format_recovered_header");
+    }
+  }
   // WiFi-Profile laden
   // Slot 0 = Bus (kein STA), Slot 1 = Zuhause, Slot 2 = Handy
   // Migration: "ssid"/"pass" → p1_ssid/p1_pass wenn noch kein "wifi_prof" vorhanden
@@ -5574,12 +5576,24 @@ void updateCan()
   if (now - lastCanStatusMs >= 1000) {
     lastCanStatusMs = now;
     if (twai_get_status_info(&canStatus) == ESP_OK) {
-      if (canStatus.state != TWAI_STATE_RUNNING ||
-          canStatus.tx_error_counter > 127 ||
-          canStatus.rx_error_counter > 127) {
-        if (canStatusErrors < UINT32_MAX) {
-          canStatusErrors++;
+      if (canStatus.state == TWAI_STATE_BUS_OFF) {
+        // Initiate hardware recovery (waits for 128 recessive bits, non-blocking).
+        // State will transition to TWAI_STATE_STOPPED when complete.
+        if (twai_initiate_recovery() == ESP_OK) {
+          Serial.println("CAN:         Bus-Off → recovery initiated");
         }
+        if (canStatusErrors < UINT32_MAX) canStatusErrors++;
+      } else if (canStatus.state == TWAI_STATE_STOPPED) {
+        // Recovery completed — restart the driver.
+        if (twai_start() == ESP_OK) {
+          Serial.println("CAN:         recovered from Bus-Off, restarted");
+        } else {
+          if (canStatusErrors < UINT32_MAX) canStatusErrors++;
+        }
+      } else if (canStatus.state != TWAI_STATE_RUNNING ||
+                 canStatus.tx_error_counter > 127 ||
+                 canStatus.rx_error_counter > 127) {
+        if (canStatusErrors < UINT32_MAX) canStatusErrors++;
       }
     }
   }
