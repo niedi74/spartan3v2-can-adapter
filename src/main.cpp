@@ -128,6 +128,15 @@
 #define SPARTAN_CAN_ID 0x400
 #endif
 
+// Cockpit-Frame, das der Hub an die Displays (2.8" Touch / M5) sendet.
+// 8 Byte, Big-Endian: [lambda_x1000][rpm][adv_x10 int16][map][flags]
+#ifndef COCKPIT_CAN_TX_ID
+#define COCKPIT_CAN_TX_ID 0x510
+#endif
+#ifndef COCKPIT_CAN_TX_INTERVAL_MS
+#define COCKPIT_CAN_TX_INTERVAL_MS 100   // 10 Hz
+#endif
+
 #ifndef ENABLE_SPARTAN_DEMO
 #define ENABLE_SPARTAN_DEMO 0
 #endif
@@ -333,6 +342,9 @@ bool canReady = false;
 twai_status_info_t canStatus = {};
 uint32_t lastCanStatusMs = 0;
 uint32_t canStatusErrors = 0;
+uint32_t lastCockpitCanTxMs = 0;
+uint32_t cockpitCanTxCount  = 0;
+uint32_t cockpitCanTxErrors = 0;
 portMUX_TYPE stateMux = portMUX_INITIALIZER_UNLOCKED;
 float tuneRpm = 0.0f;
 float tuneAdvance = 0.0f;
@@ -1401,6 +1413,10 @@ String statusJson()
   json += String(canStatus.rx_error_counter);
   json += ",\"can_status_errors\":";
   json += String(canStatusErrors);
+  json += ",\"cockpit_can_tx\":";
+  json += String(cockpitCanTxCount);
+  json += ",\"cockpit_can_tx_err\":";
+  json += String(cockpitCanTxErrors);
   json += ",\"heap_free\":";
   json += String(heap_caps_get_free_size(MALLOC_CAP_8BIT));
 #if ENABLE_WEB_GUI
@@ -5812,6 +5828,46 @@ void updateCan()
     fresh.fromDemo = false;
     storeReading(fresh);
     digitalWrite(STATUS_LED_PIN, fresh.status == 3 ? HIGH : LOW);
+  }
+
+  // --- Cockpit-Frame an Display(s) senden: 0x510, 8 Byte, ~10 Hz ---
+  // Gleicher TWAI-Controller wie der Spartan-RX (NORMAL-Mode -> sendefaehig).
+  if (now - lastCockpitCanTxMs >= COCKPIT_CAN_TX_INTERVAL_MS) {
+    lastCockpitCanTxMs = now;
+    const SpartanReading snap = readingSnapshot();
+    uint16_t rpm = 0;
+    float    advance = 0.0f;
+    uint8_t  mapKpa = 0;
+    bool     tuneFresh = false;
+    if (hubFeatBle123 || hubFeatEmu123) {
+      const TuneSnapshot tune = tuneSnapshot();
+      tuneFresh = tune.lastRxMs != 0 && (now - tune.lastRxMs) <= 3000;
+      rpm       = static_cast<uint16_t>(tune.rpm);
+      advance   = tune.advance;
+      mapKpa    = static_cast<uint8_t>(tune.map);
+    }
+    const uint16_t lambdaX1000 = snap.valid ? static_cast<uint16_t>(snap.lambda * 1000.0f + 0.5f) : 0;
+    const int16_t  advX10      = static_cast<int16_t>(advance * 10.0f + (advance >= 0 ? 0.5f : -0.5f));
+    uint8_t flags = 0;
+    if (snap.valid) flags |= 0x01;   // Lambda gueltig
+    if (tuneFresh)  flags |= 0x02;   // 123-Daten frisch (rpm/adv/map gueltig)
+
+    twai_message_t tx = {};
+    tx.identifier        = COCKPIT_CAN_TX_ID;
+    tx.data_length_code  = 8;
+    tx.data[0] = static_cast<uint8_t>(lambdaX1000 >> 8);
+    tx.data[1] = static_cast<uint8_t>(lambdaX1000 & 0xFF);
+    tx.data[2] = static_cast<uint8_t>(rpm >> 8);
+    tx.data[3] = static_cast<uint8_t>(rpm & 0xFF);
+    tx.data[4] = static_cast<uint8_t>((advX10 >> 8) & 0xFF);
+    tx.data[5] = static_cast<uint8_t>(advX10 & 0xFF);
+    tx.data[6] = mapKpa;
+    tx.data[7] = flags;
+    if (twai_transmit(&tx, pdMS_TO_TICKS(5)) == ESP_OK) {
+      if (cockpitCanTxCount < UINT32_MAX) cockpitCanTxCount++;
+    } else {
+      if (cockpitCanTxErrors < UINT32_MAX) cockpitCanTxErrors++;
+    }
   }
 #endif
 }
