@@ -4137,8 +4137,8 @@ details.setup > .inside { padding: 0 16px 16px; }
 /* 123-Cockpit-Tab: VDO-Look wie die 123TUNE+ App (schwarz, Chrom-Gauges) */
 .g123-card { background: #000; border-color: #1c1c1c; }
 .g123-clock { margin: 0 auto 14px; width: 120px; text-align: center; background: #181818; border: 2px solid #5a5a5a; border-radius: 8px; padding: 3px 0; color: #d6d6d6; font-family: 'Courier New', monospace; font-size: 1.5rem; letter-spacing: 3px; }
-.g123-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; justify-items: center; align-items: center; }
-.g123-center { display: flex; justify-content: center; margin: 6px 0; }
+.g123-gauges { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; justify-items: center; align-items: center; }
+.g123-gauges .big { grid-column: 1 / -1; margin: 4px 0; }
 .g123-gv { width: 100%; max-width: 165px; height: auto; display: block; }
 .g123-gv.big { max-width: 300px; }
 .g123-tunebar { display: flex; align-items: center; justify-content: center; gap: 14px; margin: 4px 0 2px; }
@@ -4149,9 +4149,27 @@ details.setup > .inside { padding: 0 16px 16px; }
 .g123-conn { padding: 5px 16px; border-radius: 20px; background: #3a2a24; color: #ffb39e; font-weight: 700; font-size: .85rem; text-align: center; }
 .g123-conn.on { background: #16320f; color: #7be07b; }
 @media (orientation: landscape) and (max-height: 600px) {
-  .g123-clock { margin-bottom: 6px; }
-  .g123-gv { max-width: 120px; }
-  .g123-gv.big { max-width: 150px; }
+  /* Hochformat-Ansicht 1:1, nur als Ganzes 90 Grad gedreht (Display hochkant
+     montierbar). dvh/dvw = sichtbarer Viewport ohne Browser-Leisten -> nichts
+     wird abgeschnitten; Inhalt vertikal zentriert. Gauge-Groessen wie Hochformat. */
+  .tab-section[data-tab="g123"] {
+    position: fixed; top: 0; left: 100dvw;
+    width: 100dvh; height: 100dvw;
+    transform-origin: top left; transform: rotate(90deg);
+    overflow: hidden; z-index: 60; background: #000;
+  }
+  .tab-section[data-tab="g123"] .g123-card {
+    border: 0; border-radius: 0; min-height: 100%; box-sizing: border-box;
+    padding: 6px 10px; display: flex; flex-direction: column; justify-content: center;
+  }
+  .g123-clock { margin: 0 auto 1.2vh; }
+  /* Container ist 90 Grad gedreht -> Inhalte um -90 Grad gegenrotieren, damit
+     Zifferblaetter/Texte aufrecht stehen (Anordnung bleibt). */
+  .tab-section[data-tab="g123"] .g123-gv,
+  .tab-section[data-tab="g123"] .g123-clock,
+  .tab-section[data-tab="g123"] #g123Conn,
+  .tab-section[data-tab="g123"] .g123-tunebtn,
+  .tab-section[data-tab="g123"] .g123-lock { transform: rotate(-90deg); }
 }
 </style>
 </head>
@@ -4208,16 +4226,14 @@ details.setup > .inside { padding: 0 16px 16px; }
 </radialGradient>
 </defs></svg>
 <div class="g123-clock" id="g123Clock">--:--</div>
-<div class="g123-grid">
+<div class="g123-gauges">
 <svg id="g123gAdv" class="g123-gv" viewBox="0 0 240 240"></svg>
 <svg id="g123gMap" class="g123-gv" viewBox="0 0 240 240"></svg>
-</div>
-<div class="g123-center"><svg id="g123gRpm" class="g123-gv big" viewBox="0 0 240 240"></svg></div>
-<div class="g123-tunebar"><span class="g123-lock"><i class="g123-lockico"></i></span><span class="g123-tunebtn">Tune</span></div>
-<div class="g123-grid">
+<svg id="g123gRpm" class="g123-gv big" viewBox="0 0 240 240"></svg>
 <svg id="g123gVA" class="g123-gv" viewBox="0 0 240 240"></svg>
 <svg id="g123gTemp" class="g123-gv" viewBox="0 0 240 240"></svg>
 </div>
+<div class="g123-tunebar"><span class="g123-lock"><i class="g123-lockico"></i></span><span class="g123-tunebtn">Tune</span></div>
 <div id="g123Conn" class="g123-conn" style="margin-top:14px">123 &mdash;</div>
 </div>
 </div><!-- /tab g123 -->
