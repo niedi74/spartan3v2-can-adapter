@@ -544,7 +544,7 @@ WifiApStation wifiApStations[kWifiApStationMax];
 uint8_t wifiApStationCount = 0;
 String hubApSsid = WEB_AP_SSID;
 String hubApPassword = WEB_AP_PASSWORD;
-String hubApIp = "192.168.4.1";
+String hubApIp = "192.168.8.1";  // NICHT 192.168.4.x (kollidiert mit S24-Hotspot-Subnetz)
 String hubApMask = "255.255.255.0";
 struct WifiHttpPoller {
   String ip;
@@ -626,7 +626,13 @@ void loadHubFeatures()
   ensurePreferences();
   hubApSsid = networkPreferences.getString("ap_ssid", WEB_AP_SSID);
   hubApPassword = networkPreferences.getString("ap_pass", WEB_AP_PASSWORD);
-  hubApIp = networkPreferences.getString("ap_ip", "192.168.4.1");
+  hubApIp = networkPreferences.getString("ap_ip", "192.168.8.1");
+  // Migration: alter Default 192.168.4.1 kollidiert mit dem S24-Hotspot-Subnetz
+  // (192.168.4.x) -> AP+STA bekommt dann keine IP. Auf 192.168.8.1 anheben.
+  if (hubApIp == "192.168.4.1") {
+    hubApIp = "192.168.8.1";
+    networkPreferences.putString("ap_ip", hubApIp);
+  }
   hubApMask = networkPreferences.getString("ap_mask", "255.255.255.0");
   if (hubApSsid.length() == 0) hubApSsid = WEB_AP_SSID;
   if (hubApMask.length() == 0) hubApMask = "255.255.255.0";
@@ -759,7 +765,7 @@ void ensureHubSoftAp()
     WiFi.mode(WIFI_AP);
   }
   IPAddress apIp, apMask;
-  parseApAddress(hubApIp, "192.168.4.1", apIp);
+  parseApAddress(hubApIp, "192.168.8.1", apIp);
   parseApAddress(hubApMask, "255.255.255.0", apMask);
   WiFi.softAPConfig(apIp, apIp, apMask);
   if (WiFi.softAP(apSsid, hubApPassword.c_str(), 6, 0, 4)) {
@@ -4403,22 +4409,16 @@ details.setup > .inside { padding: 0 16px 16px; }
 <details class="setup" open>
 <summary>WLAN / Hotspot</summary>
 <div class="inside">
+<div class="row"><span>Aktueller Modus</span><strong id="wifiProfLabel">-</strong></div>
 <div class="row"><span>Verbindung</span><strong id="wifi">nicht eingerichtet</strong></div>
-<div class="row"><span>ESP32 IP</span><strong id="lanip">-</strong></div>
+<div class="row"><span>Hub-IP (externes Netz)</span><strong id="lanip">-</strong></div>
 <div class="row"><span>Gespeichert</span><strong id="wifisaved">-</strong></div>
-<div class="row"><span>Profil</span><strong id="wifiProfLabel">-</strong></div>
-<div style="margin:8px 0" id="wifiProfBtns"></div>
-<div style="margin:10px 0;padding:10px;border:1px solid #2a3a2e;border-radius:8px">
-<b>WLAN auswählen &amp; verbinden</b>
-<div style="margin:6px 0"><button type="button" onclick="wifiScan()">Netzwerke scannen</button> <span id="wifiScanInfo" class="hint"></span></div>
-<label>Gefundene Netzwerke</label>
-<select id="wifiScanSel" onchange="document.getElementById('wcSsid').value=this.value"><option value="">— erst scannen —</option></select>
-<label>SSID</label><input id="wcSsid" placeholder="Netzwerkname">
-<label>Passwort</label><input id="wcPass" type="password" placeholder="WLAN-Passwort">
-<button type="button" onclick="wifiConnect()">Verbinden &amp; speichern (Reboot)</button>
-<p class="hint">Beim Scan kann der AP kurz aussetzen — falls die Seite hängt, neu laden.</p>
-</div>
-<details style="margin:8px 0"><summary>Profile bearbeiten</summary>
+
+<p class="hint" style="margin:14px 0 6px"><b>1. Verbindungsmodus</b> &mdash; ein Tipp schaltet um:</p>
+<div id="wifiProfBtns"></div>
+
+<details style="margin:12px 0"><summary><b>2. Zugangsdaten eintragen</b> (einmalig)</summary>
+<p class="hint">SSID/Passwort f&uuml;r Heim-WLAN bzw. S24-Hotspot speichern. Danach reicht oben der Modus-Button.</p>
 <form action="/wifi_profile_save" method="post" style="margin:6px 0">
 <input type="hidden" name="slot" value="1">
 <label>Zuhause SSID</label><input name="ssid" id="profSsid1">
@@ -4432,7 +4432,18 @@ details.setup > .inside { padding: 0 16px 16px; }
 <button type="submit">S24 speichern</button>
 </form>
 </details>
-<p class="hint">Hub-AP = nur eigener AP (Spartan3-TestHub, 192.168.4.1), kein externes WLAN. Zuhause/S24 = STA-Verbindung zum Router/Hotspot (AP laeuft parallel weiter). Der Hub ist in JEDEM Modus unter <b>http://spartanhub.local</b> erreichbar.</p>
+
+<details style="margin:8px 0"><summary>Anderes Netz suchen (Scan)</summary>
+<p class="hint">Nur f&uuml;r ein NEUES Netz n&ouml;tig &mdash; f&uuml;r Zuhause/S24 nicht erforderlich. Beim Scan kann der AP kurz aussetzen; falls die Seite h&auml;ngt, neu laden.</p>
+<div style="margin:6px 0"><button type="button" onclick="wifiScan()">Netzwerke scannen</button> <span id="wifiScanInfo" class="hint"></span></div>
+<label>Gefundene Netzwerke</label>
+<select id="wifiScanSel" onchange="document.getElementById('wcSsid').value=this.value"><option value="">— erst scannen —</option></select>
+<label>SSID</label><input id="wcSsid" placeholder="Netzwerkname">
+<label>Passwort</label><input id="wcPass" type="password" placeholder="WLAN-Passwort">
+<button type="button" onclick="wifiConnect()">Verbinden &amp; speichern (Reboot)</button>
+</details>
+
+<p class="hint">In JEDEM Modus l&auml;uft der Hub-AP (Spartan3-TestHub, 192.168.8.1) parallel weiter &mdash; der Hub ist immer unter <b>http://spartanhub.local</b> erreichbar.</p>
 </div>
 </details>
 <details class="setup" open>
@@ -4907,7 +4918,7 @@ async function refresh() {
       const apMask = document.getElementById('ap_mask');
       if (apSsid) apSsid.value = d.wifi_ap_ssid || '';
       if (apPass) apPass.value = d.wifi_ap_password || '';
-      if (apIp) apIp.value = d.wifi_ap_ip || '192.168.4.1';
+      if (apIp) apIp.value = d.wifi_ap_ip || '192.168.8.1';
       if (apMask) apMask.value = d.wifi_ap_mask || '255.255.255.0';
     }
     document.getElementById('wifiApCount').textContent = d.wifi_ap_station_count ?? apStations.length;
@@ -4939,9 +4950,22 @@ async function refresh() {
     (function(){
       const labels = d.wifi_prof_labels||['Hub-AP','Zuhause','S24'];
       const ssids = d.wifi_prof_ssids||['','',''];
+      const desc = [
+        'Nur eigener AP &mdash; kein externes WLAN n&ouml;tig. Handy/Display direkt auf den Hub.',
+        'Verbindet sich mit dem Heim-WLAN.',
+        'Verbindet sich mit dem Handy-Hotspot.'
+      ];
       const btns = labels.map((lbl,i)=>{
-        const s=ssids[i]&&ssids[i].length?(' ('+ssids[i]+')'):( i===0?' (Spartan3-Setup)':'');
-        return '<form action="/wifi_prof" method="post" style="display:inline"><input type="hidden" name="slot" value="'+i+'"><button type="submit"'+(d.wifi_prof===i?' style="background:#2e7d32"':'')+'>'+lbl+s+'</button></form> ';
+        const net = (ssids[i]&&ssids[i].length) ? escHtml(ssids[i]) : (i===0?'Spartan3-TestHub':'(SSID nicht gesetzt)');
+        const active = (d.wifi_prof===i);
+        const sub = desc[i] + (i>0 ? ' Netz: '+net : '');
+        return '<form action="/wifi_prof" method="post" style="margin:0 0 8px">'
+          + '<input type="hidden" name="slot" value="'+i+'">'
+          + '<button type="submit" style="width:100%;text-align:left;padding:12px 14px;'
+          + (active?'background:#2e7d32;color:#fff':'background:#1a2922;color:#cbeaa7')+'">'
+          + (active?'● ':'○ ')+'<b>'+escHtml(lbl)+'</b>'+(active?' &mdash; aktiv':'')
+          + '<br><span style="font-weight:400;font-size:.8rem;opacity:.85">'+sub+'</span>'
+          + '</button></form>';
       });
       document.getElementById('wifiProfBtns').innerHTML=btns.join('');
       const e1=document.getElementById('profSsid1');if(e1&&!e1.value)e1.value=ssids[1]||'';
@@ -5613,7 +5637,7 @@ setInterval(() => {
       server.send(400, "text/plain", "AP-Passwort muss leer oder mindestens 8 Zeichen lang sein.");
       return;
     }
-    if (!parseApAddress(ip, "192.168.4.1", parsedIp) ||
+    if (!parseApAddress(ip, "192.168.8.1", parsedIp) ||
         !parseApAddress(mask, "255.255.255.0", parsedMask)) {
       server.send(400, "text/plain", "AP-IP oder Netzmaske ungueltig.");
       return;
@@ -5629,7 +5653,7 @@ setInterval(() => {
     server.send(303, "text/plain", "");
   });
   server.onNotFound([]() {
-    server.sendHeader("Location", "http://192.168.4.1/", true);
+    server.sendHeader("Location", "http://spartanhub.local/", true);
     server.send(302, "text/plain", "");
   });
 
