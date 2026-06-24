@@ -33,6 +33,7 @@
 #include <Update.h>
 #include <WebServer.h>
 #include <WiFi.h>
+#include <ESPmDNS.h>
 #include <esp_netif.h>
 #include <esp_sntp.h>
 #include <esp_wifi.h>
@@ -597,6 +598,8 @@ void saveHubFeatures()
   networkPreferences.putUChar("lambda_test", static_cast<uint8_t>(lambdaTestMode));
 }
 
+void startHubMdns();  // fwd: in onHubWifiEvent (STA GOT IP) benoetigt
+
 // [WLAN-DIAG] Loggt STA-Events inkl. Reason-Code, damit ein fehlschlagender
 // Heimnetz-Connect eindeutig wird (201=NO_AP_FOUND/Signal, 15/204=HANDSHAKE/Passwort,
 // 202=AUTH_FAIL, 203=ASSOC_FAIL, 8=ASSOC_LEAVE).
@@ -607,6 +610,7 @@ void onHubWifiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
       break;
     case ARDUINO_EVENT_WIFI_STA_GOT_IP:
       Serial.printf("WiFi-EVT:    GOT IP %s\n", WiFi.localIP().toString().c_str());
+      startHubMdns();  // mDNS auf neuem STA-Netz (z.B. S24) neu registrieren
       break;
     case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
       Serial.printf("WiFi-EVT:    STA disconnected reason=%d\n",
@@ -763,6 +767,23 @@ void ensureHubSoftAp()
                   apSsid, WiFi.softAPIP().toString().c_str());
   }
 #endif
+}
+
+const char *kHubHostname = "spartanhub";  // -> http://spartanhub.local
+bool mdnsStarted = false;
+// mDNS-Responder (neu)starten: Hub bleibt als http://spartanhub.local erreichbar,
+// egal ob ueber Hub-AP (192.168.4.1) oder S24-Hotspot (wechselnde IP).
+void startHubMdns()
+{
+  MDNS.end();
+  if (MDNS.begin(kHubHostname)) {
+    MDNS.addService("http", "tcp", 80);
+    mdnsStarted = true;
+    Serial.printf("mDNS:        http://%s.local/\n", kHubHostname);
+  } else {
+    mdnsStarted = false;
+    Serial.println("mDNS:        start failed");
+  }
 }
 
 String normalizeMacInput(const String &raw)
@@ -1494,7 +1515,7 @@ String statusJson()
   json += "\"";
   json += ",\"wifi_prof\":";
   json += String(hubWifiProfile);
-  json += ",\"wifi_prof_labels\":[\"Bus\",\"Zuhause\",\"Handy\"]";
+  json += ",\"wifi_prof_labels\":[\"Hub-AP\",\"Zuhause\",\"S24\"]";
   json += ",\"wifi_prof_ssids\":[\"\"";
   json += ",\"" + String(g_hubWifiProfiles[1].ssid) + "\"";
   json += ",\"" + String(g_hubWifiProfiles[2].ssid) + "\"]";
@@ -4001,6 +4022,7 @@ void setupWebGui()
   savedWifiSsid = String(staSsid);
   haveSavedWifi = !busMode && strlen(staSsid) > 0;
 
+  WiFi.setHostname(kHubHostname);
   WiFi.mode(WIFI_AP_STA);
 #if ENABLE_BLE_HUB
   WiFi.setSleep(true);
@@ -4008,6 +4030,7 @@ void setupWebGui()
   WiFi.setSleep(false);
 #endif
   ensureHubSoftAp();
+  startHubMdns();
   if (!hubFeatAp) {
     Serial.println("Web GUI:     SoftAP Spartan3-Setup disabled (Setup)");
   }
@@ -4404,12 +4427,12 @@ details.setup > .inside { padding: 0 16px 16px; }
 </form>
 <form action="/wifi_profile_save" method="post" style="margin:6px 0">
 <input type="hidden" name="slot" value="2">
-<label>Handy SSID</label><input name="ssid" id="profSsid2">
-<label>Handy Passwort</label><input name="pass" type="password" id="profPass2">
-<button type="submit">Handy speichern</button>
+<label>S24 Hotspot SSID</label><input name="ssid" id="profSsid2">
+<label>S24 Hotspot Passwort</label><input name="pass" type="password" id="profPass2">
+<button type="submit">S24 speichern</button>
 </form>
 </details>
-<p class="hint">Bus = nur AP (Spartan3-Setup), kein Heim-WLAN. Zuhause/Handy = STA-Verbindung zum Router/Hotspot. Alle Geraete im gleichen Netz = stabiles ESP-NOW.</p>
+<p class="hint">Hub-AP = nur eigener AP (Spartan3-TestHub, 192.168.4.1), kein externes WLAN. Zuhause/S24 = STA-Verbindung zum Router/Hotspot (AP laeuft parallel weiter). Der Hub ist in JEDEM Modus unter <b>http://spartanhub.local</b> erreichbar.</p>
 </div>
 </details>
 <details class="setup" open>
@@ -4911,10 +4934,10 @@ async function refresh() {
              (x.rssi ?? 0) + ' dBm<br><button type="button" data-kind="tune" data-addr="' +
              addr + '">123</button></strong></div>';
     }).join('');
-    document.getElementById('wifi').textContent = d.wifi_connected ? d.wifi_ssid : (d.wifi_prof===0 ? 'Bus (AP only)' : (d.wifi_saved ? 'verbindet...' : 'nicht eingerichtet'));
-    document.getElementById('wifiProfLabel').textContent = (d.wifi_prof_labels||['Bus','Zuhause','Handy'])[d.wifi_prof||0];
+    document.getElementById('wifi').textContent = d.wifi_connected ? d.wifi_ssid : (d.wifi_prof===0 ? 'Hub-AP (nur eigener AP)' : (d.wifi_saved ? 'verbindet...' : 'nicht eingerichtet'));
+    document.getElementById('wifiProfLabel').textContent = (d.wifi_prof_labels||['Hub-AP','Zuhause','S24'])[d.wifi_prof||0];
     (function(){
-      const labels = d.wifi_prof_labels||['Bus','Zuhause','Handy'];
+      const labels = d.wifi_prof_labels||['Hub-AP','Zuhause','S24'];
       const ssids = d.wifi_prof_ssids||['','',''];
       const btns = labels.map((lbl,i)=>{
         const s=ssids[i]&&ssids[i].length?(' ('+ssids[i]+')'):( i===0?' (Spartan3-Setup)':'');
