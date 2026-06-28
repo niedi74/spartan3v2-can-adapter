@@ -24,6 +24,7 @@
 #include <esp_now.h>
 #include "spartan_cockpit_frame.h"
 #endif
+#include "tune123_decode.h"  // gemeinsamer 123-Decoder (Hub/M5/Waveshare)
 
 #if ENABLE_WEB_GUI
 #include <DNSServer.h>
@@ -2257,14 +2258,6 @@ void appendLiveCsv() {}
 #endif
 
 #if ENABLE_BLE_HUB
-int hexNibble(uint8_t c)
-{
-  if (c >= '0' && c <= '9') return c - '0';
-  if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-  if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-  return 0;
-}
-
 void decodeTuneFrame(const uint8_t *data, size_t length)
 {
   if (length == 1 && data[0] == 0x0D) {
@@ -2278,28 +2271,25 @@ void decodeTuneFrame(const uint8_t *data, size_t length)
     portEXIT_CRITICAL(&stateMux);
     return;
   }
-  const int hi = hexNibble(data[1]);
-  const int lo = hexNibble(data[2]);
-  const int raw = (hi << 4) | lo;
-
-  bool knownOpcode = true;
+  // Gemeinsamer Decoder (include/tune123_decode.h) — eine Quelle fuer alle Repos.
+  const Tune123Decoded dec = tune123Decode(data[0],
+                                           tune123HexNibble(data[1]),
+                                           tune123HexNibble(data[2]));
   portENTER_CRITICAL(&stateMux);
-  switch (data[0]) {
-    case 0x30: tuneRpm = hi * 800.0f + lo * 50.0f; break;
-    case 0x31: tuneAdvance = hi * 3.2f + lo * 0.2f; break;
-    case 0x32: tuneMap = static_cast<float>(raw); break;
-    case 0x33: tuneTemperature = static_cast<float>(raw - 30); break;
-    case 0x35: tuneCoilCurrent = raw / 8.65f; break;
-    case 0x41: tuneVoltage = raw / 4.54f; break;
-    case 0x42: break;
-    default:
-      knownOpcode = false;
-      if (tuneUnknownOpcodeCount < UINT32_MAX) {
-        tuneUnknownOpcodeCount++;
-      }
-      break;
+  switch (dec.field) {
+    case Tune123Field::Rpm:         tuneRpm = dec.value; break;
+    case Tune123Field::Advance:     tuneAdvance = dec.value; break;
+    case Tune123Field::Map:         tuneMap = dec.value; break;
+    case Tune123Field::Temperature: tuneTemperature = dec.value; break;
+    case Tune123Field::CoilCurrent: tuneCoilCurrent = dec.value; break;
+    case Tune123Field::Voltage:     tuneVoltage = dec.value; break;
+    case Tune123Field::None:        break;
   }
-  if (knownOpcode && tuneRxCount < UINT32_MAX) {
+  if (!dec.known) {
+    if (tuneUnknownOpcodeCount < UINT32_MAX) {
+      tuneUnknownOpcodeCount++;
+    }
+  } else if (tuneRxCount < UINT32_MAX) {
     tuneRxCount++;
   }
   portEXIT_CRITICAL(&stateMux);
