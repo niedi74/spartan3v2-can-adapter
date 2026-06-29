@@ -4597,6 +4597,7 @@ details.setup > .inside { padding: 0 16px 16px; }
 <div class="row"><span>CAN State / TX / RX</span><strong id="candiag">-</strong></div>
 <div class="row"><span>CAN Fehler</span><strong id="canerr">0</strong></div>
 <div class="row"><span>Heap frei</span><strong id="heap">-</strong></div>
+<div class="row"><span>Ext. Flash (W25Q)</span><strong id="extflash">-</strong></div>
 <div class="row"><span>Betriebsstunden</span><strong id="hours">-</strong></div>
 <div style="display:flex;gap:8px;margin-top:8px">
 <button class="secondary" type="button" onclick="copyJson()">JSON kopieren</button>
@@ -5070,6 +5071,11 @@ async function refresh() {
     document.getElementById('candiag').textContent = (d.can_state ?? '-') + ' / ' + (d.can_tx_errors ?? 0) + ' / ' + (d.can_rx_errors ?? 0);
     document.getElementById('canerr').textContent = d.can_status_errors ?? 0;
     document.getElementById('heap').textContent = d.heap_free ? Math.round(d.heap_free / 1024) + ' KB' : '-';
+    { const ef = document.getElementById('extflash');
+      if (ef) { ef.textContent = d.flash_ext_detected
+        ? ('OK ✓ ' + (d.flash_ext_mfg||'?') + ' ' + (d.flash_ext_mb||0) + ' MB (0x' + (d.flash_ext_jedec||'') + ')')
+        : ('nicht erkannt (0x' + (d.flash_ext_jedec||'------') + ')');
+        ef.style.color = d.flash_ext_detected ? '#54d273' : '#ff6a5a'; } }
     document.getElementById('hours').textContent = Number(d.device_hours ?? 0).toFixed(2) + ' / ' + Number(d.engine_hours ?? 0).toFixed(2) + ' / ' + Number(d.sensor_hours ?? 0).toFixed(2) + ' h';
     document.getElementById('liveHours').textContent = Number(d.sensor_hours ?? 0).toFixed(2) + ' h';
     document.getElementById('liveHoursMeta').textContent = Number(d.device_hours ?? 0).toFixed(2) + ' / ' + Number(d.engine_hours ?? 0).toFixed(2) + ' / ' + Number(d.sensor_hours ?? 0).toFixed(2) + ' h';
