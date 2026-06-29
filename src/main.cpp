@@ -4409,19 +4409,24 @@ details.setup > .inside { padding: 0 16px 16px; }
 <p class="hint" style="margin:14px 0 6px"><b>1. Verbindungsmodus</b> &mdash; ein Tipp schaltet um:</p>
 <div id="wifiProfBtns"></div>
 
-<details style="margin:12px 0"><summary><b>2. Zugangsdaten eintragen</b> (einmalig)</summary>
-<p class="hint">SSID/Passwort f&uuml;r Heim-WLAN bzw. S24-Hotspot speichern. Danach reicht oben der Modus-Button.</p>
-<form action="/wifi_profile_save" method="post" style="margin:6px 0">
+<details style="margin:12px 0" open><summary><b>2. Zugangsdaten eintragen</b> (einmalig)</summary>
+<p class="hint">Netz w&auml;hlen, SSID + Passwort eintragen, speichern &mdash; der Hub verbindet dann <b>automatisch</b> (kein extra Modus-Tipp). &#9888; ESP32 kann nur <b>2,4&nbsp;GHz</b>: z.B. <code>Z00-Station</code>, <b>NICHT</b> <code>...-5G</code>.</p>
+<label>Netz</label>
+<select id="credFor" onchange="credShow()">
+<option value="1">Zuhause (Heim-WLAN)</option>
+<option value="2">S24 (Handy-Hotspot)</option>
+</select>
+<form id="credForm1" action="/wifi_profile_save" method="post" style="margin:6px 0">
 <input type="hidden" name="slot" value="1">
 <label>Zuhause SSID</label><input name="ssid" id="profSsid1">
 <label>Zuhause Passwort</label><input name="pass" type="password" id="profPass1">
-<button type="submit">Zuhause speichern</button>
+<button type="submit">Zuhause speichern &amp; verbinden</button>
 </form>
-<form action="/wifi_profile_save" method="post" style="margin:6px 0">
+<form id="credForm2" action="/wifi_profile_save" method="post" style="margin:6px 0" hidden>
 <input type="hidden" name="slot" value="2">
 <label>S24 Hotspot SSID</label><input name="ssid" id="profSsid2">
 <label>S24 Hotspot Passwort</label><input name="pass" type="password" id="profPass2">
-<button type="submit">S24 speichern</button>
+<button type="submit">S24 speichern &amp; verbinden</button>
 </form>
 </details>
 
@@ -4638,6 +4643,13 @@ try {
   const saved = localStorage.getItem('spartanTab');
   if (saved === 'setup' || saved === 'log' || saved === 'diag' || saved === 'dev' || saved === 'g123') showTab(saved);
 } catch (e) {}
+function credShow() {
+  const v = (document.getElementById('credFor') || {}).value || '1';
+  const f1 = document.getElementById('credForm1'), f2 = document.getElementById('credForm2');
+  if (f1) f1.hidden = (v !== '1');
+  if (f2) f2.hidden = (v !== '2');
+}
+credShow();
 document.getElementById('tunePreset')?.addEventListener('change', (e) => {
   document.getElementById('tune_mac').value = e.target.value || '';
 });
@@ -5373,6 +5385,18 @@ setInterval(() => {
       if (pass.length() > 0) networkPreferences.putString("p2_pass", pass);
     }
     Serial.printf("WiFi Profil: %d gespeichert SSID='%s'\n", slot, ssid.c_str());
+    // Speichern aktiviert das Profil gleich + verbindet (kein extra Modus-Tipp noetig).
+    if (strlen(g_hubWifiProfiles[slot].ssid) > 0 && hubFeatWifi) {
+      hubWifiProfile = (uint8_t)slot;
+      networkPreferences.putUChar("wifi_prof", hubWifiProfile);
+      WiFi.disconnect(false, false);
+      homeWifiDisabledForRoadAp = false;
+      savedWifiSsid = String(g_hubWifiProfiles[slot].ssid);
+      haveSavedWifi = true;
+      WiFi.begin(g_hubWifiProfiles[slot].ssid, g_hubWifiProfiles[slot].pass);
+      homeWifiConnectStartedMs = millis();
+      Serial.printf("WiFi Profil: %d -> aktiviert + verbinde\n", slot);
+    }
     server.sendHeader("Location", "/", true);
     server.send(303, "text/plain", "");
   });
