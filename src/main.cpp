@@ -559,6 +559,14 @@ uint8_t wifiApStationCount = 0;
 String hubApSsid = WEB_AP_SSID;
 String hubApPassword = WEB_AP_PASSWORD;
 String hubApIp = "192.168.4.1";  // in WebGUI (Dev -> Access Point) frei einstellbar
+// [WLAN-KANAL] Single-Radio-Fix: der ESP32-S3 hat nur EINE 2,4-GHz-Funkeinheit,
+// AP und STA muessen sich denselben Kanal teilen. Frueher war der SoftAP fest auf
+// Kanal 6 -> verband sich der Hub mit einem Home-Router auf einem ANDEREN Kanal,
+// assoziierte er zwar (Auth OK), bekam aber keine IP (DHCP scheitert). hubApChannel
+// folgt jetzt dem Router-Kanal (per Scan ermittelt) und wird in NVS gemerkt, damit
+// der AP nach einem Reboot gleich richtig hochkommt (kein Scan noetig).
+uint8_t hubApChannel = 6;                 // aktueller SoftAP-Kanal (folgt dem Home-Router)
+volatile bool homeWifiNotFound = false;   // letzter Connect: Ziel-SSID nicht im Scan
 String hubHostname = "spartanhub";  // mDNS-Name -> http://<name>.local, in WebGUI editierbar
 String hubApMask = "255.255.255.0";
 struct WifiHttpPoller {
@@ -652,6 +660,8 @@ void loadHubFeatures()
   hubApSsid = networkPreferences.getString("ap_ssid", WEB_AP_SSID);
   hubApPassword = networkPreferences.getString("ap_pass", WEB_AP_PASSWORD);
   hubApIp = networkPreferences.getString("ap_ip", "192.168.4.1");
+  hubApChannel = networkPreferences.getUChar("ap_chan", 6);  // [WLAN-KANAL] letzter Home-Kanal
+  if (hubApChannel < 1 || hubApChannel > 13) hubApChannel = 6;
   hubApMask = networkPreferences.getString("ap_mask", "255.255.255.0");
   hubHostname = networkPreferences.getString("mdns_host", "spartanhub");
   hubHostname.trim();
@@ -790,9 +800,9 @@ void ensureHubSoftAp()
   parseApAddress(hubApIp, "192.168.4.1", apIp);
   parseApAddress(hubApMask, "255.255.255.0", apMask);
   WiFi.softAPConfig(apIp, apIp, apMask);
-  if (WiFi.softAP(apSsid, hubApPassword.c_str(), 6, 0, 4)) {
-    Serial.printf("Web GUI:     access point '%s' OK, http://%s/\n",
-                  apSsid, WiFi.softAPIP().toString().c_str());
+  if (WiFi.softAP(apSsid, hubApPassword.c_str(), hubApChannel, 0, 4)) {
+    Serial.printf("Web GUI:     access point '%s' OK (Kanal %d), http://%s/\n",
+                  apSsid, hubApChannel, WiFi.softAPIP().toString().c_str());
   }
 #endif
 }
@@ -811,6 +821,35 @@ void startHubMdns()
     mdnsStarted = false;
     Serial.println("mDNS:        start failed");
   }
+}
+
+// [WLAN-KANAL] Home/S24-STA verbinden und den SoftAP vorher auf den Router-Kanal
+// ziehen, damit AP+STA auf der einen ESP32-S3-Funkeinheit koexistieren (sonst
+// assoziiert die STA, bekommt aber keine IP). Ein einmaliger Scan (user-getriggert
+// beim Profilwechsel, im Stand) ermittelt den Kanal des Ziel-Netzes. Findet der
+// Scan die SSID nicht (ausser Reichweite / anderes Band), wird trotzdem verbunden
+// (alter Kanal) und homeWifiNotFound fuer die GUI gesetzt. KEIN periodischer Scan.
+void connectHomeWifiAligned(const char *ssid, const char *pass)
+{
+  int found = 0;
+  int n = WiFi.scanNetworks(false, false);   // synchron, alle Kanaele, einmalig
+  for (int i = 0; i < n; i++) {
+    if (WiFi.SSID(i) == ssid) { found = WiFi.channel(i); break; }
+  }
+  if (n >= 0) WiFi.scanDelete();
+  homeWifiNotFound = (n >= 0 && found == 0);
+  if (found >= 1 && found <= 13 && hubFeatAp && (uint8_t)found != hubApChannel) {
+    const char *apSsid = (hubApSsid.length() > 0) ? hubApSsid.c_str() : WEB_AP_SSID;
+    WiFi.softAP(apSsid, hubApPassword.c_str(), (uint8_t)found, 0, 4);
+    hubApChannel = (uint8_t)found;
+    networkPreferences.putUChar("ap_chan", hubApChannel);
+    Serial.printf("WLAN-Kanal:  AP folgt Home '%s' auf Kanal %d\n", ssid, found);
+  }
+  if (homeWifiNotFound)
+    Serial.printf("WLAN-Kanal:  '%s' nicht im Scan (Reichweite/Band?) - verbinde auf Kanal %d\n",
+                  ssid, hubApChannel);
+  WiFi.begin(ssid, pass);
+  homeWifiConnectStartedMs = millis();
 }
 
 String normalizeMacInput(const String &raw)
@@ -1574,7 +1613,15 @@ String statusJson()
   json += WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : "";
   json += "\",\"ap_ip\":\"";
   json += WiFi.softAPIP().toString();
-  json += "\",\"ap_retry_count\":";
+  json += "\",\"wifi_sta_channel\":";
+  json += String(WiFi.status() == WL_CONNECTED ? WiFi.channel() : 0);
+  json += ",\"wifi_sta_rssi\":";
+  json += String(WiFi.status() == WL_CONNECTED ? (int)WiFi.RSSI() : 0);
+  json += ",\"wifi_ap_channel\":";
+  json += String((int)hubApChannel);
+  json += ",\"wifi_home_not_found\":";
+  json += homeWifiNotFound ? "true" : "false";
+  json += ",\"ap_retry_count\":";
   json += String(apRetryCount);
   json += ",\"log_ready\":";
   json += logFsReady ? "true" : "false";
@@ -4598,6 +4645,7 @@ details.setup > .inside { padding: 0 16px 16px; }
 <div class="row"><span>CAN Fehler</span><strong id="canerr">0</strong></div>
 <div class="row"><span>Heap frei</span><strong id="heap">-</strong></div>
 <div class="row"><span>Ext. Flash (W25Q)</span><strong id="extflash">-</strong></div>
+<div class="row"><span>WLAN-Kanal (STA / AP)</span><strong id="wifichan">-</strong></div>
 <div class="row"><span>Betriebsstunden</span><strong id="hours">-</strong></div>
 <div style="display:flex;gap:8px;margin-top:8px">
 <button class="secondary" type="button" onclick="copyJson()">JSON kopieren</button>
@@ -5076,6 +5124,19 @@ async function refresh() {
         ? ('OK ✓ ' + (d.flash_ext_mfg||'?') + ' ' + (d.flash_ext_mb||0) + ' MB (0x' + (d.flash_ext_jedec||'') + ')')
         : ('nicht erkannt (0x' + (d.flash_ext_jedec||'------') + ')');
         ef.style.color = d.flash_ext_detected ? '#54d273' : '#ff6a5a'; } }
+    { const wc = document.getElementById('wifichan');
+      if (wc) {
+        const staCh = d.wifi_sta_channel ?? 0, apCh = d.wifi_ap_channel ?? 0;
+        if (d.wifi_connected) {
+          wc.textContent = 'STA Kanal ' + staCh + ' (' + (d.wifi_sta_rssi ?? 0) + ' dBm) / AP Kanal ' + apCh + ' ✓';
+          wc.style.color = '#54d273';
+        } else if (d.wifi_home_not_found) {
+          wc.textContent = 'Home/S24 nicht gefunden - Reichweite/Band? / AP Kanal ' + apCh;
+          wc.style.color = '#ff6a5a';
+        } else {
+          wc.textContent = 'STA - / AP Kanal ' + apCh;
+          wc.style.color = '';
+        } } }
     document.getElementById('hours').textContent = Number(d.device_hours ?? 0).toFixed(2) + ' / ' + Number(d.engine_hours ?? 0).toFixed(2) + ' / ' + Number(d.sensor_hours ?? 0).toFixed(2) + ' h';
     document.getElementById('liveHours').textContent = Number(d.sensor_hours ?? 0).toFixed(2) + ' h';
     document.getElementById('liveHoursMeta').textContent = Number(d.device_hours ?? 0).toFixed(2) + ' / ' + Number(d.engine_hours ?? 0).toFixed(2) + ' / ' + Number(d.sensor_hours ?? 0).toFixed(2) + ' h';
@@ -5392,9 +5453,8 @@ setInterval(() => {
       savedWifiSsid = String(ssid);
       haveSavedWifi = strlen(ssid) > 0;
       if (haveSavedWifi && hubFeatWifi) {
-        WiFi.begin(ssid, pass);
-        homeWifiConnectStartedMs = millis();
         Serial.printf("WiFi Profil: %d '%s'\n", slot, ssid);
+        connectHomeWifiAligned(ssid, pass);  // [WLAN-KANAL] AP folgt Router-Kanal
       } else {
         Serial.printf("WiFi Profil: %d SSID leer oder WiFi aus\n", slot);
       }
@@ -5426,9 +5486,8 @@ setInterval(() => {
       homeWifiDisabledForRoadAp = false;
       savedWifiSsid = String(g_hubWifiProfiles[slot].ssid);
       haveSavedWifi = true;
-      WiFi.begin(g_hubWifiProfiles[slot].ssid, g_hubWifiProfiles[slot].pass);
-      homeWifiConnectStartedMs = millis();
       Serial.printf("WiFi Profil: %d -> aktiviert + verbinde\n", slot);
+      connectHomeWifiAligned(g_hubWifiProfiles[slot].ssid, g_hubWifiProfiles[slot].pass);
     }
     server.sendHeader("Location", "/", true);
     server.send(303, "text/plain", "");
@@ -5456,10 +5515,9 @@ setInterval(() => {
     savedWifiSsid = ssid;
     WiFi.disconnect();
     if (hubFeatWifi) {
-      WiFi.begin(ssid.c_str(), password.c_str());
-      homeWifiConnectStartedMs = millis();
       homeWifiDisabledForRoadAp = false;
       Serial.printf("Home WiFi:   saved and connecting to '%s'\n", ssid.c_str());
+      connectHomeWifiAligned(ssid.c_str(), password.c_str());  // [WLAN-KANAL]
     } else {
       homeWifiConnectStartedMs = 0;
       Serial.printf("Home WiFi:   saved '%s' (STA off in Setup)\n", ssid.c_str());
@@ -5791,7 +5849,7 @@ void updateWebGui()
       parseApAddress(hubApMask, "255.255.255.0", apMask);
       WiFi.softAPConfig(apIp, apIp, apMask);
       const char *roadSsid = hubFeatEmu123 ? "123-emulator" : hubApSsid.c_str();
-      WiFi.softAP(roadSsid, hubApPassword.c_str(), 6, 0, 4);
+      WiFi.softAP(roadSsid, hubApPassword.c_str(), hubApChannel, 0, 4);
       Serial.printf("Home WiFi:   unavailable, road AP only '%s' http://%s/\n",
                     roadSsid,
                     WiFi.softAPIP().toString().c_str());
