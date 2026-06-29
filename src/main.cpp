@@ -35,6 +35,7 @@
 #include <WebServer.h>
 #include <WiFi.h>
 #include <ESPmDNS.h>
+#include <SPI.h>   // externer W25Q128 (FSPI) - Erkennungs-Check
 #include <esp_netif.h>
 #include <esp_sntp.h>
 #include <esp_wifi.h>
@@ -613,6 +614,12 @@ void saveHubFeatures()
 }
 
 void startHubMdns();  // fwd: in onHubWifiEvent (STA GOT IP) benoetigt
+volatile int lastStaReason = 0;        // [WLAN-DIAG] letzter STA-Disconnect-Reason
+volatile uint8_t lastStaEvent = 0;     // 1=assoziiert 2=GOT_IP 3=disconnected
+bool        w25qDetected = false;       // externer W25Q128-Flash erkannt?
+uint32_t    w25qJedecId  = 0;
+uint32_t    w25qSizeMB   = 0;
+const char *w25qMfg      = "-";
 
 // [WLAN-DIAG] Loggt STA-Events inkl. Reason-Code, damit ein fehlschlagender
 // Heimnetz-Connect eindeutig wird (201=NO_AP_FOUND/Signal, 15/204=HANDSHAKE/Passwort,
@@ -620,13 +627,17 @@ void startHubMdns();  // fwd: in onHubWifiEvent (STA GOT IP) benoetigt
 void onHubWifiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
   switch (event) {
     case ARDUINO_EVENT_WIFI_STA_CONNECTED:
+      lastStaEvent = 1;
       Serial.println("WiFi-EVT:    STA assoziiert (AP gefunden+Auth OK), warte auf IP");
       break;
     case ARDUINO_EVENT_WIFI_STA_GOT_IP:
+      lastStaEvent = 2;
       Serial.printf("WiFi-EVT:    GOT IP %s\n", WiFi.localIP().toString().c_str());
       startHubMdns();  // mDNS auf neuem STA-Netz (z.B. S24) neu registrieren
       break;
     case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
+      lastStaEvent = 3;
+      lastStaReason = info.wifi_sta_disconnected.reason;
       Serial.printf("WiFi-EVT:    STA disconnected reason=%d\n",
                     info.wifi_sta_disconnected.reason);
       break;
@@ -1420,6 +1431,16 @@ String statusJson()
   json += String(cockpitCanTxErrors);
   json += ",\"heap_free\":";
   json += String(heap_caps_get_free_size(MALLOC_CAP_8BIT));
+  json += ",\"flash_ext_detected\":";
+  json += w25qDetected ? "true" : "false";
+  json += ",\"flash_ext_jedec\":\"";
+  char jbuf[8]; snprintf(jbuf, sizeof(jbuf), "%06X", (unsigned)(w25qJedecId & 0xFFFFFF));
+  json += jbuf;
+  json += "\",\"flash_ext_mb\":";
+  json += String(w25qSizeMB);
+  json += ",\"flash_ext_mfg\":\"";
+  json += w25qMfg;
+  json += "\"";
 #if ENABLE_WEB_GUI
   json += ",\"ota_busy\":";
   json += otaBusy ? "true" : "false";
@@ -1541,6 +1562,12 @@ String statusJson()
   json += ",\"" + String(g_hubWifiProfiles[2].ssid) + "\"]";
   json += ",\"wifi_connected\":";
   json += WiFi.status() == WL_CONNECTED ? "true" : "false";
+  json += ",\"wifi_sta_reason\":";
+  json += String(lastStaReason);
+  json += ",\"wifi_sta_event\":";
+  json += String(lastStaEvent);
+  json += ",\"wifi_status\":";
+  json += String((int)WiFi.status());
   json += ",\"wifi_ssid\":\"";
   json += WiFi.status() == WL_CONNECTED ? WiFi.SSID() : "";
   json += "\",\"wifi_ip\":\"";
@@ -6288,6 +6315,42 @@ void printBootDetails()
 
 }  // namespace
 
+// --- Externer W25Q128 SPI-Flash (Stufe 1, Schritt 1: nur Erkennung) ---
+#define W25Q_CS_PIN   13
+#define W25Q_CLK_PIN  14
+#define W25Q_DI_PIN   15   // MOSI
+#define W25Q_DO_PIN   18   // MISO
+SPIClass w25qSpi(FSPI);
+
+// JEDEC-ID (0x9F) lesen: [Hersteller][Typ][Kapazitaet]. W25Q128 = EF 40 18 (16 MB).
+void detectW25Q()
+{
+  pinMode(W25Q_CS_PIN, OUTPUT);
+  digitalWrite(W25Q_CS_PIN, HIGH);
+  w25qSpi.begin(W25Q_CLK_PIN, W25Q_DO_PIN, W25Q_DI_PIN, W25Q_CS_PIN);
+  delay(2);
+  w25qSpi.beginTransaction(SPISettings(8000000, MSBFIRST, SPI_MODE0));
+  digitalWrite(W25Q_CS_PIN, LOW);
+  w25qSpi.transfer(0x9F);
+  const uint8_t mfg = w25qSpi.transfer(0x00);
+  const uint8_t typ = w25qSpi.transfer(0x00);
+  const uint8_t cap = w25qSpi.transfer(0x00);
+  digitalWrite(W25Q_CS_PIN, HIGH);
+  w25qSpi.endTransaction();
+  w25qJedecId = ((uint32_t)mfg << 16) | ((uint32_t)typ << 8) | cap;
+  w25qDetected = (mfg != 0x00 && mfg != 0xFF && cap >= 0x14 && cap <= 0x1A);
+  if (w25qDetected) {
+    w25qSizeMB = (1UL << cap) / (1024UL * 1024UL);   // 0x18 -> 16 MB
+    w25qMfg = (mfg == 0xEF) ? "Winbond" : (mfg == 0xC8) ? "GigaDevice"
+            : (mfg == 0x68) ? "Boya" : "andere";
+  } else {
+    w25qSizeMB = 0;
+    w25qMfg = "-";
+  }
+  Serial.printf("W25Q:        JEDEC=0x%06X detected=%d %s %u MB\n",
+                w25qJedecId, w25qDetected ? 1 : 0, w25qMfg, w25qSizeMB);
+}
+
 void setup()
 {
   pinMode(STATUS_LED_PIN, OUTPUT);
@@ -6295,6 +6358,8 @@ void setup()
 
   Serial.begin(115200);
   delay(500);
+
+  detectW25Q();   // externen W25Q128-Flash erkennen (Check, noch ohne Dateisystem)
 
 #if BLE_BRIDGE
   // BLE-Bridge: NUR 123\TUNE+, dediziert, kein BM6, kein WLAN, kein Hintergrund-Scan.
