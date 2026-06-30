@@ -2250,6 +2250,9 @@ bool shouldLogCsv(const SpartanReading &spartan, const TuneSnapshot &tune)
 // Auto-Reconnect, kein Scan/Kanalwechsel) -> der Hub-AP bleibt fuer die Displays stabil.
 bool vehicleActive()
 {
+  // Emu-Modus = Pruefstand: tuneRpm ist die SELBST erzeugte Emulator-Drehzahl, kein
+  // echter Motor -> Variante-A-Gate aus, sonst blockiert der Emu sein eigenes Heim-WLAN.
+  if (hubFeatEmu123) return false;
 #if ENABLE_BLE_HUB
   if (tuneSnapshot().rpm > ENGINE_RUNNING_RPM_THRESHOLD) return true;
 #endif
