@@ -5628,6 +5628,7 @@ setInterval(() => {
     h += F("<div class=big id=live>--</div>"
            "<div class=muted>Drehzahl:</div>"
            "<div><a class='btn' href='/emu?sweep=1'>Sweep</a>"
+           "<a class='btn' href='/emu?rpm=300'>300</a>"
            "<a class='btn' href='/emu?rpm=800'>800</a><a class='btn' href='/emu?rpm=1500'>1500</a>"
            "<a class='btn' href='/emu?rpm=2500'>2500</a><a class='btn' href='/emu?rpm=4000'>4000</a></div>"
            "<p class=muted>Advertised als &#39;123&#92;TUNE+&#39;. Hub/M5 verbinden sich damit wie mit der echten 123.</p>"
