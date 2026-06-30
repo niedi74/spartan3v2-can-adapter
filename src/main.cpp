@@ -566,7 +566,8 @@ String hubApIp = "192.168.4.1";  // in WebGUI (Dev -> Access Point) frei einstel
 // folgt jetzt dem Router-Kanal (per Scan ermittelt) und wird in NVS gemerkt, damit
 // der AP nach einem Reboot gleich richtig hochkommt (kein Scan noetig).
 uint8_t hubApChannel = 6;                 // aktueller SoftAP-Kanal (folgt dem Home-Router)
-volatile bool homeWifiNotFound = false;   // letzter Connect: Ziel-SSID nicht im Scan
+volatile bool homeWifiNotFound = false;   // letzter Connect: AP nicht gefunden (reason 201)
+volatile bool apSuspendedForConnect = false;  // AP haengt waehrend STA-Connect (Single-Radio)
 String hubHostname = "spartanhub";  // mDNS-Name -> http://<name>.local, in WebGUI editierbar
 String hubApMask = "255.255.255.0";
 struct WifiHttpPoller {
@@ -646,6 +647,7 @@ void onHubWifiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
     case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
       lastStaEvent = 3;
       lastStaReason = info.wifi_sta_disconnected.reason;
+      homeWifiNotFound = (lastStaReason == 201);  // 201 = NO_AP_FOUND (Reichweite/Band)
       Serial.printf("WiFi-EVT:    STA disconnected reason=%d\n",
                     info.wifi_sta_disconnected.reason);
       break;
@@ -823,31 +825,20 @@ void startHubMdns()
   }
 }
 
-// [WLAN-KANAL] Home/S24-STA verbinden und den SoftAP vorher auf den Router-Kanal
-// ziehen, damit AP+STA auf der einen ESP32-S3-Funkeinheit koexistieren (sonst
-// assoziiert die STA, bekommt aber keine IP). Ein einmaliger Scan (user-getriggert
-// beim Profilwechsel, im Stand) ermittelt den Kanal des Ziel-Netzes. Findet der
-// Scan die SSID nicht (ausser Reichweite / anderes Band), wird trotzdem verbunden
-// (alter Kanal) und homeWifiNotFound fuer die GUI gesetzt. KEIN periodischer Scan.
+// [WLAN-KANAL] Home/S24-STA verbinden. Single-Radio-Trick OHNE Scan: der SoftAP
+// wird fuer den Connect kurz ausgesetzt (reine STA), damit die STA auf dem Kanal
+// des Routers sauber DHCP bekommt. Nach GOT_IP bringt updateWebGui() den AP auf
+// genau diesem Kanal zurueck (hubApChannel, in NVS gemerkt). Scan-frei = immun
+// gegen die BLE+AP-Scan-Stoerung ("Scan fehlgeschlagen"). Der AP-Blip passiert nur
+// beim manuellen Verbinden (im Stand), nie periodisch/fahrend.
 void connectHomeWifiAligned(const char *ssid, const char *pass)
 {
-  int found = 0;
-  int n = WiFi.scanNetworks(false, false);   // synchron, alle Kanaele, einmalig
-  for (int i = 0; i < n; i++) {
-    if (WiFi.SSID(i) == ssid) { found = WiFi.channel(i); break; }
+  homeWifiNotFound = false;
+  if (hubFeatAp) {
+    apSuspendedForConnect = true;
+    WiFi.mode(WIFI_STA);   // SoftAP aus -> Funkeinheit frei fuer den Router-Kanal
+    Serial.println("WLAN-Kanal:  AP fuer Connect kurz ausgesetzt (reine STA, ~5-20s)");
   }
-  if (n >= 0) WiFi.scanDelete();
-  homeWifiNotFound = (n >= 0 && found == 0);
-  if (found >= 1 && found <= 13 && hubFeatAp && (uint8_t)found != hubApChannel) {
-    const char *apSsid = (hubApSsid.length() > 0) ? hubApSsid.c_str() : WEB_AP_SSID;
-    WiFi.softAP(apSsid, hubApPassword.c_str(), (uint8_t)found, 0, 4);
-    hubApChannel = (uint8_t)found;
-    networkPreferences.putUChar("ap_chan", hubApChannel);
-    Serial.printf("WLAN-Kanal:  AP folgt Home '%s' auf Kanal %d\n", ssid, found);
-  }
-  if (homeWifiNotFound)
-    Serial.printf("WLAN-Kanal:  '%s' nicht im Scan (Reichweite/Band?) - verbinde auf Kanal %d\n",
-                  ssid, hubApChannel);
   WiFi.begin(ssid, pass);
   homeWifiConnectStartedMs = millis();
 }
@@ -5126,16 +5117,19 @@ async function refresh() {
         ef.style.color = d.flash_ext_detected ? '#54d273' : '#ff6a5a'; } }
     { const wc = document.getElementById('wifichan');
       if (wc) {
-        const staCh = d.wifi_sta_channel ?? 0, apCh = d.wifi_ap_channel ?? 0;
+        const staCh = d.wifi_sta_channel ?? 0, apCh = d.wifi_ap_channel ?? 0, rs = d.wifi_sta_reason ?? 0;
         if (d.wifi_connected) {
           wc.textContent = 'STA Kanal ' + staCh + ' (' + (d.wifi_sta_rssi ?? 0) + ' dBm) / AP Kanal ' + apCh + ' ✓';
           wc.style.color = '#54d273';
-        } else if (d.wifi_home_not_found) {
-          wc.textContent = 'Home/S24 nicht gefunden - Reichweite/Band? / AP Kanal ' + apCh;
-          wc.style.color = '#ff6a5a';
         } else {
-          wc.textContent = 'STA - / AP Kanal ' + apCh;
-          wc.style.color = '';
+          let why;
+          if (rs === 201 || d.wifi_home_not_found) why = 'AP nicht gefunden (Reichweite/Band/Name?)';
+          else if (rs === 202 || rs === 204 || rs === 15) why = 'Passwort? (Auth abgelehnt)';
+          else if (rs === 8) why = 'Kanal/DHCP (assoziiert, keine IP)';
+          else if (rs === 0) why = 'kein Versuch / kein Profil aktiv';
+          else why = 'Grund ' + rs;
+          wc.textContent = 'nicht verbunden - ' + why + ' / AP Kanal ' + apCh;
+          wc.style.color = '#ff6a5a';
         } } }
     document.getElementById('hours').textContent = Number(d.device_hours ?? 0).toFixed(2) + ' / ' + Number(d.engine_hours ?? 0).toFixed(2) + ' / ' + Number(d.sensor_hours ?? 0).toFixed(2) + ' h';
     document.getElementById('liveHours').textContent = Number(d.sensor_hours ?? 0).toFixed(2) + ' h';
@@ -5817,7 +5811,8 @@ void updateWebGui()
     }
     Serial.println("Web GUI:     SoftAP forced off by Setup");
   }
-  if (WiFi.softAPIP() == IPAddress(0, 0, 0, 0) && hubFeatAp && now - lastApRetryMs >= 10000) {
+  if (WiFi.softAPIP() == IPAddress(0, 0, 0, 0) && hubFeatAp && !apSuspendedForConnect &&
+      now - lastApRetryMs >= 10000) {
     lastApRetryMs = now;
     ensureHubSoftAp();
     if (WiFi.softAPIP() != IPAddress(0, 0, 0, 0)) {
@@ -5832,15 +5827,33 @@ void updateWebGui()
     if (wifiStatus == WL_CONNECTED) {
       homeWifiDisabledForRoadAp = false;
       homeWifiConnectStartedMs = 0;
+      // [WLAN-KANAL] Verbindung steht -> AP auf dem nun bekannten Router-Kanal
+      // wieder hochfahren (war fuer den Connect ausgesetzt). Aus dem loop-Kontext,
+      // damit NVS-Write/softAP nicht im WiFi-Event-Task laufen.
+      if (apSuspendedForConnect) {
+        apSuspendedForConnect = false;
+        uint8_t ch = (uint8_t)WiFi.channel();
+        if (ch >= 1 && ch <= 13 && ch != hubApChannel) {
+          hubApChannel = ch;
+          networkPreferences.putUChar("ap_chan", hubApChannel);
+        }
+        ensureHubSoftAp();   // AP zurueck (WIFI_AP_STA, softAP auf hubApChannel)
+        startHubMdns();
+        Serial.printf("WLAN-Kanal:  verbunden auf Kanal %d, AP wieder aktiv\n", hubApChannel);
+      }
       Serial.printf("Home WiFi:   connected to '%s', http://%s/\n", WiFi.SSID().c_str(), WiFi.localIP().toString().c_str());
       startNtpIfNeeded();
     }
   }
   updateNtp(now);
+  // [WLAN-KANAL] Bei ausgesetztem AP kuerzeres Fenster (20s), damit der AP nicht
+  // 45s wegbleibt, wenn der Connect scheitert (z.B. falsches PW / nicht erreichbar).
+  const uint32_t connWindow = apSuspendedForConnect ? 20000UL : kHomeWifiConnectWindowMs;
   if (hubFeatWifi && haveSavedWifi && !homeWifiDisabledForRoadAp && wifiStatus != WL_CONNECTED &&
-      homeWifiConnectStartedMs != 0 && now - homeWifiConnectStartedMs >= kHomeWifiConnectWindowMs) {
+      homeWifiConnectStartedMs != 0 && now - homeWifiConnectStartedMs >= connWindow) {
     WiFi.disconnect(false, false);
     homeWifiDisabledForRoadAp = true;
+    apSuspendedForConnect = false;   // AP wird gleich wieder hochgefahren
     if (hubFeatAp) {
       WiFi.mode(WIFI_AP);
       WiFi.setSleep(true);
