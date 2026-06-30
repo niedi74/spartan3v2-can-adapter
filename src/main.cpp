@@ -378,6 +378,10 @@ uint32_t speedPrevPulseCount = 0;            // Sampling-Diff loop()
 uint32_t speedPrevSampleMs = 0;
 float speedHz = 0.0f;
 float speedKmh = 0.0f;
+
+// [VARIANTE-A] Vorwaerts-Deklaration: Motor laeuft/faehrt? -> dann KEINE neuen
+// Heim-/S24-STA-Versuche, damit der Hub-AP (Touch/Displays) bockstabil bleibt.
+bool vehicleActive();
 uint16_t tireCircMm = TIRE_CIRC_MM_DEFAULT;  // konfigurierbar
 uint16_t speedTrimPermil = SPEED_TRIM_PERMIL_DEFAULT; // 1000 = 1.000
 #endif
@@ -833,6 +837,10 @@ void startHubMdns()
 // beim manuellen Verbinden (im Stand), nie periodisch/fahrend.
 void connectHomeWifiAligned(const char *ssid, const char *pass)
 {
+  if (vehicleActive()) {   // [VARIANTE-A] fahrend kein Connect -> AP/Touch bleibt stabil
+    Serial.println("Variante A:  Motor laeuft -> Heim-Connect verschoben bis zum Stand");
+    return;   // im Stand holt es applyHubFeatures() / das Motor-Gate nach
+  }
   homeWifiNotFound = false;
   if (hubFeatAp) {
     apSuspendedForConnect = true;
@@ -1612,6 +1620,8 @@ String statusJson()
   json += String((int)hubApChannel);
   json += ",\"wifi_home_not_found\":";
   json += homeWifiNotFound ? "true" : "false";
+  json += ",\"vehicle_active\":";
+  json += vehicleActive() ? "true" : "false";
   json += ",\"ap_retry_count\":";
   json += String(apRetryCount);
   json += ",\"log_ready\":";
@@ -2221,6 +2231,20 @@ bool shouldLogCsv(const SpartanReading &spartan, const TuneSnapshot &tune)
   if (speedKmh > 0.5f) return true;
 #endif
   return spartan.valid;
+}
+
+// [VARIANTE-A] Fahrzeug aktiv = Motor laeuft (RPM ueber Schwelle) ODER faehrt (Reed).
+// Waehrenddessen blockiert der Hub jede Heim-/S24-STA-Aktivitaet (kein Connect, kein
+// Auto-Reconnect, kein Scan/Kanalwechsel) -> der Hub-AP bleibt fuer die Displays stabil.
+bool vehicleActive()
+{
+#if ENABLE_BLE_HUB
+  if (tuneSnapshot().rpm > ENGINE_RUNNING_RPM_THRESHOLD) return true;
+#endif
+#if SPEED_REED_PIN >= 0
+  if (speedKmh > 0.5f) return true;
+#endif
+  return false;
 }
 
 void appendLiveCsv()
@@ -3877,7 +3901,8 @@ void applyHubFeatures()
     homeWifiConnectStartedMs = 0;
     homeWifiDisabledForRoadAp = false;
   } else if (haveSavedWifi && WiFi.status() != WL_CONNECTED &&
-             homeWifiConnectStartedMs == 0 && !homeWifiDisabledForRoadAp && hubWifiProfile > 0) {
+             homeWifiConnectStartedMs == 0 && !homeWifiDisabledForRoadAp && hubWifiProfile > 0 &&
+             !vehicleActive()) {   // [VARIANTE-A] fahrend keinen Reconnect anstossen
     const char* ssid = g_hubWifiProfiles[hubWifiProfile].ssid;
     const char* pass = g_hubWifiProfiles[hubWifiProfile].pass;
     if (strlen(ssid) > 0) {
@@ -4113,7 +4138,7 @@ void setupWebGui()
 
   if (busMode) {
     Serial.println("Home WiFi:   Bus-Modus, nur AP");
-  } else if (haveSavedWifi && hubFeatWifi) {
+  } else if (haveSavedWifi && hubFeatWifi && !vehicleActive()) {   // [VARIANTE-A] Boot-Connect nur im Stand
     WiFi.begin(staSsid, staPass);
     homeWifiConnectStartedMs = millis();
     Serial.printf("Home WiFi:   Profil %d '%s' verbindet\n", hubWifiProfile, staSsid);
@@ -4637,6 +4662,8 @@ details.setup > .inside { padding: 0 16px 16px; }
 <div class="row"><span>Heap frei</span><strong id="heap">-</strong></div>
 <div class="row"><span>Ext. Flash (W25Q)</span><strong id="extflash">-</strong></div>
 <div class="row"><span>WLAN-Kanal (STA / AP)</span><strong id="wifichan">-</strong></div>
+<div class="row"><span>Fahrt-Gate (Variante A)</span><strong id="vargate">-</strong></div>
+<div class="hint" style="font-size:11px;margin:-2px 0 4px">Variante&nbsp;A: Heim-/S24-WLAN verbindet nur im Stand. Fährt der Wagen (Motor läuft / Reed-Speed), bleibt der Hub-AP für die Displays stabil — kein Reconnect, kein Scan, kein Kanalwechsel.</div>
 <div class="row"><span>Betriebsstunden</span><strong id="hours">-</strong></div>
 <div style="display:flex;gap:8px;margin-top:8px">
 <button class="secondary" type="button" onclick="copyJson()">JSON kopieren</button>
@@ -5130,6 +5157,15 @@ async function refresh() {
           else why = 'Grund ' + rs;
           wc.textContent = 'nicht verbunden - ' + why + ' / AP Kanal ' + apCh;
           wc.style.color = '#ff6a5a';
+        } } }
+    { const vg = document.getElementById('vargate');
+      if (vg) {
+        if (d.vehicle_active) {
+          vg.textContent = 'aktiv → Heim-WLAN pausiert (Motor läuft / fährt)';
+          vg.style.color = '#f0c020';
+        } else {
+          vg.textContent = (d.wifi_connected ? 'Stand → Heim-WLAN verbunden' : 'Stand → Heim-WLAN frei');
+          vg.style.color = '#54d273';
         } } }
     document.getElementById('hours').textContent = Number(d.device_hours ?? 0).toFixed(2) + ' / ' + Number(d.engine_hours ?? 0).toFixed(2) + ' / ' + Number(d.sensor_hours ?? 0).toFixed(2) + ' h';
     document.getElementById('liveHours').textContent = Number(d.sensor_hours ?? 0).toFixed(2) + ' h';
@@ -5802,6 +5838,33 @@ void updateWebGui()
   const uint32_t now = millis();
   static wl_status_t lastWifiStatus = WL_IDLE_STATUS;
   const wl_status_t wifiStatus = WiFi.status();
+  // [VARIANTE-A] Motor-Gate: faehrt der Wagen, schaltet der Hub den IDF-Auto-Reconnect
+  // AUS -> faellt die Heim-STA fahrend weg, sucht der Funk NICHT (kein AP/Touch-Blip).
+  // Eine bestehende Verbindung bleibt. Im Stand wieder an + ggf. einmal verbinden.
+  // Drossel: ~1x/s (vehicleActive() liest tuneSnapshot, nicht jeden Loop noetig).
+  static uint32_t lastVarACheckMs = 0;
+  static bool lastDriving = false;
+  static bool varAInit = false;
+  if (now - lastVarACheckMs >= 1000) {
+    lastVarACheckMs = now;
+    const bool driving = vehicleActive();
+    if (driving != lastDriving || !varAInit) {
+      varAInit = true;
+      lastDriving = driving;
+      WiFi.setAutoReconnect(!driving);
+      if (driving) {
+        Serial.println("Variante A:  Motor laeuft/faehrt -> Heim-WLAN pausiert (AP/Touch stabil)");
+      } else {
+        Serial.println("Variante A:  Stand -> Heim-WLAN wieder erlaubt");
+        if (hubFeatWifi && haveSavedWifi && hubWifiProfile > 0 &&
+            wifiStatus != WL_CONNECTED && homeWifiConnectStartedMs == 0) {
+          homeWifiDisabledForRoadAp = false;   // im Stand frischen Versuch zulassen
+          connectHomeWifiAligned(g_hubWifiProfiles[hubWifiProfile].ssid,
+                                 g_hubWifiProfiles[hubWifiProfile].pass);
+        }
+      }
+    }
+  }
   if (!hubFeatAp && hubSoftApModeActive()) {
     WiFi.softAPdisconnect(true);
     if (hubFeatWifi || wifiStatus == WL_CONNECTED) {
