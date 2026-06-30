@@ -223,6 +223,14 @@
 #define BLE_HUB_NAME "Spartan3-Hub"
 #endif
 
+// [W25Q-CFG] Config-Backup auf den externen W25Q128 -> WLAN-Daten + Setup ueberleben
+// jeden Firmware-Flash (sogar erase_flash), weil der Chip dabei nie angefasst wird.
+// Global deklariert, damit die Funktionen aus dem anonymen Namespace (loadHubFeatures,
+// updateWebGui, Endpoints) erreichbar sind; Definition global neben detectW25Q().
+void saveConfigToW25Q();
+void restoreConfigFromW25Q();
+bool hubCfgDirty = false;   // Config geaendert -> Backup beim naechsten Halt schreiben
+
 namespace {
 #ifdef USE_M5_DISPLAY
 constexpr uint8_t kDisplayRows = 2;
@@ -663,6 +671,8 @@ void onHubWifiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
 void loadHubFeatures()
 {
   ensurePreferences();
+  restoreConfigFromW25Q();   // [W25Q-CFG] frisches NVS (nach Flash/erase) aus Backup fuellen
+  if (w25qDetected && !networkPreferences.isKey("cfg_w25q")) hubCfgDirty = true;  // Erst-Backup
   hubApSsid = networkPreferences.getString("ap_ssid", WEB_AP_SSID);
   hubApPassword = networkPreferences.getString("ap_pass", WEB_AP_PASSWORD);
   hubApIp = networkPreferences.getString("ap_ip", "192.168.4.1");
@@ -1479,6 +1489,8 @@ String statusJson()
   json += ",\"flash_ext_mfg\":\"";
   json += w25qMfg;
   json += "\"";
+  json += ",\"cfg_backup\":";
+  json += (w25qDetected && networkPreferences.isKey("cfg_w25q")) ? "true" : "false";
 #if ENABLE_WEB_GUI
   json += ",\"ota_busy\":";
   json += otaBusy ? "true" : "false";
@@ -4661,6 +4673,8 @@ details.setup > .inside { padding: 0 16px 16px; }
 <div class="row"><span>CAN Fehler</span><strong id="canerr">0</strong></div>
 <div class="row"><span>Heap frei</span><strong id="heap">-</strong></div>
 <div class="row"><span>Ext. Flash (W25Q)</span><strong id="extflash">-</strong></div>
+<div class="row"><span>Config-Backup (W25Q)</span><strong id="cfgbackup">-</strong></div>
+<div class="hint" style="font-size:11px;margin:-2px 0 4px">WLAN-Daten &amp; Setup werden zusätzlich auf dem 16-MB-Chip gesichert und nach einem Firmware-Flash automatisch wiederhergestellt (überlebt sogar <code>erase_flash</code>).</div>
 <div class="row"><span>WLAN-Kanal (STA / AP)</span><strong id="wifichan">-</strong></div>
 <div class="row"><span>Fahrt-Gate (Variante A)</span><strong id="vargate">-</strong></div>
 <div class="hint" style="font-size:11px;margin:-2px 0 4px">Variante&nbsp;A: Heim-/S24-WLAN verbindet nur im Stand. Fährt der Wagen (Motor läuft / Reed-Speed), bleibt der Hub-AP für die Displays stabil — kein Reconnect, kein Scan, kein Kanalwechsel.</div>
@@ -5142,6 +5156,11 @@ async function refresh() {
         ? ('OK ✓ ' + (d.flash_ext_mfg||'?') + ' ' + (d.flash_ext_mb||0) + ' MB (0x' + (d.flash_ext_jedec||'') + ')')
         : ('nicht erkannt (0x' + (d.flash_ext_jedec||'------') + ')');
         ef.style.color = d.flash_ext_detected ? '#54d273' : '#ff6a5a'; } }
+    { const cb = document.getElementById('cfgbackup');
+      if (cb) {
+        if (!d.flash_ext_detected) { cb.textContent = 'kein Chip'; cb.style.color = '#ff6a5a'; }
+        else if (d.cfg_backup) { cb.textContent = 'gesichert ✓ (übersteht Flash)'; cb.style.color = '#54d273'; }
+        else { cb.textContent = 'Chip da, noch kein Backup'; cb.style.color = '#f0c020'; } } }
     { const wc = document.getElementById('wifichan');
       if (wc) {
         const staCh = d.wifi_sta_channel ?? 0, apCh = d.wifi_ap_channel ?? 0, rs = d.wifi_sta_reason ?? 0;
@@ -5484,6 +5503,7 @@ setInterval(() => {
       haveSavedWifi = strlen(ssid) > 0;
       if (haveSavedWifi && hubFeatWifi) {
         Serial.printf("WiFi Profil: %d '%s'\n", slot, ssid);
+        hubCfgDirty = true;   // [W25Q-CFG] Backup aktualisieren
         connectHomeWifiAligned(ssid, pass);  // [WLAN-KANAL] AP folgt Router-Kanal
       } else {
         Serial.printf("WiFi Profil: %d SSID leer oder WiFi aus\n", slot);
@@ -5517,6 +5537,7 @@ setInterval(() => {
       savedWifiSsid = String(g_hubWifiProfiles[slot].ssid);
       haveSavedWifi = true;
       Serial.printf("WiFi Profil: %d -> aktiviert + verbinde\n", slot);
+      hubCfgDirty = true;   // [W25Q-CFG] Backup aktualisieren
       connectHomeWifiAligned(g_hubWifiProfiles[slot].ssid, g_hubWifiProfiles[slot].pass);
     }
     server.sendHeader("Location", "/", true);
@@ -5547,6 +5568,7 @@ setInterval(() => {
     if (hubFeatWifi) {
       homeWifiDisabledForRoadAp = false;
       Serial.printf("Home WiFi:   saved and connecting to '%s'\n", ssid.c_str());
+      hubCfgDirty = true;   // [W25Q-CFG] Backup aktualisieren
       connectHomeWifiAligned(ssid.c_str(), password.c_str());  // [WLAN-KANAL]
     } else {
       homeWifiConnectStartedMs = 0;
@@ -5561,6 +5583,7 @@ setInterval(() => {
     haveSavedWifi = false;
     savedWifiSsid = "";
     WiFi.disconnect();
+    hubCfgDirty = true;   // [W25Q-CFG] Backup auf geleerten Stand bringen
     Serial.println("Home WiFi:   credentials cleared");
     server.sendHeader("Location", "/", true);
     server.send(303, "text/plain", "");
@@ -5794,6 +5817,7 @@ setInterval(() => {
       return;
     }
     saveHubApConfig(ssid, password, ip, mask);
+    hubCfgDirty = true;   // [W25Q-CFG] AP-Config + mDNS ins Backup
     // mDNS-Name (optional): sanitisieren auf a-z 0-9 '-', speichern, Responder neu starten.
     String mdns = server.arg("mdns");
     mdns.trim();
@@ -5864,6 +5888,12 @@ void updateWebGui()
         }
       }
     }
+  }
+  // [W25Q-CFG] geaenderte Config zeitnah auf den Backup-Chip schreiben (rar, user-getriggert,
+  // ~50ms Erase) -> WLAN-Daten + Setup ueberleben jeden Firmware-Flash.
+  if (hubCfgDirty && w25qDetected) {
+    hubCfgDirty = false;
+    saveConfigToW25Q();
   }
   if (!hubFeatAp && hubSoftApModeActive()) {
     WiFi.softAPdisconnect(true);
@@ -6489,6 +6519,170 @@ void detectW25Q()
   }
   Serial.printf("W25Q:        JEDEC=0x%06X detected=%d %s %u MB\n",
                 w25qJedecId, w25qDetected ? 1 : 0, w25qMfg, w25qSizeMB);
+}
+
+// --- W25Q Roh-Zugriff fuer Config-Backup (fester Sektor 0, kein Dateisystem) ---
+static void w25qBusyWait()
+{
+  w25qSpi.beginTransaction(SPISettings(8000000, MSBFIRST, SPI_MODE0));
+  digitalWrite(W25Q_CS_PIN, LOW);
+  w25qSpi.transfer(0x05);                       // Read Status Register-1
+  const uint32_t t0 = millis();
+  while ((w25qSpi.transfer(0x00) & 0x01) && (millis() - t0 < 600)) { /* WIP */ }
+  digitalWrite(W25Q_CS_PIN, HIGH);
+  w25qSpi.endTransaction();
+}
+static void w25qSimpleCmd(uint8_t cmd)          // z.B. WREN 0x06
+{
+  w25qSpi.beginTransaction(SPISettings(8000000, MSBFIRST, SPI_MODE0));
+  digitalWrite(W25Q_CS_PIN, LOW);
+  w25qSpi.transfer(cmd);
+  digitalWrite(W25Q_CS_PIN, HIGH);
+  w25qSpi.endTransaction();
+}
+static void w25qReadData(uint32_t addr, uint8_t *buf, size_t len)
+{
+  w25qSpi.beginTransaction(SPISettings(8000000, MSBFIRST, SPI_MODE0));
+  digitalWrite(W25Q_CS_PIN, LOW);
+  w25qSpi.transfer(0x03);                        // Read Data
+  w25qSpi.transfer((addr >> 16) & 0xFF);
+  w25qSpi.transfer((addr >> 8) & 0xFF);
+  w25qSpi.transfer(addr & 0xFF);
+  for (size_t i = 0; i < len; i++) buf[i] = w25qSpi.transfer(0x00);
+  digitalWrite(W25Q_CS_PIN, HIGH);
+  w25qSpi.endTransaction();
+}
+static void w25qSectorErase(uint32_t addr)       // 4 KB
+{
+  w25qSimpleCmd(0x06);                           // WREN
+  w25qSpi.beginTransaction(SPISettings(8000000, MSBFIRST, SPI_MODE0));
+  digitalWrite(W25Q_CS_PIN, LOW);
+  w25qSpi.transfer(0x20);
+  w25qSpi.transfer((addr >> 16) & 0xFF);
+  w25qSpi.transfer((addr >> 8) & 0xFF);
+  w25qSpi.transfer(addr & 0xFF);
+  digitalWrite(W25Q_CS_PIN, HIGH);
+  w25qSpi.endTransaction();
+  w25qBusyWait();
+}
+static void w25qPageProgram(uint32_t addr, const uint8_t *buf, size_t len)
+{
+  w25qSimpleCmd(0x06);                           // WREN
+  w25qSpi.beginTransaction(SPISettings(8000000, MSBFIRST, SPI_MODE0));
+  digitalWrite(W25Q_CS_PIN, LOW);
+  w25qSpi.transfer(0x02);
+  w25qSpi.transfer((addr >> 16) & 0xFF);
+  w25qSpi.transfer((addr >> 8) & 0xFF);
+  w25qSpi.transfer(addr & 0xFF);
+  for (size_t i = 0; i < len; i++) w25qSpi.transfer(buf[i]);
+  digitalWrite(W25Q_CS_PIN, HIGH);
+  w25qSpi.endTransaction();
+  w25qBusyWait();
+}
+static void w25qWriteData(uint32_t addr, const uint8_t *buf, size_t len)
+{
+  size_t off = 0;                                // an 256-Byte-Page-Grenzen splitten
+  while (off < len) {
+    const uint32_t a = addr + off;
+    const size_t pageRem = 256 - (a & 0xFF);
+    const size_t chunk = (len - off < pageRem) ? (len - off) : pageRem;
+    w25qPageProgram(a, buf + off, chunk);
+    off += chunk;
+  }
+}
+static uint32_t hubCfgCrc32(const uint8_t *data, size_t len)
+{
+  uint32_t crc = 0xFFFFFFFFUL;
+  for (size_t i = 0; i < len; i++) {
+    crc ^= data[i];
+    for (int b = 0; b < 8; b++) crc = (crc >> 1) ^ (0xEDB88320UL & (~(crc & 1) + 1));
+  }
+  return ~crc;
+}
+
+#define HUB_CFG_MAGIC   0x48424346UL   // 'HBCF'
+#define HUB_CFG_VERSION 1
+#define HUB_CFG_ADDR    0x000000UL     // Sektor 0 des W25Q
+
+#pragma pack(push, 1)
+struct HubConfigBlob {
+  uint32_t magic;
+  uint16_t version;
+  uint16_t size;
+  char     p1_ssid[33]; char p1_pass[65];
+  char     p2_ssid[33]; char p2_pass[65];
+  uint8_t  wifi_prof;
+  char     legacy_ssid[33]; char legacy_pass[65];
+  char     ap_ssid[33]; char ap_pass[65]; char ap_ip[16];
+  uint8_t  ap_chan;
+  char     mdns_host[33];
+  uint32_t crc32;
+};
+#pragma pack(pop)
+
+// Aktuelle Config (aus NVS) als Blob auf den W25Q schreiben. NVS ist die Quelle der
+// Wahrheit; die Endpoints haben vorher schon ins NVS geschrieben.
+void saveConfigToW25Q()
+{
+  if (!w25qDetected) return;
+  HubConfigBlob b;
+  memset(&b, 0, sizeof(b));
+  b.magic = HUB_CFG_MAGIC; b.version = HUB_CFG_VERSION; b.size = sizeof(b);
+  auto gs = [&](const char *k, const char *def, char *dst, size_t n) {
+    const String v = networkPreferences.getString(k, def);
+    strlcpy(dst, v.c_str(), n);
+  };
+  gs("p1_ssid", "", b.p1_ssid, sizeof(b.p1_ssid));
+  gs("p1_pass", "", b.p1_pass, sizeof(b.p1_pass));
+  gs("p2_ssid", "", b.p2_ssid, sizeof(b.p2_ssid));
+  gs("p2_pass", "", b.p2_pass, sizeof(b.p2_pass));
+  b.wifi_prof = networkPreferences.getUChar("wifi_prof", 0);
+  gs("ssid", "", b.legacy_ssid, sizeof(b.legacy_ssid));
+  gs("pass", "", b.legacy_pass, sizeof(b.legacy_pass));
+  gs("ap_ssid", WEB_AP_SSID, b.ap_ssid, sizeof(b.ap_ssid));
+  gs("ap_pass", WEB_AP_PASSWORD, b.ap_pass, sizeof(b.ap_pass));
+  gs("ap_ip", "192.168.4.1", b.ap_ip, sizeof(b.ap_ip));
+  b.ap_chan = networkPreferences.getUChar("ap_chan", 6);
+  gs("mdns_host", "spartanhub", b.mdns_host, sizeof(b.mdns_host));
+  b.crc32 = hubCfgCrc32(reinterpret_cast<const uint8_t *>(&b), sizeof(b) - sizeof(b.crc32));
+  w25qSectorErase(HUB_CFG_ADDR);
+  w25qWriteData(HUB_CFG_ADDR, reinterpret_cast<const uint8_t *>(&b), sizeof(b));
+  networkPreferences.putUChar("cfg_w25q", HUB_CFG_VERSION);   // NVS gilt jetzt als initialisiert
+  Serial.printf("Config:      Backup auf W25Q geschrieben (Profil %d, SSID1 '%s')\n",
+                b.wifi_prof, b.p1_ssid);
+}
+
+// Bei frischem NVS (kein cfg_w25q-Marker, z.B. nach erase_flash) die Config aus dem
+// W25Q-Backup ins NVS zurueckschreiben. Laeuft VOR dem Einlesen der NVS-Werte.
+void restoreConfigFromW25Q()
+{
+  if (!w25qDetected) return;
+  if (networkPreferences.isKey("cfg_w25q")) return;   // NVS schon initialisiert -> kein Restore
+  HubConfigBlob b;
+  w25qReadData(HUB_CFG_ADDR, reinterpret_cast<uint8_t *>(&b), sizeof(b));
+  if (b.magic != HUB_CFG_MAGIC || b.version != HUB_CFG_VERSION || b.size != sizeof(b)) return;
+  const uint32_t crc = hubCfgCrc32(reinterpret_cast<const uint8_t *>(&b), sizeof(b) - sizeof(b.crc32));
+  if (crc != b.crc32) { Serial.println("Config:      W25Q-Backup CRC ungueltig - kein Restore"); return; }
+  b.p1_ssid[sizeof(b.p1_ssid) - 1] = 0; b.p1_pass[sizeof(b.p1_pass) - 1] = 0;
+  b.p2_ssid[sizeof(b.p2_ssid) - 1] = 0; b.p2_pass[sizeof(b.p2_pass) - 1] = 0;
+  b.legacy_ssid[sizeof(b.legacy_ssid) - 1] = 0; b.legacy_pass[sizeof(b.legacy_pass) - 1] = 0;
+  b.ap_ssid[sizeof(b.ap_ssid) - 1] = 0; b.ap_pass[sizeof(b.ap_pass) - 1] = 0;
+  b.ap_ip[sizeof(b.ap_ip) - 1] = 0; b.mdns_host[sizeof(b.mdns_host) - 1] = 0;
+  networkPreferences.putString("p1_ssid", b.p1_ssid);
+  networkPreferences.putString("p1_pass", b.p1_pass);
+  networkPreferences.putString("p2_ssid", b.p2_ssid);
+  networkPreferences.putString("p2_pass", b.p2_pass);
+  networkPreferences.putUChar("wifi_prof", b.wifi_prof);
+  if (b.legacy_ssid[0]) networkPreferences.putString("ssid", b.legacy_ssid);
+  if (b.legacy_pass[0]) networkPreferences.putString("pass", b.legacy_pass);
+  networkPreferences.putString("ap_ssid", b.ap_ssid);
+  networkPreferences.putString("ap_pass", b.ap_pass);
+  networkPreferences.putString("ap_ip", b.ap_ip);
+  networkPreferences.putUChar("ap_chan", b.ap_chan);
+  networkPreferences.putString("mdns_host", b.mdns_host);
+  networkPreferences.putUChar("cfg_w25q", HUB_CFG_VERSION);
+  Serial.printf("Config:      aus W25Q-Backup wiederhergestellt (Profil %d, SSID1 '%s')\n",
+                b.wifi_prof, b.p1_ssid);
 }
 
 void setup()
