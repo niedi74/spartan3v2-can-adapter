@@ -6601,7 +6601,7 @@ static uint32_t hubCfgCrc32(const uint8_t *data, size_t len)
 }
 
 #define HUB_CFG_MAGIC   0x48424346UL   // 'HBCF'
-#define HUB_CFG_VERSION 1
+#define HUB_CFG_VERSION 2              // v2: Backup aus effektiven Globals (v1 hatte leeres p1_pass)
 #define HUB_CFG_ADDR    0x000000UL     // Sektor 0 des W25Q
 
 #pragma pack(push, 1)
@@ -6628,22 +6628,21 @@ void saveConfigToW25Q()
   HubConfigBlob b;
   memset(&b, 0, sizeof(b));
   b.magic = HUB_CFG_MAGIC; b.version = HUB_CFG_VERSION; b.size = sizeof(b);
-  auto gs = [&](const char *k, const char *def, char *dst, size_t n) {
-    const String v = networkPreferences.getString(k, def);
-    strlcpy(dst, v.c_str(), n);
-  };
-  gs("p1_ssid", "", b.p1_ssid, sizeof(b.p1_ssid));
-  gs("p1_pass", "", b.p1_pass, sizeof(b.p1_pass));
-  gs("p2_ssid", "", b.p2_ssid, sizeof(b.p2_ssid));
-  gs("p2_pass", "", b.p2_pass, sizeof(b.p2_pass));
-  b.wifi_prof = networkPreferences.getUChar("wifi_prof", 0);
-  gs("ssid", "", b.legacy_ssid, sizeof(b.legacy_ssid));
-  gs("pass", "", b.legacy_pass, sizeof(b.legacy_pass));
-  gs("ap_ssid", WEB_AP_SSID, b.ap_ssid, sizeof(b.ap_ssid));
-  gs("ap_pass", WEB_AP_PASSWORD, b.ap_pass, sizeof(b.ap_pass));
-  gs("ap_ip", "192.168.4.1", b.ap_ip, sizeof(b.ap_ip));
-  b.ap_chan = networkPreferences.getUChar("ap_chan", 6);
-  gs("mdns_host", "spartanhub", b.mdns_host, sizeof(b.mdns_host));
+  // Quelle: die EFFEKTIVEN Laufzeit-Globals (inkl. HOME_WIFI_*-Build-Defaults), NICHT die
+  // rohen NVS-Keys - sonst landet ein leeres Passwort im Backup, wenn das echte Passwort
+  // aus dem Default kommt statt aus einem gespeicherten p1_pass.
+  strlcpy(b.p1_ssid, g_hubWifiProfiles[1].ssid, sizeof(b.p1_ssid));
+  strlcpy(b.p1_pass, g_hubWifiProfiles[1].pass, sizeof(b.p1_pass));
+  strlcpy(b.p2_ssid, g_hubWifiProfiles[2].ssid, sizeof(b.p2_ssid));
+  strlcpy(b.p2_pass, g_hubWifiProfiles[2].pass, sizeof(b.p2_pass));
+  b.wifi_prof = hubWifiProfile;
+  strlcpy(b.legacy_ssid, networkPreferences.getString("ssid", "").c_str(), sizeof(b.legacy_ssid));
+  strlcpy(b.legacy_pass, networkPreferences.getString("pass", "").c_str(), sizeof(b.legacy_pass));
+  strlcpy(b.ap_ssid, hubApSsid.c_str(), sizeof(b.ap_ssid));
+  strlcpy(b.ap_pass, hubApPassword.c_str(), sizeof(b.ap_pass));
+  strlcpy(b.ap_ip, hubApIp.c_str(), sizeof(b.ap_ip));
+  b.ap_chan = hubApChannel;
+  strlcpy(b.mdns_host, hubHostname.c_str(), sizeof(b.mdns_host));
   b.crc32 = hubCfgCrc32(reinterpret_cast<const uint8_t *>(&b), sizeof(b) - sizeof(b.crc32));
   w25qSectorErase(HUB_CFG_ADDR);
   w25qWriteData(HUB_CFG_ADDR, reinterpret_cast<const uint8_t *>(&b), sizeof(b));
@@ -6669,9 +6668,9 @@ void restoreConfigFromW25Q()
   b.ap_ssid[sizeof(b.ap_ssid) - 1] = 0; b.ap_pass[sizeof(b.ap_pass) - 1] = 0;
   b.ap_ip[sizeof(b.ap_ip) - 1] = 0; b.mdns_host[sizeof(b.mdns_host) - 1] = 0;
   networkPreferences.putString("p1_ssid", b.p1_ssid);
-  networkPreferences.putString("p1_pass", b.p1_pass);
+  if (b.p1_pass[0]) networkPreferences.putString("p1_pass", b.p1_pass);  // leeres PW nie ueberschreiben -> Default greift
   networkPreferences.putString("p2_ssid", b.p2_ssid);
-  networkPreferences.putString("p2_pass", b.p2_pass);
+  if (b.p2_pass[0]) networkPreferences.putString("p2_pass", b.p2_pass);
   networkPreferences.putUChar("wifi_prof", b.wifi_prof);
   if (b.legacy_ssid[0]) networkPreferences.putString("ssid", b.legacy_ssid);
   if (b.legacy_pass[0]) networkPreferences.putString("pass", b.legacy_pass);
