@@ -223,6 +223,13 @@
 #define BLE_HUB_NAME "Spartan3-Hub"
 #endif
 
+// [FW-VERSION] Build-Stempel (Compile-Datum/-Zeit) -> WebGUI + /api/status, damit
+// man auf jedem Geraet sieht, WELCHER Firmware-Stand laeuft (wichtig nach dem
+// versehentlichen OTA, das Display-FW auf den Hub geschoben hatte).
+#ifndef FW_BUILD
+#define FW_BUILD (__DATE__ " " __TIME__)
+#endif
+
 // [W25Q-CFG] Config-Backup auf den externen W25Q128 -> WLAN-Daten + Setup ueberleben
 // jeden Firmware-Flash (sogar erase_flash), weil der Chip dabei nie angefasst wird.
 // Global deklariert, damit die Funktionen aus dem anonymen Namespace (loadHubFeatures,
@@ -1479,6 +1486,17 @@ String statusJson()
   json += String(cockpitCanTxErrors);
   json += ",\"heap_free\":";
   json += String(heap_caps_get_free_size(MALLOC_CAP_8BIT));
+  json += ",\"fw_build\":\"";
+  json += FW_BUILD;
+  json += "\",\"fw_role\":\"";
+  json += DEVICE_ROLE;
+#if ENABLE_EMU123
+  json += "-emu";
+#endif
+#if MINIMAL_123
+  json += "-min123";
+#endif
+  json += "\"";
   json += ",\"flash_ext_detected\":";
   json += w25qDetected ? "true" : "false";
   json += ",\"flash_ext_jedec\":\"";
@@ -4672,6 +4690,7 @@ details.setup > .inside { padding: 0 16px 16px; }
 </div>
 <div class="card">
 <h3>System</h3>
+<div class="row"><span>Firmware (Stand)</span><strong id="fwbuild">-</strong></div>
 <div class="row"><span>CAN State / TX / RX</span><strong id="candiag">-</strong></div>
 <div class="row"><span>CAN Fehler</span><strong id="canerr">0</strong></div>
 <div class="row"><span>Heap frei</span><strong id="heap">-</strong></div>
@@ -5151,6 +5170,7 @@ async function refresh() {
     document.getElementById('taddrsetup').textContent = d.tune_saved_address || '-';
     var tuneMac = document.getElementById('tune_mac');
     if (tuneMac && document.activeElement !== tuneMac) tuneMac.value = d.tune_saved_address || '';
+    { const fb=document.getElementById('fwbuild'); if(fb) fb.textContent = (d.fw_role||'?') + ' · ' + (d.fw_build||'?'); }
     document.getElementById('candiag').textContent = (d.can_state ?? '-') + ' / ' + (d.can_tx_errors ?? 0) + ' / ' + (d.can_rx_errors ?? 0);
     document.getElementById('canerr').textContent = d.can_status_errors ?? 0;
     document.getElementById('heap').textContent = d.heap_free ? Math.round(d.heap_free / 1024) + ' KB' : '-';
