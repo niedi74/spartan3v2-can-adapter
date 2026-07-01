@@ -6692,6 +6692,12 @@ void setup()
 {
   pinMode(STATUS_LED_PIN, OUTPUT);
   digitalWrite(STATUS_LED_PIN, LOW);
+#ifdef RGB_BUILTIN
+  // Onboard-WS2812 (ESP32-S3-DevKit, GPIO48) explizit AUS — sonst leuchtet sie
+  // uninitialisiert zufaellig weiss. Nur auf Boards mit RGB_BUILTIN (classic ESP32
+  // hat das nicht -> #ifdef schuetzt den Bus-Build).
+  rgbLedWrite(RGB_BUILTIN, 0, 0, 0);
+#endif
 
   Serial.begin(115200);
   delay(500);
