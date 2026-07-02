@@ -107,12 +107,8 @@
 #define DEFAULT_WIFI_PROFILE 0
 #endif
 
-// 123-Emulator: per Build entscheiden. Emu-Build (emu_com17) = 1 (Gerät spielt die
-// 123 als BLE-Peripheral nach). Test-Hub/Client (COM14) und Live-Hub = 0 (reiner
-// Client, kein Emu). So bleibt eine Codebasis für beide Rollen.
-#ifndef ENABLE_EMU123
-#define ENABLE_EMU123 0
-#endif
+// 123-Emulator: AUSGEGLIEDERT. Der Emu ist ein eigenes Geraet (separater ESP,
+// COM17/COM22) und lebt im Branch `emu123`. Die Hub-Firmware ist reiner Client.
 
 #ifndef ENABLE_SPARTAN_CAN
 #define ENABLE_SPARTAN_CAN 1
@@ -275,13 +271,8 @@ constexpr uint32_t kTuneReconnectDelayMs = 5000;
 constexpr uint32_t kTunePingIntervalMs = 1000;  // 1s: häufigere Keepalives (war 1650ms)
 constexpr uint32_t kBleHubAdvertiseFallbackMs = 30000;
 // Stale-Timeout je nach Modus:
-// Emu (WLAN+BLE-Koexistenz): 12s für Schub-Lücken-Pufferung
 // Echte 123TUNE+ (nRF52810): kontinuierlich 8-12 Hz, 6s = 75× Sicherheitsmarge
-#if ENABLE_EMU123
-constexpr uint32_t kTuneStaleRxMs = 12000;
-#else
 constexpr uint32_t kTuneStaleRxMs = 6000;
-#endif
 constexpr uint32_t kTuneReconnectBackoffMaxMs = 30000;
 
 enum class TuneLinkState : uint8_t {
@@ -501,12 +492,6 @@ bool hubFeatWifi = true;
 bool hubFeatLog = true;
 bool hubFeatBle123 = false;
 bool hubFeatBleBm6 = false;
-bool hubFeatEmu123 = false;  // Test: Hub spielt die 123 nach (BLE-Peripheral)
-int   emu123ManualRpm = -1;  // -1 = Sweep, sonst feste RPM (per WebGUI)
-int   emu123CurRpm = 0;      // zuletzt gesendete Emu-Werte (fuer WebGUI/JSON)
-float emu123CurAdv = 0.0f;
-int   emu123CurMap = 0;
-String emu123Addr = "";      // gewuenschte advertised BLE-Adresse (leer=Chip-Default)
 uint8_t hubEspNowChannelPref = 0;  // 0=auto/follow STA, otherwise fixed 1..14
 // WiFi-Profile: 0=Bus(AP-only), 1=Zuhause, 2=Handy
 struct HubWifiProfile {
@@ -637,8 +622,6 @@ void saveHubFeatures()
   networkPreferences.putBool("hf_log", hubFeatLog);
   networkPreferences.putBool("hf_ble123", hubFeatBle123);
   networkPreferences.putBool("hf_blebm6", hubFeatBleBm6);
-  networkPreferences.putBool("hf_emu123", hubFeatEmu123);
-  networkPreferences.putString("emu_addr", emu123Addr);
   networkPreferences.putUChar("espnow_ch", hubEspNowChannelPref);
   networkPreferences.putUChar("lambda_test", static_cast<uint8_t>(lambdaTestMode));
 }
@@ -688,29 +671,16 @@ void loadHubFeatures()
   hubApChannel = networkPreferences.getUChar("ap_chan", 6);  // [WLAN-KANAL] letzter Home-Kanal
   if (hubApChannel < 1 || hubApChannel > 13) hubApChannel = 6;
   hubApMask = networkPreferences.getString("ap_mask", "255.255.255.0");
-#if ENABLE_EMU123
-  // [MDNS] Emu meldet sich als spartanemu.local, NIE als spartanhub.local.
-  // Hub+Emu unter demselben Namen war die Ursache des versehentlichen Fremd-OTA
-  // und trifft auch Status-Abfragen am falschen Geraet. Migrations-Guard: ein
-  // altes "spartanhub" im Emu-NVS wird einmalig auf "spartanemu" umgezogen.
-  hubHostname = networkPreferences.getString("mdns_host", "spartanemu");
-  hubHostname.trim();
-  if (hubHostname.length() == 0 || hubHostname == "spartanhub") {
-    hubHostname = "spartanemu";
-    networkPreferences.putString("mdns_host", hubHostname);
-  }
-#else
   hubHostname = networkPreferences.getString("mdns_host", "spartanhub");
   hubHostname.trim();
   if (hubHostname.length() == 0) hubHostname = "spartanhub";
-#endif
   if (hubApSsid.length() == 0) hubApSsid = WEB_AP_SSID;
   if (hubApMask.length() == 0) hubApMask = "255.255.255.0";
   if (!networkPreferences.isKey("hf_ver")) {
 #if BLE_BRIDGE
     // BLE-Coprozessor: KEIN WLAN/AP/ESP-NOW (Funk frei, kein Brownout), 123+BM6 AN.
     hubFeatEspNow = false; hubFeatAp = false; hubFeatWifi = false; hubFeatLog = false;
-    hubFeatBle123 = true;  hubFeatBleBm6 = true;  hubFeatEmu123 = false;
+    hubFeatBle123 = true;  hubFeatBleBm6 = true;
 #else
 #ifdef MINIMAL_123
     // Minimal-Modus: NUR 123-BLE + Lambda(CAN) + Log + Web. KEIN BM6 (2. BLE-
@@ -734,11 +704,6 @@ void loadHubFeatures()
     hubFeatBleBm6 = false;
 #endif
 #endif
-#if ENABLE_EMU123
-    hubFeatEmu123 = true;
-#else
-    hubFeatEmu123 = false;
-#endif
 #endif
     hubEspNowChannelPref = 0;
     saveHubFeatures();
@@ -755,22 +720,10 @@ void loadHubFeatures()
   hubFeatLog = networkPreferences.getBool("hf_log", true);
   hubFeatBle123 = networkPreferences.getBool("hf_ble123", false);
   hubFeatBleBm6 = networkPreferences.getBool("hf_blebm6", false);
-#if ENABLE_EMU123
-  // Emu-Build (COM17): immer die 123 emulieren, und KEIN ESP-NOW (Funk frei für
-  // flüssige BLE-Notifies; zusammen mit Coex PREFER_BT).
-  hubFeatEmu123 = true;
-  hubFeatEspNow = false;
-#else
-  // Test-Hub/Client (COM14) + Live-Hub: nie Emu. Der 123-Emulator läuft auf einem
-  // separaten ESP (COM17). Dieser Hub ist reiner Client: 123 empfangen + BM6 +
-  // Lambda(Demo) + loggen.
-  hubFeatEmu123 = false;
-#endif
   const uint8_t savedLambdaTest = networkPreferences.getUChar("lambda_test", 0);
   lambdaTestMode = savedLambdaTest <= static_cast<uint8_t>(LambdaTestMode::Sweep)
       ? static_cast<LambdaTestMode>(savedLambdaTest)
       : LambdaTestMode::Off;
-  emu123Addr = networkPreferences.getString("emu_addr", "");
   hubEspNowChannelPref = networkPreferences.getUChar("espnow_ch", 0);
   if (hubEspNowChannelPref > 14) {
     hubEspNowChannelPref = 0;
@@ -1505,9 +1458,6 @@ String statusJson()
   json += FW_BUILD;
   json += "\",\"fw_role\":\"";
   json += DEVICE_ROLE;
-#if ENABLE_EMU123
-  json += "-emu";
-#endif
 #if MINIMAL_123
   json += "-min123";
 #endif
@@ -1586,16 +1536,6 @@ String statusJson()
   json += hubFeatBle123 ? "true" : "false";
   json += ",\"hub_feat_blebm6\":";
   json += hubFeatBleBm6 ? "true" : "false";
-  json += ",\"emu123_on\":";
-  json += hubFeatEmu123 ? "true" : "false";
-  json += ",\"emu123_manual\":";
-  json += String(emu123ManualRpm);
-  json += ",\"emu123_rpm\":";
-  json += String(emu123CurRpm);
-  json += ",\"emu123_adv\":";
-  json += String(emu123CurAdv, 1);
-  json += ",\"emu123_map\":";
-  json += String(emu123CurMap);
 #if ENABLE_BLE_HUB
   json += ",\"ble_hub_clients\":[";
   for (uint8_t i = 0; i < bleHubClientCount; i++) {
@@ -2285,9 +2225,6 @@ bool shouldLogCsv(const SpartanReading &spartan, const TuneSnapshot &tune)
 // Auto-Reconnect, kein Scan/Kanalwechsel) -> der Hub-AP bleibt fuer die Displays stabil.
 bool vehicleActive()
 {
-  // Emu-Modus = Pruefstand: tuneRpm ist die SELBST erzeugte Emulator-Drehzahl, kein
-  // echter Motor -> Variante-A-Gate aus, sonst blockiert der Emu sein eigenes Heim-WLAN.
-  if (hubFeatEmu123) return false;
 #if ENABLE_BLE_HUB
   if (tuneSnapshot().rpm > ENGINE_RUNNING_RPM_THRESHOLD) return true;
 #endif
@@ -3215,7 +3152,7 @@ void updateTuneDebug()
   if (now - lastTuneDebugMs < 2000) return;
   lastTuneDebugMs = now;
   const TuneSnapshot tune = tuneSnapshot();
-#if !ENABLE_EMU123 && defined(ENABLE_BLE_HUB)
+#if defined(ENABLE_BLE_HUB)
   // Dynamische Coexistenz: Motor läuft = BLE Vorrang (kein WiFi-Jitter).
   // Motor aus = Balance (WebGUI erreichbar für Konfiguration).
   static bool lastEngineRunning = false;
@@ -3253,326 +3190,13 @@ void startBleHubAdvertising()
 #endif
 }
 
-// ===== 123\TUNE+ Emulator (Test) ==========================================
-// Hub spielt die 123 als BLE-Peripheral nach: advertised NUS-Service + Name
-// "123\TUNE+" + Hersteller Albertronic(2330), nimmt die Verbindung an und
-// streamt sweependes RPM/ADV/MAP. So testet man Touch/M5/Hub am Schreibtisch.
-static NimBLECharacteristic *emu123Tx = nullptr;
-static bool     emu123Started = false;
-static uint32_t emu123LastMs = 0;
-static float    emu123Rpm = 800.0f;
-static bool     emu123Rising = true;
-static SemaphoreHandle_t emu123PingSem = nullptr;  // signalisiert sofortigen Send nach $
-
-static inline char emu123Nib(int n) { return (n < 10) ? ('0' + n) : ('A' + n - 10); }
-
-static void emu123SendField(uint8_t field, int hi, int lo, bool last = false) {
-  if (!emu123Tx) return;
-  if (hi < 0) hi = 0; else if (hi > 15) hi = 15;
-  if (lo < 0) lo = 0; else if (lo > 15) lo = 15;
-  uint8_t h = (uint8_t)emu123Nib(hi);
-  uint8_t l = (uint8_t)emu123Nib(lo);
-  // Checksum: field + 0x10 + (h - 0x30) + (l - 0x30)  (aus 123tune_ble_protocol.md)
-  uint8_t chk = (uint8_t)(field + 0x10 + (h - 0x30) + (l - 0x30));
-  // Terminator: 0x0D (letztes Feld im Zyklus) oder 0x20 (Space = weitere folgen)
-  uint8_t term = last ? 0x0D : 0x20;
-  uint8_t buf[5] = { field, h, l, chk, term };
-  emu123Tx->notify(buf, 5);
-}
-
-// Nach Disconnect muss das Advertising NEU gestartet werden, sonst kann sich
-// kein Central wieder verbinden (NimBLE stoppt Advertising bei Connect).
-static bool emu123Subscribed = false;
-
-class Emu123TxCB : public NimBLECharacteristicCallbacks {
-  void onSubscribe(NimBLECharacteristic *c, NimBLEConnInfo &, uint16_t val) override {
-    emu123Subscribed = (val == 1 || val == 2);
-    Serial.printf("EMU123:      Subscribe CCCD=%u -> %s\n", val, emu123Subscribed?"AN":"AUS");
-    if (emu123Subscribed) {
-      emu123LastMs = 0;
-      // Auch Semaphor geben → sofortiger voller Zyklus aus dediziertem Task
-      if (emu123PingSem) xSemaphoreGiveFromISR(emu123PingSem, nullptr);
-    }
-  }
-};
-static Emu123TxCB emu123TxCB;
-
-class Emu123ServerCB : public NimBLEServerCallbacks {
-  void onConnect(NimBLEServer *, NimBLEConnInfo &) override {
-    Serial.println("EMU123:      Central verbunden");
-    emu123Subscribed = false;
-  }
-  void onDisconnect(NimBLEServer *, NimBLEConnInfo &, int reason) override {
-    Serial.printf("EMU123:      Central getrennt (r=%d) -> re-advertise\n", reason);
-    emu123Subscribed = false;
-    NimBLEDevice::getAdvertising()->start();
-  }
-};
-static Emu123ServerCB emu123ServerCB;
-
-void startEmu123() {
-  if (emu123Started) return;
-  NimBLEDevice::getScan()->stop();
-  NimBLEServer *srv = NimBLEDevice::createServer();
-  srv->setCallbacks(&emu123ServerCB);
-
-  // 1. Nordic UART Service (NUS) — Hauptdatenkanal
-  NimBLEService *nus = srv->createService(NimBLEUUID("6e400001-b5a3-f393-e0a9-e50e24dcca9e"));
-
-  // RX-Command-Handler: App schreibt AT-Commands, Emu antwortet über TX
-  class EmuRxCB : public NimBLECharacteristicCallbacks {
-    void onWrite(NimBLECharacteristic *c, NimBLEConnInfo &) override {
-      std::string val = c->getValue();
-      // ASCII-Command extrahieren (z.B. "$", "I@\r", "v@\r", "PW1234!")
-      std::string cmd(val.begin(), val.end());
-      Serial.printf("EMU123 RX:   '%s' (len=%u)\n", cmd.c_str(), val.length());
-      if (!emu123Tx) return;
-      // AT-Command-Antworten (aus APK-Analyse: AuthorizeCommand, ReadInfoCommand)
-      if (cmd.find("I@") != std::string::npos) {
-        // Device Info: "I@<UID>,<License>,<Flags>\r"
-        std::string resp = "I@12345678,STANDARD,00\r";
-        emu123Tx->notify((uint8_t*)resp.c_str(), resp.length());
-        Serial.println("EMU123 TX:   I@ response");
-      } else if (cmd.find("v@") != std::string::npos) {
-        // Firmware/Settings: "v@<Version> <Cyl> <Curve> <Data>\r"
-        std::string resp = "v@1.4c 4 1 0\r";
-        emu123Tx->notify((uint8_t*)resp.c_str(), resp.length());
-        Serial.println("EMU123 TX:   v@ response");
-      } else if (cmd.find("PW") != std::string::npos) {
-        // Auth: immer OK (kein echtes Passwort)
-        std::string resp = "OK\r";
-        emu123Tx->notify((uint8_t*)resp.c_str(), resp.length());
-        Serial.println("EMU123 TX:   PW -> OK");
-      } else if (cmd[0] == '$' || cmd[0] == 0x24) {
-        // Ping — Semaphor geben damit dedizierter Task sofort sendet
-        emu123LastMs = 0;
-        if (emu123PingSem) xSemaphoreGiveFromISR(emu123PingSem, nullptr);
-      } else if (cmd[0] == '\r' || cmd[0] == 0x0D) {
-        // CR — ignorieren, wird zusammen mit $ als Ping verarbeitet
-      } else if (cmd.find("v@") != std::string::npos) {
-        // v@\r → Firmware/Version/Live-Werte (aus Referenz-Impl)
-        if (emu123Tx && emu123Subscribed) {
-          uint8_t r[18] = { 0x76,0x40,0x0D,
-            0x34,0x33,  // Volt: 13.8V
-            0x34,0x39,  // Temp: 75°C
-            0x37,0x34,  // Pressure: 100kPa
-            0x34,0x31,0x2D,0x31,0x30,0x2D,0x34,0x35,0x20 }; // "41-10-45 "
-          emu123Tx->notify(r, sizeof(r));
-          Serial.println("EMU123 TX:   v@ response");
-          if (emu123PingSem) xSemaphoreGiveFromISR(emu123PingSem, nullptr);
-        }
-      } else if (cmd.find("I@") != std::string::npos) {
-        // I@\r → Device Info
-        if (emu123Tx && emu123Subscribed) {
-          std::string resp = "I@12345678,STANDARD,00\r";
-          emu123Tx->notify((uint8_t*)resp.c_str(), resp.length());
-          Serial.println("EMU123 TX:   I@ response");
-        }
-      } else if (cmd.find("10@") != std::string::npos || cmd.find("11@") != std::string::npos ||
-                 cmd.find("12@") != std::string::npos || cmd.find("13@") != std::string::npos) {
-        // EEPROM-Block-Antworten (Zündkurven) — 59 Bytes in 3x20 Fragmenten
-        if (emu123Tx && emu123Subscribed) {
-          // Aus Referenz-Impl ble.ino: Standard VW T2b 4-Zyl Kurve
-          // Block 10: RPM+Advance Punkte 1-7
-          uint8_t b10[59] = {
-            0x31,0x30,0x40,0x0D,  // header "10@\r"
-            0x46,0x46,0x20, 0x46,0x46,0x20,  // FF FF (leer)
-            0x30,0x41,0x20, 0x30,0x30,0x20,  // RPM500, Adv0
-            0x30,0x45,0x20, 0x30,0x35,0x20,  // RPM750, Adv5
-            0x31,0x30,0x20, 0x30,0x41,0x20,  // RPM1000, Adv10
-            0x31,0x34,0x20, 0x30,0x46,0x20,  // RPM1250, Adv15
-            0x31,0x45,0x20, 0x31,0x34,0x20,  // RPM1500, Adv20
-            0x32,0x34,0x20, 0x31,0x38,0x20,  // RPM2000, Adv24
-            0x33,0x43,0x20, 0x31,0x43,0x20,  // RPM3000, Adv28
-            0x31,0x30, 0x35,0x38,0x35,0x0D   // "10" + csum + CR
-          };
-          const char *hdr = cmd.c_str();
-          b10[0]=(uint8_t)hdr[0]; b10[1]=(uint8_t)hdr[1];  // richtigen Block-Header
-          emu123Tx->notify(&b10[0], 20);
-          vTaskDelay(pdMS_TO_TICKS(20));
-          emu123Tx->notify(&b10[20], 20);
-          vTaskDelay(pdMS_TO_TICKS(20));
-          emu123Tx->notify(&b10[40], 19);
-          Serial.printf("EMU123 TX:   %s response\n", hdr);
-        }
-      }
-    }
-  };
-  static EmuRxCB emuRxCB;
-  auto *rxChar = nus->createCharacteristic(NimBLEUUID("6e400002-b5a3-f393-e0a9-e50e24dcca9e"),
-                            NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);
-  rxChar->setCallbacks(&emuRxCB);
-  emu123Tx = nus->createCharacteristic(NimBLEUUID("6e400003-b5a3-f393-e0a9-e50e24dcca9e"),
-                                       NIMBLE_PROPERTY::NOTIFY);
-  emu123Tx->setCallbacks(&emu123TxCB);
-  // NimBLE erstellt CCCD automatisch bei NOTIFY-Property — kein expliziter Descriptor nötig
-
-  // 2. Device Information Service (0x180A) — minimal, schnelle Discovery
-  NimBLEService *dis = srv->createService(NimBLEUUID((uint16_t)0x180A));
-  NimBLECharacteristic *fwRev = dis->createCharacteristic(NimBLEUUID((uint16_t)0x2A26), NIMBLE_PROPERTY::READ);
-  fwRev->setValue(std::string("version: 1.4c(Albertronic BV)"));
-
-  // Services starten
-  srv->start();
-
-  // Generic Access Device Name auf "123\TUNE+" setzen (App liest 0x2A00!)
-  NimBLEDevice::setDeviceName("123\\TUNE+ ");
-
-  // Advertising — exakt wie echte 123TUNE+ (aus nRF Connect Log)
-  NimBLEAdvertising *adv = NimBLEDevice::getAdvertising();
-  adv->stop();
-  NimBLEAdvertisementData ad;
-  ad.setFlags(0x06);  // LE General Discoverable, BR/EDR Not Supported
-  ad.addServiceUUID(NimBLEUUID("6e400001-b5a3-f393-e0a9-e50e24dcca9e"));
-  NimBLEAdvertisementData sr;
-  sr.setName("123\\TUNE+");
-  std::string mfg;  // Albertronic BV (0x091A) + 0x00 + 0x05506C
-  mfg += (char)0x1A; mfg += (char)0x09;  // Company ID 0x091A (LE)
-  mfg += (char)0x00; mfg += (char)0x05; mfg += (char)0x50; mfg += (char)0x6C;
-  sr.setManufacturerData(mfg);
-  adv->setAdvertisementData(ad);
-  adv->setScanResponseData(sr);
-  adv->start();
-  emu123Started = true;
-
-  // Semaphor für sofortigen Send nach $ Ping
-  if (!emu123PingSem) emu123PingSem = xSemaphoreCreateBinary();
-
-  // Dedizierter Sender-Task: wartet auf $ Semaphor, sendet sofort RPM-Frame
-  xTaskCreate([](void*) {
-    for (;;) {
-      // Auf $ oder Subscribe warten (max 50ms), dann sofort senden
-      xSemaphoreTake(emu123PingSem, pdMS_TO_TICKS(50));
-      {
-        if (emu123Tx && emu123Subscribed) {
-          // Kompletten Zyklus senden: RPM, ADV, MAP, Temp, Volt, 0x42(end)
-          // Genau wie echte 123TUNE+ nach $\r — App erwartet vollen Zyklus
-          const int rpm = (int)emu123CurRpm;
-          const float adv = 10.0f + (rpm - 700) * 0.004f;
-          const int mapv = 40 + (rpm - 700) / 50;
-          const int tempRaw = (int)(75 + 30); // 75°C
-          const int voltRaw = (int)(13.8f * 4.54f);
-
-          auto sendF = [](uint8_t f, int hi, int lo, bool last) {
-            uint8_t h=(uint8_t)emu123Nib(hi); uint8_t l=(uint8_t)emu123Nib(lo);
-            uint8_t chk=(uint8_t)(f+0x10+(h-0x30)+(l-0x30));
-            uint8_t buf[5]={f,h,l,chk,(uint8_t)(last?0x0D:0x20)};
-            emu123Tx->notify(buf,5);
-          };
-          { int rhi=rpm/800; int rlo=(rpm-rhi*800)/50; sendF(0x30,rhi,rlo,false); }
-          vTaskDelay(1);
-          { int ahi=(int)(adv/3.2f); int alo=(int)((adv-ahi*3.2f)/0.2f); sendF(0x31,ahi,alo,false); }
-          vTaskDelay(1);
-          sendF(0x32,(mapv>>4)&0xF,mapv&0xF,false);
-          vTaskDelay(1);
-          sendF(0x33,(tempRaw>>4)&0xF,tempRaw&0xF,false);
-          vTaskDelay(1);
-          sendF(0x41,(voltRaw>>4)&0xF,voltRaw&0xF,false);
-          vTaskDelay(1);
-          sendF(0x42,0x4,0x6,true);  // Zyklusende mit 0x0D
-          Serial.printf("EMU123 TX:   voller Zyklus rpm=%d\n", rpm);
-        }
-      }
-    }
-  }, "emu123ping", 4096, nullptr, 2, nullptr);
-
-  Serial.println("EMU123:      AN — vollstaendige 123TUNE+ Emulation (NUS+DIS+BAT+TxPwr)");
-}
-
-void stopEmu123() {
-  if (!emu123Started) return;
-  NimBLEDevice::getAdvertising()->stop();
-  emu123Started = false;
-  emu123Tx = nullptr;
-  Serial.println("EMU123:      AUS");
-}
-
-void updateEmu123() {
-  if (!emu123Started) { startEmu123(); return; }
-  const uint32_t now = millis();
-  if (now - emu123LastMs < 40) return;   // ~25 Hz, EIN Frame pro Tick
-  emu123LastMs = now;
-  // Sweep/feste RPM fortschreiben
-  int rpm;
-  if (emu123ManualRpm >= 0) {
-    rpm = emu123ManualRpm;
-  } else {
-    emu123Rpm += emu123Rising ? 25.0f : -25.0f;
-    if (emu123Rpm >= 3200.0f) emu123Rising = false;
-    if (emu123Rpm <= 700.0f)  emu123Rising = true;
-    rpm = (int)emu123Rpm;
-  }
-  if (rpm < 0) rpm = 0; else if (rpm > 12000) rpm = 12000;
-  const float adv = 10.0f + (rpm - 700) * 0.011f;
-  int mapv = 40 + (rpm - 700) / 45; if (mapv > 95) mapv = 95; if (mapv < 0) mapv = 0;
-  emu123CurRpm = rpm; emu123CurAdv = adv; emu123CurMap = mapv;
-
-  // Plausible Hilfswerte: Temperatur steigt leicht mit Drehzahl, Spulenstrom
-  // mit Last, Bordspannung leicht fallend. Encodings spiegeln die Decoder:
-  //   0x33 temp: raw = temp + 30     0x35 coil: raw = coil * 8.65
-  //   0x41 volt: raw = volt * 4.54
-  const float tempC = 75.0f + (rpm - 700) * 0.004f;          // ~75..85 C
-  const float coilA = 2.0f + (rpm - 700) * 0.0006f;          // ~2.0..3.5 A
-  const float voltV = 13.8f - (rpm - 700) * 0.0001f;         // ~13.8..13.5 V
-  int tempRaw = (int)(tempC + 30.0f + 0.5f); if (tempRaw > 255) tempRaw = 255; if (tempRaw < 0) tempRaw = 0;
-  int coilRaw = (int)(coilA * 8.65f + 0.5f); if (coilRaw > 255) coilRaw = 255; if (coilRaw < 0) coilRaw = 0;
-  int voltRaw = (int)(voltV * 4.54f + 0.5f); if (voltRaw > 255) voltRaw = 255; if (voltRaw < 0) voltRaw = 0;
-
-  // Emu-Werte ZUSÄTZLICH in den Tune-Status spiegeln. So bekommt der ESP-NOW-
-  // Fan-out (M5 + Touch gleichzeitig) im Emulator-Modus dieselben, vollständigen
-  // Daten mit 25 Hz — statt nur EIN BLE-Direkt-Display über die langsame
-  // 6-Felder-Round-Robin-Notify. Das ist das stabile, flüssige Test-Setup.
-  portENTER_CRITICAL(&stateMux);
-  tuneRpm = (float)rpm;
-  tuneAdvance = adv;
-  tuneMap = (float)mapv;
-  tuneTemperature = tempC;
-  tuneCoilCurrent = coilA;
-  tuneVoltage = voltV;
-  tuneLastRxMs = now;
-  if (tuneRxCount < UINT32_MAX) tuneRxCount++;
-  portEXIT_CRITICAL(&stateMux);
-
-  // RPM JEDEN Tick senden (25 Hz) — das ist der Wert, der flüssig wirken muss,
-  // genau wie ein echtes 123. Die Nebenwerte rotieren je ~5 Hz. Dank
-  // notify(payload,len) sind zwei Notifies pro Tick zuverlässig.
-  { const int rhi = rpm / 800; const int rlo = (rpm - rhi * 800) / 50;
-    emu123SendField(0x30, rhi, rlo); }                                     // RPM @25Hz
-  static uint8_t sec = 0;
-  switch (sec) {
-    case 0: { const int ahi = (int)(adv / 3.2f); const int alo = (int)((adv - ahi * 3.2f) / 0.2f);
-              emu123SendField(0x31, ahi, alo); } break;                    // Zuendung
-    case 1: emu123SendField(0x32, (mapv >> 4) & 0xF, mapv & 0xF); break;   // MAP
-    case 2: emu123SendField(0x33, (tempRaw >> 4) & 0xF, tempRaw & 0xF); break;  // Temp
-    case 3: emu123SendField(0x35, (coilRaw >> 4) & 0xF, coilRaw & 0xF); break;  // Coil
-    default:
-      emu123SendField(0x41, (voltRaw >> 4) & 0xF, voltRaw & 0xF); // Volt
-      // 0x42-Frame = Zyklusende (konstant 70 = 0x46), terminator 0x0D
-      // Echte 123 sendet diesen immer als letzten Frame pro Zyklus.
-      emu123SendField(0x42, 0x4, 0x6, true);  // last=true → 0x0D terminator
-      break;
-  }
-  sec = (sec + 1) % 5;
-}
 
 void setupBleHub()
 {
   NimBLEDevice::init(BLE_HUB_NAME);
   NimBLEDevice::setPower(ESP_PWR_LVL_P9);
   NimBLEDevice::setMTU(23);
-  // Emulator: gewuenschte 123-Adresse advertisen (static-random, Top-Bits 11),
-  // damit auch Geraete mit fester Ziel-MAC (M5) sich verbinden.
-  if (hubFeatEmu123 && emu123Addr.length() == 17) {
-    NimBLEAddress a(std::string(emu123Addr.c_str()), BLE_ADDR_RANDOM);
-    if (NimBLEDevice::setOwnAddr(a)) {
-      NimBLEDevice::setOwnAddrType(BLE_OWN_ADDR_RANDOM);
-      Serial.printf("EMU123:      advertise als BLE-Adresse %s\n", emu123Addr.c_str());
-    } else {
-      Serial.printf("EMU123:      Adresse %s ungueltig (Top-Bits muessen 11 sein)\n", emu123Addr.c_str());
-    }
-  }
   bleAddress = NimBLEDevice::getAddress().toString().c_str();
-  if (hubFeatEmu123 && emu123Addr.length() == 17) bleAddress = emu123Addr;
 #if ENABLE_BLE_DISPLAY
   bleHubSetupMs = millis();
 #endif
@@ -3629,11 +3253,6 @@ void setupBleHub()
 #endif
   Serial.printf("123TUNE BLE: target %s\n", tuneSavedAddress.c_str());
   logHubEvent("tune_state", "boot|target_saved");
-  if (hubFeatEmu123) {
-    // Emulator-Modus: Hub IST die 123 (Peripheral). Kein Central-Scan.
-    startEmu123();
-    return;
-  }
   if (hubFeatBle123) {
     startTuneScan();
   } else {
@@ -3651,10 +3270,6 @@ void setupBleHub()
 
 void updateBleHub()
 {
-  if (hubFeatEmu123) {   // Emulator-Modus: nur die 123 nachspielen
-    updateEmu123();
-    return;
-  }
   if (hubFeatBle123) {
     updateTuneBle();
   } else if (tuneConnected || tuneDoConnect) {
@@ -3819,11 +3434,10 @@ void updateEspNowHub()
   float tuneCoil = 0.0f;
   bool tuneFresh = false;
   bool tuneConn = false;
-  // Im Emulator-Modus speist updateEmu123() den Tune-Status, also auch dann lesen.
-  if (hubFeatBle123 || hubFeatEmu123) {
+  if (hubFeatBle123) {
     const TuneSnapshot tune = tuneSnapshot();
     tuneFresh = tune.lastRxMs != 0 && (now - tune.lastRxMs) <= 3000;
-    tuneConn = tuneConnected || hubFeatEmu123;
+    tuneConn = tuneConnected;
     rpm = static_cast<uint16_t>(tune.rpm);
     advance = tune.advance;
     map = static_cast<uint8_t>(tune.map);
@@ -3921,14 +3535,13 @@ void updateHourmeters()
 #if ENABLE_WEB_GUI
 void printHubFeatStatus()
 {
-  Serial.printf("Hub feats:   ESP-NOW=%s AP=%s WLAN=%s LOG=%s 123=%s BM6=%s EMU123=%s ch=%u\n",
+  Serial.printf("Hub feats:   ESP-NOW=%s AP=%s WLAN=%s LOG=%s 123=%s BM6=%s ch=%u\n",
                 hubFeatEspNow ? "on" : "off",
                 hubFeatAp ? "on" : "off",
                 hubFeatWifi ? "on" : "off",
                 hubFeatLog ? "on" : "off",
                 hubFeatBle123 ? "on" : "off",
                 hubFeatBleBm6 ? "on" : "off",
-                hubFeatEmu123 ? "on" : "off",
                 hubEspNowChannelPref);
 }
 
@@ -4083,10 +3696,6 @@ bool handleHubFeatSerialLine(const String &line)
       hubFeatBleBm6 = false;
       changed = true;
     }
-  } else if (feat == "emu123") {
-    // Test-Hub ist reiner Client — emu123 läuft auf separatem ESP (COM17).
-    Serial.println("Hub feats:   emu123 auf diesem Test-Hub deaktiviert (Emu = separater ESP / COM17)");
-    return true;
   } else {
     Serial.println("Hub feats:   unknown feature (espnow/ap/wifi/log/ble123/blebm6)");
     return true;
@@ -4094,12 +3703,6 @@ bool handleHubFeatSerialLine(const String &line)
 
   if (changed) {
     saveHubFeatures();
-    if (feat == "emu123") {
-      // Emulator <-> Central sauber per Reboot umschalten.
-      Serial.printf("Hub feats:   emu123=%s gespeichert — Reboot...\n", hubFeatEmu123 ? "on" : "off");
-      delay(300);
-      ESP.restart();
-    }
     applyHubFeatures();
     logHubEvent("hub_feat", "serial");
     Serial.println("Hub feats:   saved");
@@ -4202,38 +3805,6 @@ void setupWebGui()
   }
 
   server.on("/", []() {
-    if (hubFeatEmu123) {   // Schlanke Seite: nur AP + Heim-WLAN + /emu
-      const bool sta = (WiFi.status() == WL_CONNECTED);
-      const String apName = WiFi.softAPSSID();
-      String h; h.reserve(2800);
-      h += F("<!doctype html><html lang=de><head><meta charset=utf-8>"
-             "<meta name=viewport content='width=device-width,initial-scale=1'><title>123 Emulator</title>"
-             "<style>body{font-family:system-ui,Arial;background:#0b1210;color:#e6ede8;margin:0}"
-             "main{max-width:560px;margin:auto;padding:16px}h1{color:#9ed85b;font-size:1.25rem}"
-             "h2{color:#9ed85b;font-size:1rem;margin:22px 0 0}.card{background:#101a15;border:1px solid #26372e;"
-             "border-radius:10px;padding:14px;margin:10px 0}input{box-sizing:border-box;width:100%;min-height:42px;"
-             "margin:6px 0 12px;padding:10px;border:1px solid #35453c;border-radius:8px;background:#0b1210;color:#e6ede8;font-size:1rem}"
-             "label{font-size:.9rem;color:#bde87a}button{background:#2e7d32;color:#fff;border:0;border-radius:8px;padding:11px 16px;font-size:1rem}"
-             "a.btn{display:inline-block;background:#26372e;color:#bde87a;border-radius:8px;padding:10px 14px;text-decoration:none}.mut{color:#9ab}</style>"
-             "</head><body><main><h1>123&#92;TUNE+ Emulator</h1>"
-             "<div class=card>BLE: advertised als <b>123&#92;TUNE+</b> (Company 2330)."
-             "<br><a class=btn href='/emu'>&#9654; Emulator-Steuerung (/emu)</a></div>");
-      h += "<h2>Heim-WLAN</h2><div class=card>Status: <b>";
-      h += sta ? ("verbunden, IP " + WiFi.localIP().toString()) : String("nicht verbunden");
-      h += "</b><form method=POST action=/wifi><label>WLAN-Name (SSID)</label>"
-           "<input name=ssid value='" + savedWifiSsid + "'>"
-           "<label>Passwort</label><input name=pass type=password placeholder='leer = unveraendert'>"
-           "<button>Verbinden &amp; speichern</button></form></div>";
-      h += "<h2>Access Point</h2><div class=card>Aktiv: <b>" + apName + "</b> &middot; " + WiFi.softAPIP().toString();
-      h += "<form method=POST action=/ap_config><label>AP-Name</label><input name=ssid value='" + apName + "'>"
-           "<label>AP-Passwort (leer = offen, sonst min. 8)</label><input name=pass value='" + hubApPassword + "'>"
-           "<label>AP-IP</label><input name=ip value='" + hubApIp + "'>"
-           "<label>Netzmaske</label><input name=mask value='" + hubApMask + "'>"
-           "<button>AP speichern</button></form></div>";
-      h += F("<p class=mut>Reiner 123-BLE-Emulator &middot; kein CAN/ESP-NOW.</p></main></body></html>");
-      server.send(200, "text/html", h);
-      return;
-    }
     server.send_P(200, "text/html", kHubIndexHtml);
   });
 
@@ -4641,66 +4212,6 @@ void setupWebGui()
     server.sendHeader("Location", "/", true);
     server.send(303, "text/plain", "");
   });
-  server.on("/emu", HTTP_GET, []() {
-#if ENABLE_EMU123
-    // Emu-Build: volle Emulator-Steuerung (RPM/Sweep + advertised BLE-Adresse).
-    if (server.hasArg("rpm"))   emu123ManualRpm = server.arg("rpm").toInt();
-    if (server.hasArg("sweep")) emu123ManualRpm = -1;
-    if (server.hasArg("addr")) {   // advertised BLE-Adresse aendern (Reboot)
-      String na = server.arg("addr"); na.trim(); na.toLowerCase();
-      if (na == "chip") emu123Addr = "";
-      else if (na.length() == 17) emu123Addr = na;
-      saveHubFeatures();
-      server.send(200, "text/html",
-                  "<meta http-equiv='refresh' content='4;url=/emu'>BLE-Adresse gesetzt - Reboot...");
-      delay(300);
-      ESP.restart();
-      return;
-    }
-    String h;
-    h.reserve(2000);
-    h += F("<!doctype html><meta name=viewport content='width=device-width,initial-scale=1'>"
-           "<title>123 Emulator</title><style>body{font-family:system-ui;background:#0e0e0e;color:#eee;margin:16px}"
-           "a.btn{display:inline-block;padding:11px 15px;margin:5px 6px 5px 0;background:#222;color:#eee;"
-           "border:1px solid #444;border-radius:9px;text-decoration:none}a.on{background:#2e7d32;border-color:#2e7d32}"
-           ".big{font-size:2.1rem;font-weight:700;margin:14px 0}.muted{color:#9aa}</style>"
-           "<h2>123&#92;TUNE+ Emulator</h2>");
-    h += "<div>Status: <b style='color:#54d273'>AKTIV</b> &middot; Modus: <b>";
-    h += (emu123ManualRpm >= 0) ? ("fest " + String(emu123ManualRpm)) : String("Sweep 700-3200");
-    h += "</b></div>";
-    h += "<div class=muted>BLE-Adresse: <b style='color:#9ed85b'>" + bleAddress +
-         "</b> &middot; Name <b>123&#92;TUNE+</b></div>";
-    h += "<form method=GET action=/emu style='margin:8px 0 4px'>"
-         "<input name=addr value='" + (emu123Addr.length() ? emu123Addr : bleAddress) +
-         "' style='padding:9px;border-radius:8px;border:1px solid #444;background:#1a1a1a;color:#eee;width:14em'>"
-         "<button style='padding:9px 13px;margin-left:6px;border-radius:8px;border:0;background:#2e7d32;color:#fff'>setzen</button></form>"
-         "<div><a class='btn' href='/emu?addr=ef:a8:b2:de:e0:9e'>echte 123 (ef:a8:b2)</a>"
-         "<a class='btn' href='/emu?addr=chip'>Chip-Default</a></div>"
-         "<p class=muted style='margin:4px 0'>Adresse muss static-random sein (erstes Byte Top-Bits 11, "
-         "z.B. e..&#47;f..&#47;c..&#47;d..).</p>";
-    h += F("<div class=big id=live>--</div>"
-           "<div class=muted>Drehzahl:</div>"
-           "<div><a class='btn' href='/emu?sweep=1'>Sweep</a>"
-           "<a class='btn' href='/emu?rpm=300'>300</a>"
-           "<a class='btn' href='/emu?rpm=800'>800</a><a class='btn' href='/emu?rpm=1500'>1500</a>"
-           "<a class='btn' href='/emu?rpm=2500'>2500</a><a class='btn' href='/emu?rpm=4000'>4000</a></div>"
-           "<p class=muted>Advertised als &#39;123&#92;TUNE+&#39;. Hub/M5 verbinden sich damit wie mit der echten 123.</p>"
-           "<script>setInterval(async()=>{try{let d=await(await fetch('/api/status')).json();"
-           "document.getElementById('live').textContent=d.emu123_on?('RPM '+d.emu123_rpm+'  ADV '+d.emu123_adv+'\\u00b0  MAP '+d.emu123_map):'--';}catch(e){}},400);</script>");
-    server.send(200, "text/html", h);
-#else
-    // Test-Hub ist reiner Client — der 123-Emulator läuft auf einem separaten ESP.
-    server.send(200, "text/html",
-                "<!doctype html><meta name=viewport content='width=device-width,initial-scale=1'>"
-                "<title>123 Emulator</title><body style='font-family:system-ui;background:#0e0e0e;color:#eee;margin:16px'>"
-                "<h2>123 Emulator</h2><p>Dieser Test-Hub ist reiner <b>Client</b>: "
-                "empf&auml;ngt 123, liest BM6, Lambda-Demo, loggt.</p>"
-                "<p style='color:#9aa'>Der 123-Emulator l&auml;uft auf einem separaten ESP "
-                "(COM17, <a style='color:#bde87a' href='http://192.168.0.80/emu'>192.168.0.80/emu</a>).</p>"
-                "<p><a style='color:#bde87a' href='/'>&larr; zur&uuml;ck</a></p></body>");
-#endif
-  });
-
   server.on("/ble_target", HTTP_POST, []() {
 #if ENABLE_BLE_HUB
     const String mac = normalizeMacInput(server.arg("tune_mac"));
@@ -4904,7 +4415,7 @@ void setupWebGui()
   server.begin();
   Serial.printf(
       "Web GUI:     WiFi '%s', password '%s', http://%s/\n",
-      hubFeatEmu123 ? "123-emulator" : WEB_AP_SSID,
+      WEB_AP_SSID,
       WEB_AP_PASSWORD,
       WiFi.softAPIP().toString().c_str());
 #endif
@@ -5012,7 +4523,7 @@ void updateWebGui()
       parseApAddress(hubApIp, "192.168.4.1", apIp);
       parseApAddress(hubApMask, "255.255.255.0", apMask);
       WiFi.softAPConfig(apIp, apIp, apMask);
-      const char *roadSsid = hubFeatEmu123 ? "123-emulator" : hubApSsid.c_str();
+      const char *roadSsid = hubApSsid.c_str();
       WiFi.softAP(roadSsid, hubApPassword.c_str(), hubApChannel, 0, 4);
       Serial.printf("Home WiFi:   unavailable, road AP only '%s' http://%s/\n",
                     roadSsid,
@@ -5108,7 +4619,7 @@ void updateCan()
     float    advance = 0.0f;
     uint8_t  mapKpa = 0;
     bool     tuneFresh = false;
-    if (hubFeatBle123 || hubFeatEmu123) {
+    if (hubFeatBle123) {
       const TuneSnapshot tune = tuneSnapshot();
       tuneFresh = tune.lastRxMs != 0 && (now - tune.lastRxMs) <= 3000;
       rpm       = static_cast<uint16_t>(tune.rpm);
@@ -5569,7 +5080,6 @@ void setup()
   Serial.println("\n=== BLE-Bridge: NUR 123\\TUNE+, dediziert ===");
   hubFeatBle123 = true;
   hubFeatBleBm6 = false;   // BM6 = zweitrangig, separater Chip spaeter
-  hubFeatEmu123 = false;
   hubFeatEspNow = false;
   hubFeatAp     = false;
   hubFeatWifi   = false;
@@ -5605,30 +5115,17 @@ void setup()
   setupWebGui();
   setupEspNowHub();
 #if defined(ENABLE_BLE_HUB)
-#if ENABLE_EMU123
-  // Emu (COM17): muss die 123 flüssig über BLE SENDEN. BLE bekommt Funkvorrang,
-  // sonst blockiert WiFi die Notifies (Burst-dann-Stillstand -> Gegenstelle
-  // trennt per Stale). WLAN-AP wird dabei schwächer — beim reinen Emu egal.
-  if (esp_coex_preference_set(ESP_COEX_PREFER_BT) == ESP_OK) {
-    Serial.println("Coex:        BLE-Vorrang gesetzt (PREFER_BT, Emu)");
-  }
-#else
   // Hub/Client: BALANCE — BLE-Empfang stabil, WiFi-AP/ESP-NOW erreichbar.
   // PREFER_BT hungerte hier das AP aus (Ping-Timeouts, keine WebGUI).
   if (esp_coex_preference_set(ESP_COEX_PREFER_BALANCE) == ESP_OK) {
     Serial.println("Coex:        BLE/WiFi Balance gesetzt (PREFER_BALANCE)");
   }
 #endif
-#endif
-  if (!hubFeatEmu123) {   // Emulator = nur BLE(123) + WebGUI, kein CAN/UART/Speed
-    setupHourmeters();
-    setupCan();
-    setupUart();
-    setupSpeedReed();
-    setupBridgeUart();  // BLE-Bridge UART: AZ-ESP32 GPIO17->S3-GPIO4
-  } else {
-    Serial.println("EMU123:      123-Emulator (CAN/UART/Speed aus, ESP-NOW Fan-out an)");
-  }
+  setupHourmeters();
+  setupCan();
+  setupUart();
+  setupSpeedReed();
+  setupBridgeUart();  // BLE-Bridge UART: AZ-ESP32 GPIO17->S3-GPIO4
 #if ENABLE_SPARTAN_ANALOG
   analogSetPinAttenuation(SPARTAN_ANALOG_PIN, ADC_11db);
 #endif
@@ -5667,18 +5164,16 @@ void loop()
   }
   return;
 #endif
-  if (!hubFeatEmu123) {   // im Emulator-Modus nur BLE + WebGUI
-    updateCan();
-    updateDemo();
-    updateLambdaTest();
-    updateAnalog();
-    updateHeaterAnalog();
-    updateUart();
-    updateBridgeUart();  // 123-Werte von AZ-ESP32 BLE-Bridge per UART
-    updateSpeedReed();
-    updateHourmeters();
-    appendLiveCsv();
-  }
+  updateCan();
+  updateDemo();
+  updateLambdaTest();
+  updateAnalog();
+  updateHeaterAnalog();
+  updateUart();
+  updateBridgeUart();  // 123-Werte von AZ-ESP32 BLE-Bridge per UART
+  updateSpeedReed();
+  updateHourmeters();
+  appendLiveCsv();
   updateWebGui();
   updateBleHub();
   updateEspNowHub();
