@@ -491,8 +491,10 @@ DNSServer dns;
 Preferences networkPreferences;
 bool networkPreferencesReady = false;
 bool otaBusy = false;
+bool otaAuthFailed = false;   // [OTA-LOCK] Token fehlte/falsch -> Upload verworfen (Firmware bleibt)
 size_t otaRxBytes = 0;
 uint32_t otaStartedMs = 0;
+String otaToken;              // [OTA-LOCK] leer = OTA gesperrt (Schutz vor Fremd-/Fehl-OTA)
 bool hubFeatEspNow = true;
 bool hubFeatAp = true;
 bool hubFeatWifi = true;
@@ -1512,6 +1514,8 @@ String statusJson()
 #if ENABLE_WEB_GUI
   json += ",\"ota_busy\":";
   json += otaBusy ? "true" : "false";
+  json += ",\"ota_locked\":";
+  json += otaToken.length() == 0 ? "true" : "false";
   json += ",\"ota_rx\":";
   json += String(static_cast<unsigned long>(otaRxBytes));
   json += ",\"ota_written\":";
@@ -4097,9 +4101,10 @@ bool handleHubFeatSerialLine(const String &line)
 void setupWebGui()
 {
 #if ENABLE_WEB_GUI
-  static const char* collectedHeaders[] = {"X-Device", "User-Agent"};
-  server.collectHeaders(collectedHeaders, 2);
+  static const char* collectedHeaders[] = {"X-Device", "User-Agent", "X-OTA-Token"};
+  server.collectHeaders(collectedHeaders, 3);
   ensurePreferences();
+  otaToken = networkPreferences.getString("ota_tok", "");   // [OTA-LOCK] leer = gesperrt
   timezoneIdx = networkPreferences.getUChar("tz_idx", kTimezoneDefault);
   if (timezoneIdx >= kTimezoneCount) timezoneIdx = kTimezoneDefault;
   logColumnMask = networkPreferences.getUShort("log_cols", kLogColDefault);
@@ -4495,6 +4500,9 @@ details.setup > .inside { padding: 0 16px 16px; }
 <summary>OTA Firmware Update</summary>
 <div class="inside">
 <p class="hint">Firmware-BIN aus PlatformIO hochladen. Nach erfolgreichem Upload startet der Hub neu. Waehrend OTA sind Live-Polls kurz blockiert.</p>
+<p class="hint" id="otaLockHint">OTA-Status: -</p>
+<div class="row" style="gap:6px"><input id="otaTok" type="password" placeholder="OTA-Token" autocomplete="off" style="flex:1;min-width:0"><button type="button" id="otaTokSave">Token speichern</button></div>
+<p class="hint">Ohne gesetzten Token ist OTA <b>gesperrt</b> (Schutz vor versehentlichem Fremd-Flash, z.B. Display-FW ueber den mDNS-Namen). Token einmal setzen; zum Hochladen im Feld lassen.</p>
 <form id="otaForm" method="POST" action="/update" enctype="multipart/form-data">
 <input class="file" type="file" name="update" accept=".bin,application/octet-stream" required>
 <button type="submit" id="otaBtn">Firmware hochladen</button>
@@ -4916,7 +4924,23 @@ if (otaForm) {
       otaShow(0, 'Netzwerkfehler');
       if (btn) btn.disabled = false;
     };
+    xhr.setRequestHeader('X-OTA-Token', (document.getElementById('otaTok')||{}).value || '');
     xhr.send(fd);
+  });
+}
+const otaTokSave = document.getElementById('otaTokSave');
+if (otaTokSave) {
+  otaTokSave.addEventListener('click', async () => {
+    const t = (document.getElementById('otaTok')||{}).value || '';
+    otaTokSave.disabled = true;
+    try {
+      const r = await fetch('/api/ota/token', { method:'POST',
+        headers:{'Content-Type':'application/x-www-form-urlencoded'},
+        body:'token=' + encodeURIComponent(t) });
+      const d = await r.json();
+      otaShow(0, d.ota_locked ? 'OTA-Token geloescht -> gesperrt' : 'OTA-Token gesetzt -> entsperrt');
+    } catch (e) { otaShow(0, 'Token-Fehler'); }
+    otaTokSave.disabled = false;
   });
 }
 async function refreshEvents() {
@@ -5171,6 +5195,7 @@ async function refresh() {
     var tuneMac = document.getElementById('tune_mac');
     if (tuneMac && document.activeElement !== tuneMac) tuneMac.value = d.tune_saved_address || '';
     { const fb=document.getElementById('fwbuild'); if(fb) fb.textContent = (d.fw_role||'?') + ' · ' + (d.fw_build||'?'); }
+    { const ol=document.getElementById('otaLockHint'); if(ol) ol.textContent = 'OTA-Status: ' + (d.ota_locked ? 'GESPERRT (kein Token gesetzt)' : 'entsperrt (Token gesetzt)'); }
     document.getElementById('candiag').textContent = (d.can_state ?? '-') + ' / ' + (d.can_tx_errors ?? 0) + ' / ' + (d.can_rx_errors ?? 0);
     document.getElementById('canerr').textContent = d.can_status_errors ?? 0;
     document.getElementById('heap').textContent = d.heap_free ? Math.round(d.heap_free / 1024) + ' KB' : '-';
@@ -5307,6 +5332,19 @@ setInterval(() => {
     server.sendHeader("Connection", "close");
     server.send(200, "application/json", otaProgressJson());
   });
+  server.on("/api/ota/token", HTTP_POST, []() {
+    // [OTA-LOCK] Token setzen/aendern (leer = OTA wieder sperren). Hinter dem AP-Passwort;
+    // ein Fremd-/Fehl-Push kennt weder diesen Endpoint noch den Token -> OTA prallt ab.
+    String t = server.arg("token");
+    t.trim();
+    ensurePreferences();
+    networkPreferences.putString("ota_tok", t);
+    otaToken = t;
+    Serial.printf("OTA:         Token %s\n", t.length() ? "gesetzt (OTA entsperrt)" : "geloescht (OTA gesperrt)");
+    logHubEvent("ota_token", t.length() ? "set" : "clear");
+    server.send(200, "application/json",
+                String("{\"ok\":true,\"ota_locked\":") + (t.length() ? "false" : "true") + "}");
+  });
   server.on("/uart_test", HTTP_GET, []() {
     if (bridgeUartRxPin == 0) { server.send(200,"application/json","{\"ok\":false,\"msg\":\"UART nicht konfiguriert\"}"); return; }
     Serial1.printf("T,9999,45.0,100,3.0,14.0,80\n"); Serial1.flush(); delay(50);
@@ -5325,6 +5363,14 @@ setInterval(() => {
     ESP.restart();
   });
   server.on("/update", HTTP_POST, []() {
+    if (otaAuthFailed) {   // [OTA-LOCK] Upload wurde ohne gueltigen Token verworfen
+      otaAuthFailed = false;
+      server.sendHeader("Connection", "close");
+      server.send(403, "text/plain",
+                  otaToken.length() == 0 ? "OTA gesperrt: kein Token gesetzt"
+                                         : "OTA: falscher Token");
+      return;
+    }
     const bool ok = !Update.hasError() && Update.remaining() == 0;
     server.sendHeader("Connection", "close");
     server.send(ok ? 200 : 500, "text/plain", ok ? "OK" : "FAIL");
@@ -5337,10 +5383,26 @@ setInterval(() => {
   }, []() {
     HTTPUpload &upload = server.upload();
     if (upload.status == UPLOAD_FILE_START) {
+      // [OTA-LOCK] Nur mit gueltigem Token flashen. Leerer Token = OTA komplett gesperrt
+      // (sicherer Default nach Flash/erase). Schuetzt vor versehentlichem Fremd-OTA.
+      otaAuthFailed = false;
+      const bool tokOk = otaToken.length() > 0 &&
+                         server.hasHeader("X-OTA-Token") &&
+                         server.header("X-OTA-Token") == otaToken;
+      if (!tokOk) {
+        otaAuthFailed = true;
+        Serial.printf("OTA:         REJECT (%s) von %s\n",
+                      otaToken.length() == 0 ? "gesperrt/kein Token" : "falscher Token",
+                      server.client().remoteIP().toString().c_str());
+        logHubEvent("ota_reject", otaToken.length() == 0 ? "locked" : "badtoken");
+        return;   // NICHT Update.begin() -> Firmware bleibt unberuehrt
+      }
       webOtaBeginUpload(upload.filename.c_str());
     } else if (upload.status == UPLOAD_FILE_WRITE) {
+      if (otaAuthFailed) return;
       webOtaWriteChunk(upload.buf, upload.currentSize);
     } else if (upload.status == UPLOAD_FILE_END) {
+      if (otaAuthFailed) return;
       webOtaFinishUpload(upload.totalSize);
     } else if (upload.status == UPLOAD_FILE_ABORTED) {
       webOtaAbortUpload();

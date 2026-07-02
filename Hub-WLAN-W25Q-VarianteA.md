@@ -123,6 +123,28 @@ Jede dieser Zeilen hat eine kurze Inline-Beschreibung in der GUI.
 
 ---
 
+## 6. OTA-Sicherheit (Token-Sperre)
+
+**Problem:** Der `/update`-Endpoint startete früher **ungeprüft** `Update.begin()` — jeder POST
+überschrieb die Firmware. So kam es zum versehentlichen Fremd-Flash (Display-FW landete auf dem Hub,
+vermutlich weil ein Display-OTA den mDNS-Namen `spartanhub.local` traf, den Hub **und** Emu belegen).
+
+**Lösung (token-gesperrt, Default = gesperrt):**
+- Neuer Token in NVS (`ota_tok`), Anzeige `ota_locked` in `/api/status` + Dev-Tab-Zeile „OTA-Status".
+- `/update` prüft den Header **`X-OTA-Token`** gegen den gesetzten Token — **vor** `Update.begin()`.
+  Fehlt/falsch/kein Token gesetzt → **403**, Firmware bleibt unberührt (Log-Event `ota_reject`).
+- **Leerer Token = OTA komplett gesperrt** — sicherer Default nach jedem Flash/`erase_flash`.
+- Token setzen/ändern/löschen über `POST /api/ota/token` bzw. das Feld „OTA-Token" + „Token speichern"
+  in der Setup-GUI. Zum Hochladen den Token im Feld lassen (die GUI sendet ihn als Header).
+
+**Verifiziert** (COM24): Default gesperrt → ohne/falscher Token 403 → mit Token entsperrt → richtiger
+Token kommt an `Update` (ungültiges Dummy-Image → FAIL/500, kein Reboot) → Token gelöscht = wieder gesperrt.
+
+> Ergänzend offen: der **mDNS-Namenskonflikt** (Hub + Emu = `spartanhub.local`) gehört noch entwirrt,
+> damit OTA/Status eindeutig das richtige Gerät treffen.
+
+---
+
 ## Geräte-/Pin-Kurzreferenz (Test-Hub)
 
 | Funktion | Pin |
