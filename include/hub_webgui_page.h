@@ -124,7 +124,6 @@ details.setup > .inside { padding: 0 16px 16px; }
   /* Ganzer Cockpit-Stack vertikal zentriert; Gauges sizen zu ihrem Inhalt
      (flex:0 0 auto) -> der grosse DZM quillt NICHT mehr in die Bedien-Leiste. */
   .tab-section[data-tab="g123"] .g123-card { justify-content: center; padding: 1vh 2vw; }
-  .g123-clock { margin: 0 auto .4vh; width: auto; padding: .2vh 2vh; font-size: 2.4vh; letter-spacing: 2px; }
   .g123-gauges {
     flex: 0 0 auto;
     grid-template-columns: 1fr auto 1fr; grid-template-rows: auto auto;
@@ -136,9 +135,18 @@ details.setup > .inside { padding: 0 16px 16px; }
   #g123gVA   { grid-column: 1; grid-row: 2; }
   #g123gMap  { grid-column: 3; grid-row: 1; }
   #g123gTemp { grid-column: 3; grid-row: 2; }
-  /* Tune-Bedienung kompakt + zentriert direkt UNTER dem DZM (wie Original) */
-  .g123-tunebar { margin: 1vh 0 0; gap: 4vw; }
-  .g123-lock { width: 5vh; height: 5vh; }
+  /* Uhr LINKS, Lock RECHTS -- beide vertikal zentriert NEBEN dem DZM (wie Original).
+     Anker: Viewport-Mitte + horizontaler Versatz in vh (DZM ist 50vh = 25vh halbe Breite). */
+  .tab-section[data-tab="g123"] .g123-clock {
+    position: absolute; top: 44%; left: 50%; transform: translate(calc(-50% - 31vh), -50%);
+    margin: 0; width: auto; padding: .2vh 2vh; font-size: 2.4vh; letter-spacing: 2px; z-index: 5;
+  }
+  .tab-section[data-tab="g123"] .g123-lock {
+    position: absolute; top: 44%; left: 50%; transform: translate(calc(-50% + 31vh), -50%);
+    width: 6vh; height: 6vh; z-index: 5;
+  }
+  /* Tune-Bedienung kompakt + zentriert direkt UNTER dem DZM */
+  .g123-tunebar { margin: 1vh 0 0; gap: 4vw; justify-content: center; }
   .g123-tunebtn { padding: .5vh 2.6vh; font-size: 2vh; }
   .g123-tunepanel { margin: .6vh 0 0; gap: 1.6vw; }
   .g123-adv { width: 8vh; height: 5.6vh; font-size: 3vh; }
