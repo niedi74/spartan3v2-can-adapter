@@ -94,27 +94,35 @@ details.setup > .inside { padding: 0 16px 16px; }
 .g123-conn { padding: 5px 16px; border-radius: 20px; background: #3a2a24; color: #ffb39e; font-weight: 700; font-size: .85rem; text-align: center; }
 .g123-conn.on { background: #16320f; color: #7be07b; }
 @media (orientation: landscape) and (max-height: 600px) {
-  /* Hochformat-Ansicht 1:1, nur als Ganzes 90 Grad gedreht (Display hochkant
-     montierbar). dvh/dvw = sichtbarer Viewport ohne Browser-Leisten -> nichts
-     wird abgeschnitten; Inhalt vertikal zentriert. Gauge-Groessen wie Hochformat. */
+  /* Echtes Querformat (Handy quer in der APK): KEIN Rotations-Trick mehr (der
+     sprengte auf dem quer gehaltenen Handy die Skalierung -> Gauges riesig und
+     abgeschnitten). Stattdessen Cockpit-Anordnung 2-1-2: links Zuendung+Volt,
+     Mitte grosser DZM, rechts MAP+Temp. Groessen in vh -> passt IMMER in die
+     Bildschirmhoehe, nichts wird abgeschnitten. */
   .tab-section[data-tab="g123"] {
-    position: fixed; top: 0; left: 100dvw;
-    width: 100dvh; height: 100dvw;
-    transform-origin: top left; transform: rotate(90deg);
+    position: fixed; top: 0; left: 0; right: 0; bottom: 0;
     overflow: hidden; z-index: 60; background: #000;
   }
   .tab-section[data-tab="g123"] .g123-card {
-    border: 0; border-radius: 0; min-height: 100%; box-sizing: border-box;
-    padding: 6px 10px; display: flex; flex-direction: column; justify-content: center;
+    border: 0; border-radius: 0; height: 100%; box-sizing: border-box;
+    padding: 1vh 2vw; display: flex; flex-direction: column;
   }
-  .g123-clock { margin: 0 auto 1.2vh; }
-  /* Container ist 90 Grad gedreht -> Inhalte um -90 Grad gegenrotieren, damit
-     Zifferblaetter/Texte aufrecht stehen (Anordnung bleibt). */
-  .tab-section[data-tab="g123"] .g123-gv,
-  .tab-section[data-tab="g123"] .g123-clock,
-  .tab-section[data-tab="g123"] #g123Conn,
-  .tab-section[data-tab="g123"] .g123-tunebtn,
-  .tab-section[data-tab="g123"] .g123-lock { transform: rotate(-90deg); }
+  .g123-clock { margin: 0 auto .6vh; width: auto; padding: .2vh 2.4vh; font-size: 2.8vh; letter-spacing: 2px; }
+  .g123-gauges {
+    flex: 1; min-height: 0;
+    grid-template-columns: 1fr auto 1fr; grid-template-rows: 1fr 1fr;
+    gap: 0 1vw; align-items: center; justify-items: center;
+  }
+  .g123-gv { width: auto; max-width: none; height: 36vh; }
+  .g123-gv.big { max-width: none; height: 74vh; grid-column: 2; grid-row: 1 / -1; margin: 0; }
+  #g123gAdv  { grid-column: 1; grid-row: 1; }
+  #g123gVA   { grid-column: 1; grid-row: 2; }
+  #g123gMap  { grid-column: 3; grid-row: 1; }
+  #g123gTemp { grid-column: 3; grid-row: 2; }
+  .g123-tunebar { margin: .4vh 0 0; gap: 3vw; }
+  .g123-lock { width: 5.6vh; height: 5.6vh; }
+  .g123-tunebtn { padding: .8vh 3vh; font-size: 2.2vh; }
+  .g123-conn { position: fixed; right: 2vw; bottom: 1.4vh; padding: .6vh 2.4vh; font-size: 2vh; }
 }
 </style>
 </head>
