@@ -370,7 +370,7 @@ input:focus, select:focus { outline: none; border-color: #78ad43; }
 </form>
 </div>
 </details>
-<details class="setup">
+<details class="setup" open>
 <summary>Wartung &middot; Betriebsstunden</summary>
 <div class="inside">
 <div class="row"><span>Ger&auml;t / Motor / Sonde</span><strong id="hoursSetup">- / - / - h</strong></div>
