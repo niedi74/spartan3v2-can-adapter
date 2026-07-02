@@ -688,9 +688,22 @@ void loadHubFeatures()
   hubApChannel = networkPreferences.getUChar("ap_chan", 6);  // [WLAN-KANAL] letzter Home-Kanal
   if (hubApChannel < 1 || hubApChannel > 13) hubApChannel = 6;
   hubApMask = networkPreferences.getString("ap_mask", "255.255.255.0");
+#if ENABLE_EMU123
+  // [MDNS] Emu meldet sich als spartanemu.local, NIE als spartanhub.local.
+  // Hub+Emu unter demselben Namen war die Ursache des versehentlichen Fremd-OTA
+  // und trifft auch Status-Abfragen am falschen Geraet. Migrations-Guard: ein
+  // altes "spartanhub" im Emu-NVS wird einmalig auf "spartanemu" umgezogen.
+  hubHostname = networkPreferences.getString("mdns_host", "spartanemu");
+  hubHostname.trim();
+  if (hubHostname.length() == 0 || hubHostname == "spartanhub") {
+    hubHostname = "spartanemu";
+    networkPreferences.putString("mdns_host", hubHostname);
+  }
+#else
   hubHostname = networkPreferences.getString("mdns_host", "spartanhub");
   hubHostname.trim();
   if (hubHostname.length() == 0) hubHostname = "spartanhub";
+#endif
   if (hubApSsid.length() == 0) hubApSsid = WEB_AP_SSID;
   if (hubApMask.length() == 0) hubApMask = "255.255.255.0";
   if (!networkPreferences.isKey("hf_ver")) {
