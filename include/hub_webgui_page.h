@@ -53,6 +53,15 @@ details.setup > summary::-webkit-details-marker { display: none; }
 details.setup > summary::after { content: "+"; float: right; color: #9ed85b; }
 details.setup[open] > summary::after { content: "-"; }
 details.setup > .inside { padding: 0 16px 16px; }
+/* Dezente Politur: Hover/Active/Focus-Feedback, ohne den schlanken Look zu aendern */
+button { transition: filter .12s, transform .06s; }
+button:hover { filter: brightness(1.08); }
+button:active { transform: translateY(1px); }
+.tab { transition: background .12s; }
+.tab:not(.on):hover { background: #24352b; }
+details.setup > summary { transition: color .12s; }
+details.setup > summary:hover { color: #9ed85b; }
+input:focus, select:focus { outline: none; border-color: #78ad43; }
 @media (max-width: 520px) {
   main { padding: 14px 10px 26px; }
   .lambda { font-size: 2.85rem; }
@@ -345,7 +354,7 @@ details.setup > .inside { padding: 0 16px 16px; }
 </form>
 </div>
 </details>
-<details class="setup" open>
+<details class="setup">
 <summary>Geschwindigkeit Setup (Reed-Sensor)</summary>
 <div class="inside">
 <p class="hint">Reed-Kontakt gegen GND auf GPIO 27. Default: 10 Pulse pro Radumdrehung, Reifen 205/80 R14 = 2147 mm. Trim per GPS abgleichen: Trim = GPS / Reed.</p>
@@ -358,6 +367,24 @@ details.setup > .inside { padding: 0 16px 16px; }
 <label>Trim (x1000) <input type="number" name="trim" min="500" max="1500" id="ctlTrim" value="1000"></label>
 <p class="hint">Beispiel: Tacho zeigt 60.0 km/h, GPS sagt 58.4 km/h -> Trim = 1000 * 58.4 / 60.0 = 973.</p>
 <button type="submit">Speichern</button>
+</form>
+</div>
+</details>
+<details class="setup">
+<summary>Wartung &middot; Betriebsstunden</summary>
+<div class="inside">
+<div class="row"><span>Ger&auml;t / Motor / Sonde</span><strong id="hoursSetup">- / - / - h</strong></div>
+<p class="hint">Bei <b>neuer Lambda-Sonde</b> die Sonden-Stunden auf 0 setzen. Z&auml;hlung l&auml;uft automatisch: Ger&auml;t = Strom an, Motor = l&auml;uft, Sonde = aktiv/heizt.</p>
+<form action="/hourmeter" method="post">
+<input type="hidden" name="meter" value="sensor">
+<label for="sensorH">Sonde-Stunden setzen</label>
+<input id="sensorH" name="hours" type="number" min="0" max="200000" step="0.1" value="0">
+<button type="submit">Setzen</button>
+</form>
+<form action="/hourmeter" method="post" style="margin-top:8px">
+<input type="hidden" name="meter" value="sensor">
+<input type="hidden" name="hours" value="0">
+<button type="submit" class="danger">Neue Sonde &rarr; 0 h</button>
 </form>
 </div>
 </details>
@@ -406,7 +433,7 @@ details.setup > .inside { padding: 0 16px 16px; }
 <p class="hint">In JEDEM Modus l&auml;uft der Hub-AP parallel weiter (Name/Passwort/IP frei einstellbar unter „SoftAP Name / Passwort / IP"). Der Hub ist immer unter <b>http://spartanhub.local</b> erreichbar.</p>
 </div>
 </details>
-<details class="setup" open>
+<details class="setup">
 <summary>Zeitzone</summary>
 <div class="inside">
 <p class="hint">Standard ist Europe/Berlin (CET/CEST). Aenderung speichert in NVS und fordert einen NTP-Neusync an.</p>
@@ -424,7 +451,7 @@ details.setup > .inside { padding: 0 16px 16px; }
 </form>
 </div>
 </details>
-<details class="setup" open>
+<details class="setup">
 <summary>BLE Zielgeraete</summary>
 <div class="inside">
 <p class="hint">Festes 123-Profil. Manuell bleibt moeglich, damit wir spaeter weitere Geraete schnell aufnehmen koennen.</p>
@@ -1097,6 +1124,7 @@ async function refresh() {
           vg.style.color = '#54d273';
         } } }
     document.getElementById('hours').textContent = Number(d.device_hours ?? 0).toFixed(2) + ' / ' + Number(d.engine_hours ?? 0).toFixed(2) + ' / ' + Number(d.sensor_hours ?? 0).toFixed(2) + ' h';
+    { const e=document.getElementById('hoursSetup'); if(e) e.textContent = Number(d.device_hours ?? 0).toFixed(1) + ' / ' + Number(d.engine_hours ?? 0).toFixed(1) + ' / ' + Number(d.sensor_hours ?? 0).toFixed(1) + ' h'; }
     document.getElementById('liveHours').textContent = Number(d.sensor_hours ?? 0).toFixed(2) + ' h';
     document.getElementById('liveHoursMeta').textContent = Number(d.device_hours ?? 0).toFixed(2) + ' / ' + Number(d.engine_hours ?? 0).toFixed(2) + ' / ' + Number(d.sensor_hours ?? 0).toFixed(2) + ' h';
     const apd=document.getElementById('apdiag'); if(apd) apd.textContent = (d.ap_ip || '-') + ' / ' + (d.ap_retry_count ?? 0);

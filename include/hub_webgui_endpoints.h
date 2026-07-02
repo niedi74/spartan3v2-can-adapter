@@ -371,6 +371,22 @@ void setupWebGui()
     server.sendHeader("Location", "/", true);
     server.send(303, "text/plain", "");
   });
+  server.on("/hourmeter", HTTP_POST, []() {
+    // [WARTUNG] Betriebsstunden setzen -- v.a. Sonde bei Sensorwechsel auf 0.
+    const String m = server.arg("meter");
+    const double h = server.arg("hours").toDouble();
+    if (h < 0.0 || h > 200000.0) { server.send(400, "text/plain", "Stunden 0..200000"); return; }
+    const uint64_t secs = static_cast<uint64_t>(h * 3600.0 + 0.5);
+    if      (m == "sensor") sensorSeconds = secs;
+    else if (m == "engine") engineSeconds = secs;
+    else if (m == "device") deviceSeconds = secs;
+    else { server.send(400, "text/plain", "meter=sensor|engine|device"); return; }
+    saveHourmeters();
+    Serial.printf("Wartung:     %s-Betriebsstunden gesetzt auf %.2f h\n", m.c_str(), h);
+    logHubEvent("hourmeter", m.c_str());
+    server.sendHeader("Location", "/", true);
+    server.send(303, "text/plain", "");
+  });
 #endif
   server.on("/wifi_scan", HTTP_GET, []() {
     // Netzwerke scannen (blockiert ~3-5s; der AP kann kurz aussetzen).
