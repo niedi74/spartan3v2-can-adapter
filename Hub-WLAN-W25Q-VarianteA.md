@@ -145,6 +145,40 @@ Token kommt an `Update` (ungültiges Dummy-Image → FAIL/500, kein Reboot) → 
 
 ---
 
+## 7. Live-Zündwinkel-Verstellung (123 Tuning-Modus)
+
+Die **Tune-Taste** im 123-Cockpit ist jetzt funktional: Zündwinkel **während der Fahrt**
+live vor/zurück, als **flüchtiger Offset** (kein Kurven-Schreiben).
+
+**Protokoll** (rekonstruiert aus der dekompilierten 123TUNE+ App 8.2.0,
+`DataService.cs`): einzelne ASCII-Zeichen auf die NUS-**RX**-Charakteristik, **ohne**
+Terminator/Checksum, write-**no-response** (wie der `$`-Ping — sonst reason 534):
+
+| Byte | Wirkung |
+|---|---|
+| `T` | Tuning-Modus an/aus (Toggle). Beim Verlassen **löscht das Gerät den Offset**. |
+| `A` | Zündung **vor** um einen Geräteschritt |
+| `R` | Zündung **zurück** um einen Geräteschritt |
+
+Der echte Winkel steht live auf dem **0x31-Advance-Gauge** (die Verstellung wirkt sofort).
+`tuneAdvSteps` zählt unseren kommandierten Netto-Offset (Anzeige „Zündung-Offset").
+
+**Sicherheit (mehrstufig):**
+- Server (`/api/tune/live` act=mode|up|down|reset) sendet nur bei **`streaming`**
+  (`tuneStreaming()`); `A`/`R` nur wenn Tuning-Modus aktiv, sonst **HTTP 409**.
+- GUI: **Lock antippen (armieren)** → erst dann wird die Tune-Taste aktiv. −/+/Reset
+  nur bei aktivem Tuning-Modus. Lock zurücknehmen beendet einen aktiven Tuning-Modus.
+- **Offset verfällt automatisch** bei Verbindungsabriss (`resetTuneClient`/`onDisconnect`)
+  und beim Verlassen des Tuning-Modus (`T`). „Reset" sendet die Schritte gegenläufig auf 0.
+
+**Status-Felder:** `tune_mode`, `tune_adv_steps`.
+
+> **Noch am Fahrzeug zu verifizieren** (Emu kann `T/A/R` nicht): exakter TX-Rückmelde-Frame
+> (Kandidat `0x3C`, App dekodiert `Wert−15`) und ob vor dem Tuning ein PIN/PW-Write nötig
+> ist (Lesen ging ohne). Referenz-Rohprotokoll: `../M5stack/ble/123tune_ble_protocol.md`.
+
+---
+
 ## Geräte-/Pin-Kurzreferenz (Test-Hub)
 
 | Funktion | Pin |

@@ -430,6 +430,13 @@ volatile bool tuneDoConnect = false;
 volatile bool tuneConnected = false;
 uint32_t tuneNextScanMs = 0;
 uint32_t tuneLastPingMs = 0;
+// [TUNE-LIVE] Live-Zuendwinkel-Verstellung (123 Tuning-Modus): T=an/aus, A=vor, R=zurueck.
+// Reiner Runtime-Offset auf den aktuellen Advance -> NICHT in die Kurve geschrieben,
+// verschwindet beim Verlassen (T) und bei Verbindungsabriss. Sicherheitskritisch:
+// nur bei streaming, hinter dem Lock in der GUI. tuneAdvSteps = unser kommandierter
+// Netto-Offset in Schritten (der echte Winkel steht live auf dem 0x31-Advance-Gauge).
+bool tuneModeActive = false;
+int  tuneAdvSteps = 0;
 uint32_t tuneScanSeen = 0;
 uint32_t tuneScanCandidates = 0;
 String tuneSavedAddress = "";
@@ -1719,7 +1726,11 @@ String statusJson()
   json += tuneConnected ? "true" : "false";
   json += ",\"tune_link_state\":\"";
   json += tuneLinkStateText(tuneLinkState);
-  json += "\",\"tune_fail_streak\":";
+  json += "\",\"tune_mode\":";
+  json += tuneModeActive ? "true" : "false";
+  json += ",\"tune_adv_steps\":";
+  json += String(tuneAdvSteps);
+  json += ",\"tune_fail_streak\":";
   json += String(tuneFailStreak);
   json += ",\"tune_rx\":";
   json += String(tune.rxCount);
@@ -2509,6 +2520,7 @@ void resetTuneClient()
   tuneNusRx = nullptr;
   tuneConnected = false;
   tuneLastPingMs = 0;
+  tuneModeActive = false; tuneAdvSteps = 0;  // [TUNE-LIVE] Offset verfaellt bei Trennung
   setTuneLinkState(TuneLinkState::Idle, "reset");
 }
 
@@ -2518,6 +2530,7 @@ class TuneClientCallbacks : public NimBLEClientCallbacks {
   {
     tuneConnected = false;
     tuneNusRx = nullptr;
+    tuneModeActive = false; tuneAdvSteps = 0;  // [TUNE-LIVE] Offset verfaellt bei Trennung
     char detail[24];
     snprintf(detail, sizeof(detail), "disconnect|r%d", reason);
     Serial.printf("123TUNE BLE: disconnected reason=%d\n", reason);
@@ -2762,6 +2775,64 @@ bool sendTuneCommand(const char *command)
   Serial.printf("123TUNE BLE: cmd '%s\\r$' -> %s\n", command, ok ? "OK" : "FAIL");
   tuneLastPingMs = millis();
   return ok;
+}
+
+// [TUNE-LIVE] Ein einzelnes Roh-Kommandozeichen an die 123 senden (T/A/R), OHNE
+// Terminator/Checksum und OHNE Response (write-no-response) -- exakt wie es die
+// 123TUNE+ App macht und wie der $-Ping, damit es unter der Notify-Flut nicht mit
+// reason 534 kollidiert. Nur erlaubt, wenn die 123 wirklich streamt (frische Daten).
+bool tuneStreaming()
+{
+  return tuneConnected && tuneClient != nullptr && tuneClient->isConnected() &&
+         tuneNusRx != nullptr && tuneLinkState == TuneLinkState::Streaming;
+}
+
+bool sendTuneRaw(char c)
+{
+  if (!tuneStreaming()) {
+    Serial.printf("123TUNE BLE: tune-cmd '%c' blockiert (kein streaming)\n", c);
+    return false;
+  }
+  const uint8_t b = static_cast<uint8_t>(c);
+  const bool ok = tuneNusRx->writeValue(&b, 1, false);
+  Serial.printf("123TUNE BLE: tune-cmd '%c' -> %s\n", c, ok ? "OK" : "FAIL");
+  return ok;
+}
+
+// Tuning-Modus umschalten (T). Beim Verlassen loescht das Geraet den Offset.
+bool tuneModeToggle()
+{
+  if (!sendTuneRaw('T')) return false;
+  tuneModeActive = !tuneModeActive;
+  if (!tuneModeActive) tuneAdvSteps = 0;   // verlassen -> Offset weg
+  logHubEvent("tune_mode", tuneModeActive ? "on" : "off");
+  return true;
+}
+
+// Zuendung vor (A) / zurueck (R) um einen Schritt -- nur im Tuning-Modus.
+bool tuneAdvStep(int dir)
+{
+  if (!tuneModeActive) { Serial.println("123TUNE BLE: adv-step blockiert (Tuning-Modus aus)"); return false; }
+  const char c = (dir >= 0) ? 'A' : 'R';
+  if (!sendTuneRaw(c)) return false;
+  tuneAdvSteps += (dir >= 0) ? 1 : -1;
+  return true;
+}
+
+// Offset auf 0: die gezaehlten Schritte gegenlaeufig zuruecksenden (bleibt im
+// Tuning-Modus). Kleiner Abstand zwischen den Writes gegen Notify-Kollision.
+bool tuneAdvReset()
+{
+  if (!tuneModeActive) return false;
+  int guard = 0;
+  while (tuneAdvSteps != 0 && guard++ < 60) {
+    const char c = (tuneAdvSteps > 0) ? 'R' : 'A';
+    if (!sendTuneRaw(c)) return false;
+    tuneAdvSteps += (tuneAdvSteps > 0) ? -1 : 1;
+    delay(30);
+  }
+  logHubEvent("tune_reset", "0");
+  return true;
 }
 
 void runTuneReadDump()
@@ -3870,6 +3941,22 @@ void setupWebGui()
   server.on("/api/ota/progress", HTTP_GET, []() {
     server.sendHeader("Connection", "close");
     server.send(200, "application/json", otaProgressJson());
+  });
+  // [TUNE-LIVE] Live-Zuendwinkel: mode (T an/aus), step (A/R), reset (auf 0).
+  // Sicherheitskritisch -> nur bei streaming; die GUI legt es hinter das Lock.
+  server.on("/api/tune/live", HTTP_POST, []() {
+    const String act = server.arg("act");
+    bool ok = false;
+    if (act == "mode")        ok = tuneModeToggle();
+    else if (act == "up")     ok = tuneAdvStep(+1);
+    else if (act == "down")   ok = tuneAdvStep(-1);
+    else if (act == "reset")  ok = tuneAdvReset();
+    else { server.send(400, "application/json", "{\"ok\":false,\"error\":\"act=mode|up|down|reset\"}"); return; }
+    String body = String("{\"ok\":") + (ok ? "true" : "false") +
+                  ",\"tune_mode\":" + (tuneModeActive ? "true" : "false") +
+                  ",\"tune_adv_steps\":" + String(tuneAdvSteps) +
+                  ",\"streaming\":" + (tuneStreaming() ? "true" : "false") + "}";
+    server.send(ok ? 200 : 409, "application/json", body);
   });
   server.on("/api/ota/token", HTTP_POST, []() {
     // [OTA-LOCK] Token setzen/aendern (leer = OTA wieder sperren). Hinter dem AP-Passwort;

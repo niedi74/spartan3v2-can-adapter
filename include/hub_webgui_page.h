@@ -93,6 +93,20 @@ details.setup > .inside { padding: 0 16px 16px; }
 .g123-tunebtn { padding: 7px 20px; background: #1c1c1c; border: 1px solid #333; border-radius: 6px; color: #cfcfcf; font-weight: 700; font-size: .85rem; }
 .g123-conn { padding: 5px 16px; border-radius: 20px; background: #3a2a24; color: #ffb39e; font-weight: 700; font-size: .85rem; text-align: center; }
 .g123-conn.on { background: #16320f; color: #7be07b; }
+/* [TUNE-LIVE] Lock (armiert) + Tune-Button-Zustand + Verstell-Panel */
+.g123-lock { cursor: pointer; }
+.g123-lock.armed { background: #3a2f12; border-color: #b8860b; }
+.g123-lock.armed .g123-lockico::before { top: -5px; left: 5px; border-radius: 5px 5px 0 0; transform: rotate(28deg); transform-origin: left bottom; }
+.g123-tunebtn { cursor: pointer; }
+.g123-tunebtn:disabled { opacity: .4; }
+.g123-tunebtn.on { background: #16320f; border-color: #2e7d32; color: #7be07b; }
+.g123-tunepanel { display: flex; align-items: center; justify-content: center; gap: 12px; margin: 8px 0 2px; }
+.g123-adv { width: 58px; height: 52px; border-radius: 10px; background: #241a12; border: 1px solid #b8860b; color: #ffcf7a; font-size: 1.6rem; font-weight: 700; cursor: pointer; }
+.g123-adv:active { background: #3a2a14; }
+.g123-off { min-width: 92px; text-align: center; color: #ffcf7a; }
+.g123-off span { display: block; font-size: 2rem; font-weight: 700; line-height: 1; }
+.g123-off small { color: #9a8; font-size: .7rem; }
+.g123-reset { padding: 0 14px; height: 52px; border-radius: 10px; background: #1c1c1c; border: 1px solid #555; color: #cfcfcf; font-weight: 700; cursor: pointer; }
 @media (orientation: landscape) and (max-height: 600px) {
   /* Echtes Querformat (Handy quer in der APK): KEIN Rotations-Trick mehr (der
      sprengte auf dem quer gehaltenen Handy die Skalierung -> Gauges riesig und
@@ -122,6 +136,11 @@ details.setup > .inside { padding: 0 16px 16px; }
   .g123-tunebar { margin: .4vh 0 0; gap: 3vw; }
   .g123-lock { width: 5.6vh; height: 5.6vh; }
   .g123-tunebtn { padding: .8vh 3vh; font-size: 2.2vh; }
+  .g123-tunepanel { margin: .6vh 0 0; gap: 2vw; }
+  .g123-adv { width: 9vh; height: 7vh; font-size: 3.6vh; }
+  .g123-off { min-width: 12vh; }
+  .g123-off span { font-size: 4.4vh; }
+  .g123-reset { height: 7vh; font-size: 2.4vh; }
   .g123-conn { position: fixed; right: 2vw; bottom: 1.4vh; padding: .6vh 2.4vh; font-size: 2vh; }
 }
 </style>
@@ -186,7 +205,13 @@ details.setup > .inside { padding: 0 16px 16px; }
 <svg id="g123gVA" class="g123-gv" viewBox="0 0 240 240"></svg>
 <svg id="g123gTemp" class="g123-gv" viewBox="0 0 240 240"></svg>
 </div>
-<div class="g123-tunebar"><span class="g123-lock"><i class="g123-lockico"></i></span><span class="g123-tunebtn">Tune</span></div>
+<div class="g123-tunebar"><span class="g123-lock" id="g123Lock" onclick="g123ToggleLock()"><i class="g123-lockico"></i></span><button type="button" class="g123-tunebtn" id="g123TuneBtn" onclick="g123TuneMode()" disabled>Tune</button></div>
+<div class="g123-tunepanel" id="g123TunePanel" hidden>
+<button type="button" class="g123-adv" id="g123AdvDown" onclick="g123Adv('down')">&minus;</button>
+<div class="g123-off"><span id="g123Off">0</span><small>Z&uuml;ndung-Offset</small></div>
+<button type="button" class="g123-adv" id="g123AdvUp" onclick="g123Adv('up')">+</button>
+<button type="button" class="g123-reset" id="g123Reset" onclick="g123Adv('reset')">0</button>
+</div>
 <div id="g123Conn" class="g123-conn" style="margin-top:14px">123 &mdash;</div>
 </div>
 </div><!-- /tab g123 -->
@@ -790,6 +815,27 @@ function g123Build(id, cfg) {
   s.appendChild(g);
 }
 function g123Set(id, frac) { const n = document.getElementById(id + 'N'); if (!n) return; frac = Math.max(0, Math.min(1, frac || 0)); n.setAttribute('transform', 'rotate(' + (-135 + frac * 270).toFixed(1) + ' 120 120)'); }
+// [TUNE-LIVE] Sicherheits-Interlock: erst Lock antippen (armieren), dann wird der
+// Tune-Button aktiv. Verstellung wirkt LIVE auf die echte Zuendung -> bewusst
+// zweistufig. Server prueft zusaetzlich streaming + Tuning-Modus.
+var g123Armed = false;
+async function g123TunePost(act) {
+  try { const r = await fetch('/api/tune/live', { method:'POST',
+      headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:'act=' + act });
+    return await r.json();
+  } catch (e) { return { ok:false }; }
+}
+function g123ToggleLock() {
+  const d = window.lastJson || {};
+  if ((d.tune_link_state !== 'streaming')) { g123Armed = false; }
+  else { g123Armed = !g123Armed; }
+  const lk = document.getElementById('g123Lock'); if (lk) lk.classList.toggle('armed', g123Armed);
+  // Beim Entsperren-Zuruecknehmen einen aktiven Tuning-Modus sicher beenden.
+  if (!g123Armed && d.tune_mode) { g123TunePost('mode'); }
+  const tb = document.getElementById('g123TuneBtn'); if (tb) tb.disabled = !(g123Armed && d.tune_link_state === 'streaming');
+}
+function g123TuneMode() { if (!g123Armed) return; g123TunePost('mode'); }
+function g123Adv(dir) { g123TunePost(dir); }
 function g123InitGauges() {
   g123Build('g123gAdv', { min: 0, max: 55, minor: 33, majorEvery: 3, labels: [10, 20, 30, 40, 50], lbl: 13, title: ['Kurbelwelle °', 'Vorverstellung'], tsz: 11,
     texts: [{ id: 'g123dAdv', t: '0', x: 150, y: 160, a: 'middle', c: '#7a7a7a', s: 24, mono: true, w: '700' }] });
@@ -842,6 +888,15 @@ async function refresh() {
       const ck = gid('g123Clock'); if (ck && d.time_text) ck.textContent = String(d.time_text).slice(11, 16);
       const gc = gid('g123Conn');
       if (gc) { const on = !!d.tune_connected; gc.textContent = on ? ('123 ' + (d.tune_link_state || 'verbunden')) : '123 getrennt'; gc.classList.toggle('on', on); }
+      // [TUNE-LIVE] Live-Zuendwinkel: Zustand aus /api/status spiegeln
+      const streaming = (d.tune_link_state === 'streaming');
+      const tuneOn = !!d.tune_mode;
+      const tbtn = gid('g123TuneBtn');
+      if (tbtn) { tbtn.disabled = !(g123Armed && streaming); tbtn.classList.toggle('on', tuneOn); tbtn.textContent = tuneOn ? 'Tuning AN' : 'Tune'; }
+      const panel = gid('g123TunePanel'); if (panel) panel.hidden = !tuneOn;
+      const off = gid('g123Off'); if (off) { const s = Number(d.tune_adv_steps ?? 0); off.textContent = (s > 0 ? '+' : '') + s; }
+      const dis = !(tuneOn && streaming);
+      ['g123AdvDown','g123AdvUp','g123Reset'].forEach(id => { const b = gid(id); if (b) b.disabled = dis; });
     }
     document.getElementById('can').textContent = d.can_ready ? 'aktiv' : 'Fehler';
     document.getElementById('wifiTop').textContent = d.wifi_connected ? d.wifi_ip : (d.ap_ip || 'offline');
