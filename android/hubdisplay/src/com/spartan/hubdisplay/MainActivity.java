@@ -15,6 +15,7 @@ import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.widget.Button;
 import android.widget.EditText;
+import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 
@@ -27,10 +28,13 @@ public class MainActivity extends Activity {
 
     private static final String PREFS = "hub";
     private static final String KEY_URL = "url";
-    private static final String AP_URL = "http://192.168.4.1/";
-    private static final String HOME_URL = "http://192.168.0.91/";
+    // Hub-AP liegt auf 192.168.8.1 (S24-Subnetz-Konflikt mit 192.168.4.x).
+    private static final String AP_URL = "http://192.168.8.1/";
+    // Heimnetz: aktuelle Hub-IP (die alte .0.91 war eine tote FRITZ!Box-Lease).
+    private static final String HOME_URL = "http://192.168.0.87/";
 
     private WebView web;
+    private FrameLayout webFrame;   // WebView + schwebender IP-Button
     private LinearLayout configView;
     private EditText urlInput;
     private SharedPreferences prefs;
@@ -56,6 +60,30 @@ public class MainActivity extends Activity {
                 return true;
             }
         });
+
+        // WebView in einen Rahmen mit schwebendem "IP"-Button packen: im Immersive-
+        // Vollbild ist die Zurueck-Geste kaum nutzbar -> ohne diesen Button kam man
+        // nach dem ersten Verbinden nie wieder zur IP-Auswahl.
+        webFrame = new FrameLayout(this);
+        webFrame.addView(web, new FrameLayout.LayoutParams(
+                LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT));
+        Button ipBtn = new Button(this);
+        ipBtn.setText("IP");
+        ipBtn.setTextSize(11);
+        ipBtn.setTextColor(Color.parseColor("#cccccc"));
+        ipBtn.setBackgroundColor(Color.parseColor("#33222222"));
+        ipBtn.setAlpha(0.6f);
+        ipBtn.setPadding(0, 0, 0, 0);
+        FrameLayout.LayoutParams ipLp =
+                new FrameLayout.LayoutParams(dp(44), dp(34), Gravity.TOP | Gravity.END);
+        ipLp.setMargins(0, dp(6), dp(6), 0);
+        ipBtn.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                showConfig();
+            }
+        });
+        webFrame.addView(ipBtn, ipLp);
 
         buildConfigView();
 
@@ -105,14 +133,14 @@ public class MainActivity extends Activity {
         presets.setGravity(Gravity.CENTER);
         presets.setPadding(0, 24, 0, 0);
 
-        Button ap = mkButton("AP 192.168.4.1", "#2a4d2a");
+        Button ap = mkButton("AP 192.168.8.1", "#2a4d2a");
         ap.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
                 urlInput.setText(AP_URL);
             }
         });
-        Button home = mkButton("Heim .0.91", "#2a3d5d");
+        Button home = mkButton("Heim .0.87", "#2a3d5d");
         home.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
@@ -158,13 +186,21 @@ public class MainActivity extends Activity {
 
     private void connect(String url) {
         prefs.edit().putString(KEY_URL, url).apply();
-        setContentView(web);
+        setContentView(webFrame);
         enableImmersive();
         web.loadUrl(url);
     }
 
     private void showConfig() {
         setContentView(configView);
+    }
+
+    private int dp(int v) {
+        return (int) (getResources().getDisplayMetrics().density * v + 0.5f);
+    }
+
+    private boolean webShowing() {
+        return webFrame != null && webFrame.getParent() != null;
     }
 
     private void enableImmersive() {
@@ -180,14 +216,14 @@ public class MainActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
-        if (web.getParent() != null) {
+        if (webShowing()) {
             enableImmersive();
         }
     }
 
     @Override
     public boolean onKeyDown(int keyCode, KeyEvent event) {
-        if (keyCode == KeyEvent.KEYCODE_BACK && web.getParent() != null) {
+        if (keyCode == KeyEvent.KEYCODE_BACK && webShowing()) {
             if (web.canGoBack()) {
                 web.goBack();
             } else {

@@ -7,8 +7,10 @@ das die Wake-Lock-API auf reinem HTTP nicht lösen kann.
 ## Features
 - Vollbild-WebView auf die Hub-GUI (Anzeige + „Schirm an" in einem).
 - `FLAG_KEEP_SCREEN_ON` + `keepScreenOn` → Display bleibt an, solange die App offen ist.
-- Startbildschirm mit IP-Eingabefeld + Presets **AP 192.168.4.1** und **Heim 192.168.0.91**;
+- Startbildschirm mit IP-Eingabefeld + Presets **AP 192.168.8.1** und **Heim 192.168.0.87**;
   zuletzt genutzte URL wird gemerkt (SharedPreferences).
+- **Schwebender „IP"-Button** oben rechts im WebView (v1.1) → jederzeit zurück zur
+  Verbindungsseite, auch im Immersive-Vollbild (wo die Zurück-Geste kaum nutzbar ist).
 - Zurück-Taste: erst In-Page-Navigation, dann zurück zum Startbildschirm (IP umschalten).
 - Immersive Fullscreen, Cleartext-HTTP erlaubt (für `http://192.168.x`).
 - min SDK 21 (Android 5.0+), target SDK 34.
