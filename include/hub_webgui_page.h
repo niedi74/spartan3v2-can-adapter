@@ -842,7 +842,7 @@ async function g123TunePost(act) {
   } catch (e) { return { ok:false }; }
 }
 function g123ToggleLock() {
-  const d = window.lastJson || {};
+  const d = lastJson || {};
   if ((d.tune_link_state !== 'streaming')) { g123Armed = false; }
   else { g123Armed = !g123Armed; }
   const lk = document.getElementById('g123Lock'); if (lk) lk.classList.toggle('armed', g123Armed);
