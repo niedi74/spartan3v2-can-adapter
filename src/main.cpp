@@ -3262,6 +3262,11 @@ static bool     emu123Started = false;
 static uint32_t emu123LastMs = 0;
 static float    emu123Rpm = 800.0f;
 static bool     emu123Rising = true;
+// [EMU-TUNE] Live-Zuendwinkel-Emulation, damit die Tune-Kette (T/A/R) am Tisch
+// vollstaendig testbar ist. T=Modus an/aus, A/R verschieben den Offset, der in
+// updateEmu123() auf den gestreamten Zuendwinkel (0x31) addiert wird.
+static bool     emu123TuneMode = false;
+static float    emu123TuneOffset = 0.0f;
 static SemaphoreHandle_t emu123PingSem = nullptr;  // signalisiert sofortigen Send nach $
 
 static inline char emu123Nib(int n) { return (n < 10) ? ('0' + n) : ('A' + n - 10); }
@@ -3305,6 +3310,7 @@ class Emu123ServerCB : public NimBLEServerCallbacks {
   void onDisconnect(NimBLEServer *, NimBLEConnInfo &, int reason) override {
     Serial.printf("EMU123:      Central getrennt (r=%d) -> re-advertise\n", reason);
     emu123Subscribed = false;
+    emu123TuneMode = false; emu123TuneOffset = 0.0f;  // [EMU-TUNE] Offset verfaellt bei Trennung
     NimBLEDevice::getAdvertising()->start();
   }
 };
@@ -3327,6 +3333,22 @@ void startEmu123() {
       std::string cmd(val.begin(), val.end());
       Serial.printf("EMU123 RX:   '%s' (len=%u)\n", cmd.c_str(), val.length());
       if (!emu123Tx) return;
+      // [EMU-TUNE] Live-Zuendwinkel: T=Tuning an/aus, A=vor, R=zurueck (Einzelbyte,
+      // write-no-response wie vom Hub gesendet). Offset wirkt auf 0x31; beim
+      // Verlassen (T) -> 0. So ist die ganze Tune-Kette am Tisch verifizierbar.
+      if (val.length() == 1 && (cmd[0] == 'T' || cmd[0] == 'A' || cmd[0] == 'R')) {
+        if (cmd[0] == 'T') {
+          emu123TuneMode = !emu123TuneMode;
+          if (!emu123TuneMode) emu123TuneOffset = 0.0f;
+          Serial.printf("EMU123 TUNE: Modus %s\n", emu123TuneMode ? "AN" : "AUS");
+        } else if (emu123TuneMode) {
+          emu123TuneOffset += (cmd[0] == 'A') ? 1.0f : -1.0f;
+          Serial.printf("EMU123 TUNE: Offset %+.1f Grad\n", emu123TuneOffset);
+        } else {
+          Serial.println("EMU123 TUNE: A/R ignoriert (Tuning-Modus aus)");
+        }
+        return;
+      }
       // AT-Command-Antworten (aus APK-Analyse: AuthorizeCommand, ReadInfoCommand)
       if (cmd.find("I@") != std::string::npos) {
         // Device Info: "I@<UID>,<License>,<Flags>\r"
@@ -3503,7 +3525,9 @@ void updateEmu123() {
     rpm = (int)emu123Rpm;
   }
   if (rpm < 0) rpm = 0; else if (rpm > 12000) rpm = 12000;
-  const float adv = 10.0f + (rpm - 700) * 0.011f;
+  // [EMU-TUNE] Basis-Zuendwinkel + Live-Offset (A/R). Geklemmt auf gueltigen Bereich.
+  float adv = 10.0f + (rpm - 700) * 0.011f + emu123TuneOffset;
+  if (adv < 0.0f) adv = 0.0f; else if (adv > 48.0f) adv = 48.0f;
   int mapv = 40 + (rpm - 700) / 45; if (mapv > 95) mapv = 95; if (mapv < 0) mapv = 0;
   emu123CurRpm = rpm; emu123CurAdv = adv; emu123CurMap = mapv;
 
