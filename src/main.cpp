@@ -5944,16 +5944,20 @@ void updateWebGui()
     if (wifiStatus == WL_CONNECTED) {
       homeWifiDisabledForRoadAp = false;
       homeWifiConnectStartedMs = 0;
-      // [WLAN-KANAL] Verbindung steht -> AP auf dem nun bekannten Router-Kanal
-      // wieder hochfahren (war fuer den Connect ausgesetzt). Aus dem loop-Kontext,
-      // damit NVS-Write/softAP nicht im WiFi-Event-Task laufen.
+      // [WLAN-KANAL] Single-Radio: der SoftAP folgt physisch dem STA-Kanal. hubApChannel
+      // (Report + NVS + naechster softAP-Start) hier IMMER auf den echten Kanal ziehen --
+      // auch beim Boot-Auto-Reconnect, wo apSuspendedForConnect nie gesetzt war (sonst
+      // meldet der Dev-Tab einen veralteten AP-Kanal). Nur Variable/NVS, KEIN softAP-
+      // Neustart ausserhalb des Suspend-Pfads -> kein AP-Blip waehrend der Fahrt.
+      uint8_t ch = (uint8_t)WiFi.channel();
+      if (ch >= 1 && ch <= 13 && ch != hubApChannel) {
+        hubApChannel = ch;
+        networkPreferences.putUChar("ap_chan", hubApChannel);
+      }
+      // AP war fuer einen manuellen Connect ausgesetzt -> jetzt auf ch zurueckbringen.
+      // Aus dem loop-Kontext, damit NVS-Write/softAP nicht im WiFi-Event-Task laufen.
       if (apSuspendedForConnect) {
         apSuspendedForConnect = false;
-        uint8_t ch = (uint8_t)WiFi.channel();
-        if (ch >= 1 && ch <= 13 && ch != hubApChannel) {
-          hubApChannel = ch;
-          networkPreferences.putUChar("ap_chan", hubApChannel);
-        }
         ensureHubSoftAp();   // AP zurueck (WIFI_AP_STA, softAP auf hubApChannel)
         startHubMdns();
         Serial.printf("WLAN-Kanal:  verbunden auf Kanal %d, AP wieder aktiv\n", hubApChannel);
