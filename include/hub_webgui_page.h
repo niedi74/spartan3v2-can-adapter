@@ -101,6 +101,9 @@ details.setup > .inside { padding: 0 16px 16px; }
 .g123-tunebtn:disabled { opacity: .4; }
 .g123-tunebtn.on { background: #16320f; border-color: #2e7d32; color: #7be07b; }
 .g123-tunepanel { display: flex; align-items: center; justify-content: center; gap: 12px; margin: 8px 0 2px; }
+/* [TUNE-LIVE] hidden-Attribut durchsetzen (author display:flex wuerde es sonst
+   ueberschreiben) -> Verstell-Leiste erst im Tuning-Modus sichtbar, wie im Original. */
+.g123-tunepanel[hidden] { display: none; }
 .g123-adv { width: 58px; height: 52px; border-radius: 10px; background: #241a12; border: 1px solid #b8860b; color: #ffcf7a; font-size: 1.6rem; font-weight: 700; cursor: pointer; }
 .g123-adv:active { background: #3a2a14; }
 .g123-off { min-width: 92px; text-align: center; color: #ffcf7a; }
