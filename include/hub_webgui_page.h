@@ -121,27 +121,32 @@ details.setup > .inside { padding: 0 16px 16px; }
     border: 0; border-radius: 0; height: 100%; box-sizing: border-box;
     padding: 1vh 2vw; display: flex; flex-direction: column;
   }
-  .g123-clock { margin: 0 auto .6vh; width: auto; padding: .2vh 2.4vh; font-size: 2.8vh; letter-spacing: 2px; }
+  /* Ganzer Cockpit-Stack vertikal zentriert; Gauges sizen zu ihrem Inhalt
+     (flex:0 0 auto) -> der grosse DZM quillt NICHT mehr in die Bedien-Leiste. */
+  .tab-section[data-tab="g123"] .g123-card { justify-content: center; padding: 1vh 2vw; }
+  .g123-clock { margin: 0 auto .4vh; width: auto; padding: .2vh 2vh; font-size: 2.4vh; letter-spacing: 2px; }
   .g123-gauges {
-    flex: 1; min-height: 0;
-    grid-template-columns: 1fr auto 1fr; grid-template-rows: 1fr 1fr;
+    flex: 0 0 auto;
+    grid-template-columns: 1fr auto 1fr; grid-template-rows: auto auto;
     gap: 0 1vw; align-items: center; justify-items: center;
   }
-  .g123-gv { width: auto; max-width: none; height: 36vh; }
-  .g123-gv.big { max-width: none; height: 74vh; grid-column: 2; grid-row: 1 / -1; margin: 0; }
+  .g123-gv { width: auto; max-width: none; height: 24vh; }
+  .g123-gv.big { max-width: none; height: 50vh; grid-column: 2; grid-row: 1 / -1; margin: 0; }
   #g123gAdv  { grid-column: 1; grid-row: 1; }
   #g123gVA   { grid-column: 1; grid-row: 2; }
   #g123gMap  { grid-column: 3; grid-row: 1; }
   #g123gTemp { grid-column: 3; grid-row: 2; }
-  .g123-tunebar { margin: .4vh 0 0; gap: 3vw; }
-  .g123-lock { width: 5.6vh; height: 5.6vh; }
-  .g123-tunebtn { padding: .8vh 3vh; font-size: 2.2vh; }
-  .g123-tunepanel { margin: .6vh 0 0; gap: 2vw; }
-  .g123-adv { width: 9vh; height: 7vh; font-size: 3.6vh; }
-  .g123-off { min-width: 12vh; }
-  .g123-off span { font-size: 4.4vh; }
-  .g123-reset { height: 7vh; font-size: 2.4vh; }
-  .g123-conn { position: fixed; right: 2vw; bottom: 1.4vh; padding: .6vh 2.4vh; font-size: 2vh; }
+  /* Tune-Bedienung kompakt + zentriert direkt UNTER dem DZM (wie Original) */
+  .g123-tunebar { margin: 1vh 0 0; gap: 4vw; }
+  .g123-lock { width: 5vh; height: 5vh; }
+  .g123-tunebtn { padding: .5vh 2.6vh; font-size: 2vh; }
+  .g123-tunepanel { margin: .6vh 0 0; gap: 1.6vw; }
+  .g123-adv { width: 8vh; height: 5.6vh; font-size: 3vh; }
+  .g123-off { min-width: 9vh; }
+  .g123-off span { font-size: 3.4vh; }
+  .g123-off small { font-size: 1.4vh; }
+  .g123-reset { height: 5.6vh; font-size: 2vh; padding: 0 2vh; }
+  .g123-conn { position: fixed; right: 2vw; bottom: 1.2vh; padding: .5vh 2vh; font-size: 1.8vh; }
 }
 </style>
 </head>
