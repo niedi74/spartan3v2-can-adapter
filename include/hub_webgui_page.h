@@ -969,12 +969,17 @@ async function curveLoad(){
     window.curveRefAt=(rpm)=>{ const p=window.curveAdvPts; if(!p||!p.length) return null;
       if(rpm<=p[0].x) return p[0].y; if(rpm>=p[p.length-1].x) return p[p.length-1].y;
       for(let i=1;i<p.length;i++){ if(rpm<=p[i].x){ const a=p[i-1],b=p[i]; return a.y+(b.y-a.y)*(rpm-a.x)/(b.x-a.x); } } return null; };
-    // [KURVE-READ] gelesene 123-Kurve (blau, gestrichelt) ueber die Referenz legen
+    // [KURVE-READ] gelesene 123-Kurve (blau, gestrichelt) ueber die Referenz legen.
+    // Kraeftig + Legende: bei identischen Kurven liegt blau EXAKT auf rot und war
+    // sonst kaum zu erkennen ("10 Punkte gelesen, aber nichts zu sehen").
     if(window.curveRead123 && window.curveRead123.length){
       const svg2=document.getElementById('curveAdvSvg'), rp=window.curveRead123;
       const rd=rp.map((pt,i)=>(i?'L':'M')+window.curveTx(pt.x,pt.y).map(v=>v.toFixed(1)).join(' ')).join(' ');
-      svg2.appendChild(cEl('path',{d:rd,fill:'none',stroke:'#4aa3ff','stroke-width':2,'stroke-dasharray':'6 3'}));
-      rp.forEach(pt=>{ const xy=window.curveTx(pt.x,pt.y); svg2.appendChild(cEl('circle',{cx:xy[0],cy:xy[1],r:3.5,fill:'#4aa3ff'})); });
+      svg2.appendChild(cEl('path',{d:rd,fill:'none',stroke:'#4aa3ff','stroke-width':3.5,'stroke-dasharray':'10 6',opacity:'0.95'}));
+      rp.forEach(pt=>{ const xy=window.curveTx(pt.x,pt.y); svg2.appendChild(cEl('circle',{cx:xy[0],cy:xy[1],r:4.5,fill:'none',stroke:'#4aa3ff','stroke-width':2.5})); });
+      // Legende oben links
+      const lg1=cEl('text',{x:60,y:26,'font-size':12,fill:'#ff5630'}); lg1.textContent='— Referenz (Slot)'; svg2.appendChild(lg1);
+      const lg2=cEl('text',{x:60,y:42,'font-size':12,fill:'#4aa3ff'}); lg2.textContent='– – aus 123 gelesen'; svg2.appendChild(lg2);
     }
     document.getElementById('curveAdvTbl').innerHTML=curveTable(adv.map((p,i)=>[(i+1)+'. '+p.x+' U/min',p.y.toFixed(1)+' °']),'U/min','Grad KW');
     const vac=[...xml.querySelectorAll('VacuumCurve > VacuumPoint')].map(p=>({x:+((p.querySelector('kP')||{}).textContent||0),y:+((p.querySelector('VacuumDegrees')||{}).textContent||0)}));
