@@ -222,6 +222,11 @@ void onTuneNotify(NimBLERemoteCharacteristic *, uint8_t *data, size_t length, bo
         curveReadBuf[curveReadLen++] = static_cast<char>(data[i]);
       }
       portEXIT_CRITICAL(&stateMux);
+#if ARDUINO_USB_CDC_ON_BOOT
+      Serial0.printf("123 BLOCK  (%2u B): ", static_cast<unsigned>(length));
+      for (size_t i = 0; i < length; i++) Serial0.print(data[i] >= 32 && data[i] < 127 ? (char)data[i] : '.');
+      Serial0.println();
+#endif
     }
     return;
   }
@@ -230,6 +235,12 @@ void onTuneNotify(NimBLERemoteCharacteristic *, uint8_t *data, size_t length, bo
     Serial.printf(" %02X", data[i]);
   }
   Serial.println();
+#if ARDUINO_USB_CDC_ON_BOOT
+  // [UART0-MIRROR] Live-Frame kompakt auf die CH343-Konsole: Opcode + Roh-ASCII.
+  { Serial0.printf("123 %02X ", data[0]);
+    for (size_t i = 0; i < length; i++) Serial0.print(data[i] >= 32 && data[i] < 127 ? (char)data[i] : '.');
+    Serial0.println(); }
+#endif
   decodeTuneFrame(data, length);
   if (tuneLinkState == TuneLinkState::Subscribed) {
     setTuneLinkState(TuneLinkState::Streaming, "notify");
@@ -544,6 +555,9 @@ void pumpCurveRead()
     if (tuneNusRx) tuneNusRx->writeValue(reinterpret_cast<const uint8_t *>(B[curveReadPhase - 1]), 4, false);
     blockSentMs = now;
     Serial.printf("Kurve-Read:  Block %d gesendet (len=%u)\n", curveReadPhase, static_cast<unsigned>(curveReadLen));
+#if ARDUINO_USB_CDC_ON_BOOT
+    Serial0.printf(">>> Kurve-Read: sende %s\n", B[curveReadPhase - 1]);
+#endif
     curveReadPhase++;
   }
   const bool lastBlockDone = curveReadPhase > 4 &&
@@ -553,6 +567,9 @@ void pumpCurveRead()
     curveReadPhase = 0;
     blockSentMs = 0;
     Serial.printf("Kurve-Read:  Fenster zu, %u Bytes erfasst\n", static_cast<unsigned>(curveReadLen));
+#if ARDUINO_USB_CDC_ON_BOOT
+    Serial0.printf(">>> Kurve-Read: fertig, %u Bytes\n", static_cast<unsigned>(curveReadLen));
+#endif
     logHubEvent("curve_read", "done");
   }
 }

@@ -2777,6 +2777,13 @@ void setup()
 #endif
 
   Serial.begin(115200);
+#if ARDUINO_USB_CDC_ON_BOOT
+  // [UART0-MIRROR] CDC_ON_BOOT=1 lenkt Serial auf den nativen USB-CDC, der auf den
+  // Boards nicht rausgefuehrt ist -> ueber den CH343 (COM14/COM24) sieht man nichts.
+  // UART0 haengt am CH343 -> 123-BLE-Logs zusaetzlich dorthin spiegeln = Live-Konsole.
+  Serial0.begin(115200);
+  Serial0.println("\nUART0-Mirror: 123-BLE-Logs aktiv (CH343-Konsole)");
+#endif
   delay(500);
 
   detectW25Q();   // externen W25Q128-Flash erkennen (Check, noch ohne Dateisystem)
