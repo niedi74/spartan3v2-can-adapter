@@ -523,21 +523,35 @@ bool startCurveRead()
   return true;
 }
 
-// Pump: aus updateTuneBle() aufrufen -> staffelt Blockbefehle, schliesst das
-// Capture-Fenster nach ~1,8 s.
+// Pump: aus updateTuneBle() aufrufen. ADAPTIV: die echte 123 sendet jede Block-
+// Antwort in 3 Fragmenten (~59 B); ein zu frueh gesendeter Folgebefehl wuergt die
+// restlichen Fragmente ab (real beobachtet: nur 4x20 B kamen an). Deshalb den
+// naechsten Block erst schicken, wenn die Antwort ruhig ist (>=350 ms keine neuen
+// Bytes) oder 1 s Block-Timeout. Gesamtfenster 6 s.
 void pumpCurveRead()
 {
   if (!curveReadActive) return;
-  const uint32_t el = millis() - curveReadStartMs;
+  const uint32_t now = millis();
+  static uint16_t lastLen = 0;
+  static uint32_t lastGrowMs = 0, blockSentMs = 0;
   static const char *B[4] = { "10@\r", "11@\r", "12@\r", "13@\r" };
-  if (curveReadPhase >= 1 && curveReadPhase <= 4 && el >= static_cast<uint32_t>(curveReadPhase - 1) * 300) {
+  if (curveReadPhase == 1 && blockSentMs != 0 && curveReadStartMs > blockSentMs) blockSentMs = 0;  // neuer Lauf
+  if (curveReadLen != lastLen) { lastLen = curveReadLen; lastGrowMs = now; }
+  const bool blockDone = (blockSentMs == 0) ||                                  // noch nichts gesendet
+                         (lastGrowMs > blockSentMs && now - lastGrowMs >= 350) || // Antwort kam + ist ruhig
+                         (now - blockSentMs >= 1000);                            // Block-Timeout
+  if (curveReadPhase >= 1 && curveReadPhase <= 4 && blockDone) {
     if (tuneNusRx) tuneNusRx->writeValue(reinterpret_cast<const uint8_t *>(B[curveReadPhase - 1]), 4, false);
-    Serial.printf("Kurve-Read:  Block %d gesendet (%lums)\n", curveReadPhase, static_cast<unsigned long>(el));
+    blockSentMs = now;
+    Serial.printf("Kurve-Read:  Block %d gesendet (len=%u)\n", curveReadPhase, static_cast<unsigned>(curveReadLen));
     curveReadPhase++;
   }
-  if (el > 1800) {
+  const bool lastBlockDone = curveReadPhase > 4 &&
+                             ((lastGrowMs > blockSentMs && now - lastGrowMs >= 400) || now - blockSentMs >= 1200);
+  if (lastBlockDone || now - curveReadStartMs > 6000) {
     curveReadActive = false;
     curveReadPhase = 0;
+    blockSentMs = 0;
     Serial.printf("Kurve-Read:  Fenster zu, %u Bytes erfasst\n", static_cast<unsigned>(curveReadLen));
     logHubEvent("curve_read", "done");
   }
@@ -977,7 +991,11 @@ void setupBleHub()
 {
   NimBLEDevice::init(BLE_HUB_NAME);
   NimBLEDevice::setPower(ESP_PWR_LVL_P9);
-  NimBLEDevice::setMTU(23);
+  // MTU 69 statt 23: die echte 123 sendet EEPROM-Blockantworten (10@..13@) als EINE
+  // ~59-Byte-Notify -- bei MTU 23 schneidet der Stack auf 20 B ab (Kurve-Read bekam
+  // real nur 4x20 B pro Block). 69 = 59 + ATT-Header + Reserve; bewusst knapp, um
+  // das Verhalten des Live-Streams (5-B-Frames) nicht zu veraendern.
+  NimBLEDevice::setMTU(69);
   bleAddress = NimBLEDevice::getAddress().toString().c_str();
 #if ENABLE_BLE_DISPLAY
   bleHubSetupMs = millis();
