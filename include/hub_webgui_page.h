@@ -552,31 +552,27 @@ input:focus, select:focus { outline: none; border-color: #78ad43; }
 </details>
 </div><!-- /tab setup -->
 <div class="tab-section" data-tab="dev" hidden>
-<div class="card">
-<h3>BLE-Scan</h3>
+<details class="setup"><summary>BLE-Scan</summary><div class="inside">
 <p class="hint">Einmal 10s scannen — gefundene Geräte als Ziel setzen.</p>
 <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
 <button type="button" onclick="devBleScan()">Scan starten (10s)</button>
 <span id="dev_scan_status" class="hint"></span>
 </div>
 <div id="dev_scan_results" style="font-family:monospace;font-size:11px"></div>
-</div>
-<div class="card">
-<h3>Schalter</h3>
+</div></details>
+<details class="setup" open><summary>Schalter</summary><div class="inside">
 <div class="row"><span>123 BLE</span><span><button type="button" onclick="devFeat('ble123','on')">AN</button> <button type="button" onclick="devFeat('ble123','off')">AUS</button> <strong id="dev_ble123" style="margin-left:8px">-</strong></span></div>
 <div class="row"><span>Logging</span><span><button type="button" onclick="devFeat('log','on')">AN</button> <button type="button" onclick="devFeat('log','off')">AUS</button> <strong id="dev_log" style="margin-left:8px">-</strong></span></div>
-</div>
-<div class="card">
-<h3>Lambda-Demo (Tischtest)</h3>
+</div></details>
+<details class="setup"><summary>Lambda-Demo (Tischtest)</summary><div class="inside">
 <div class="row"><span>Modus</span><strong id="dev_lambda">-</strong></div>
 <div style="display:flex;gap:8px;margin-top:8px">
 <button type="button" onclick="devLambda('off')">AUS</button>
 <button type="button" onclick="devLambda('fixed')">Fest 1.000</button>
 <button type="button" onclick="devLambda('sweep')">Sweep 0.85-1.15</button>
 </div>
-</div>
-<div class="card">
-<h3>Anzeigefrequenz</h3>
+</div></details>
+<details class="setup"><summary>Anzeigefrequenz</summary><div class="inside">
 <div class="row"><span>Aktuell</span><strong id="dev_poll_freq">5 Hz</strong></div>
 <div style="display:flex;gap:8px;margin-top:8px">
 <button type="button" onclick="setPollInterval(100);document.getElementById('dev_poll_freq').textContent='10 Hz'">10 Hz</button>
@@ -585,9 +581,8 @@ input:focus, select:focus { outline: none; border-color: #78ad43; }
 <button type="button" onclick="setPollInterval(1000);document.getElementById('dev_poll_freq').textContent='1 Hz'">1 Hz</button>
 </div>
 <p class="hint">10 Hz = sehr flüssig (wie 123TUNE+ App). 2 Hz = sparsam für Langzeit.</p>
-</div>
-<div class="card">
-<h3>Access Point / mDNS</h3>
+</div></details>
+<details class="setup"><summary>Access Point / mDNS</summary><div class="inside">
 <form action="/ap_config" method="post" id="apConfigForm">
 <label for="ap_ssid">AP Name (SSID)</label><input id="ap_ssid" name="ssid" value="">
 <label for="ap_pass">AP Passwort</label><input id="ap_pass" name="pass" type="text" value="">
@@ -597,9 +592,8 @@ input:focus, select:focus { outline: none; border-color: #78ad43; }
 <p class="hint">Passwort leer = offener AP, sonst &ge;8 Zeichen. DNS-Name ergibt <b>http://&lt;name&gt;.local</b> (nur a-z, 0-9, „-"). Nach Speichern starten AP &amp; mDNS neu.</p>
 <button type="submit">AP &amp; mDNS speichern</button>
 </form>
-</div>
-<div class="card">
-<h3>System</h3>
+</div></details>
+<details class="setup" open><summary>System</summary><div class="inside">
 <div class="row"><span>Firmware (Stand)</span><strong id="fwbuild">-</strong></div>
 <div class="row"><span>CAN State / TX / RX</span><strong id="candiag">-</strong></div>
 <div class="row"><span>CAN Fehler</span><strong id="canerr">0</strong></div>
@@ -618,7 +612,7 @@ input:focus, select:focus { outline: none; border-color: #78ad43; }
 <details style="margin-top:10px"><summary class="hint">JSON Rohdaten</summary>
 <pre id="jsondump" style="font-size:10px;overflow:auto;max-height:200px">{}</pre>
 </details>
-</div>
+</div></details>
 </div><!-- /tab dev -->
 <script>
 async function wifiScan(){
