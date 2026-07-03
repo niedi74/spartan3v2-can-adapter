@@ -255,6 +255,7 @@ input:focus, select:focus { outline: none; border-color: #78ad43; }
 <div id="curveView" hidden>
 <h3>Zentrifugalkurve (Drehzahl &rarr; Vorz&uuml;ndung)</h3>
 <div class="row"><span>Drehzahlbegrenzer</span><strong id="curveMaxRpm">-</strong></div>
+<div class="row"><span>Live vs. Referenz</span><strong id="curveLive">&mdash;</strong></div>
 <svg id="curveAdvSvg" viewBox="0 0 640 300" style="width:100%;height:auto;background:#0d1712;border:1px solid #26372e;border-radius:8px;margin:8px 0"></svg>
 <div id="curveAdvTbl" class="mono"></div>
 <h3>MAP-Kurve (Druck &rarr; Vorz&uuml;ndung)</h3>
@@ -947,7 +948,7 @@ async function curveLoad(){
   if(!meta) return;
   try{
     const r=await fetch('/curve',{cache:'no-store'});
-    if(!r.ok){ meta.textContent='— keine Kurve hinterlegt —'; view.hidden=true; return; }
+    if(!r.ok){ meta.textContent='— keine Kurve hinterlegt —'; view.hidden=true; window.curveTx=null; return; }
     const xml=new DOMParser().parseFromString(await r.text(),'text/xml');
     const g=t=>{ const e=xml.querySelector(t); return e?e.textContent.trim():''; };
     const esc=s=>s.replace(/&/g,'&amp;').replace(/</g,'&lt;');
@@ -956,7 +957,16 @@ async function curveLoad(){
     meta.innerHTML='<b style="color:#e6ede8">'+esc(head)+'</b>'+(g('DateModified')?' &middot; '+esc(g('DateModified')):'')+(g('Author')?' &middot; '+esc(g('Author')):'')+(com?'<br><span style="white-space:pre-wrap;font-size:.85rem">'+esc(com)+'</span>':'');
     const adv=[...xml.querySelectorAll('AdvanceCurve > AdvancePoint')].map(p=>({x:+((p.querySelector('RPM')||{}).textContent||0),y:+((p.querySelector('AdvanceDegrees')||{}).textContent||0)})).filter(p=>p.x>0);
     document.getElementById('curveMaxRpm').textContent=(g('AdvanceCurve > MaxRPM')||g('MaxRPM')||'-')+' U/min';
-    drawCurveGraph(document.getElementById('curveAdvSvg'),adv,Math.max(8000,...adv.map(p=>p.x)),0,50,'U/min');
+    const xmaxA=Math.max(8000,...adv.map(p=>p.x));
+    drawCurveGraph(document.getElementById('curveAdvSvg'),adv,xmaxA,0,50,'U/min');
+    // [KURVE] Transform + Referenz-Interpolation fuer den Live-Vergleich merken.
+    window.curveAdvPts=adv.slice().sort((a,b)=>a.x-b.x);
+    window.curveTx=(rpm,deg)=>{ const W=640,H=300,L=52,R=16,T=14,B=40;
+      const x=L+(Math.max(0,Math.min(rpm,xmaxA))/xmaxA)*(W-L-R);
+      const y=T+(1-Math.max(0,Math.min(deg,50))/50)*(H-T-B); return [x,y]; };
+    window.curveRefAt=(rpm)=>{ const p=window.curveAdvPts; if(!p||!p.length) return null;
+      if(rpm<=p[0].x) return p[0].y; if(rpm>=p[p.length-1].x) return p[p.length-1].y;
+      for(let i=1;i<p.length;i++){ if(rpm<=p[i].x){ const a=p[i-1],b=p[i]; return a.y+(b.y-a.y)*(rpm-a.x)/(b.x-a.x); } } return null; };
     document.getElementById('curveAdvTbl').innerHTML=curveTable(adv.map((p,i)=>[(i+1)+'. '+p.x+' U/min',p.y.toFixed(1)+' °']),'U/min','Grad KW');
     const vac=[...xml.querySelectorAll('VacuumCurve > VacuumPoint')].map(p=>({x:+((p.querySelector('kP')||{}).textContent||0),y:+((p.querySelector('VacuumDegrees')||{}).textContent||0)}));
     const ys=vac.map(p=>p.y);
@@ -1174,6 +1184,23 @@ async function refresh() {
     document.getElementById('tvals').textContent = (d.rpm ?? 0) + ' / ' + Number(d.advance ?? 0).toFixed(1) + ' / ' + (d.map ?? 0);
     document.getElementById('taddr').textContent = d.tune_saved_address || '-';
     document.getElementById('taddrsetup').textContent = d.tune_saved_address || '-';
+    // [KURVE] Live-Betriebspunkt auf der Referenzkurve + Delta (rein clientseitig,
+    // ESP liefert nur rpm/advance). Nur wenn Kurve-Tab sichtbar.
+    try {
+      const _cs=document.querySelector('[data-tab="curve"]');
+      const _live=document.getElementById('curveLive');
+      if (window.curveTx && _cs && !_cs.hidden) {
+        const _svg=document.getElementById('curveAdvSvg');
+        if (d.tune_connected && Number(d.rpm) > 0) {
+          const _rpm=Number(d.rpm), _adv=Number(d.advance);
+          let _dot=document.getElementById('curveLiveDot');
+          if(!_dot){ _dot=cEl('circle',{id:'curveLiveDot',r:6,fill:'#9ed85b',stroke:'#04140a','stroke-width':2}); _svg.appendChild(_dot); }
+          const _xy=window.curveTx(_rpm,_adv); _dot.setAttribute('cx',_xy[0]); _dot.setAttribute('cy',_xy[1]);
+          const _ref=window.curveRefAt(_rpm);
+          if(_ref!=null && _live){ const _dl=_adv-_ref; _live.textContent=Math.round(_rpm)+' U/min · '+_adv.toFixed(1)+'° | Ref '+_ref.toFixed(1)+'° | Δ '+(_dl>=0?'+':'')+_dl.toFixed(1)+'°'; }
+        } else { const _dot=document.getElementById('curveLiveDot'); if(_dot) _dot.remove(); if(_live) _live.textContent='— (123 nicht verbunden)'; }
+      }
+    } catch(e){}
     var tuneMac = document.getElementById('tune_mac');
     if (tuneMac && document.activeElement !== tuneMac) tuneMac.value = d.tune_saved_address || '';
     { const fb=document.getElementById('fwbuild'); if(fb) fb.textContent = (d.fw_role||'?') + ' · ' + (d.fw_build||'?'); }
