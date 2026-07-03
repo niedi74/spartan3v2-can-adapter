@@ -393,6 +393,10 @@ String statusJson()
   json += String(speedTrimPermil);
   json += ",\"speed_pulses_per_rev\":";
   json += String(PULSES_PER_REV);
+  json += ",\"odo_km\":";
+  json += String(static_cast<double>(odoMm) / 1000000.0, 1);
+  json += ",\"trip_km\":";
+  json += String(static_cast<double>(tripMm) / 1000000.0, 2);
 #endif
   json += "}";
   return json;

@@ -390,6 +390,13 @@ float speedKmh = 0.0f;
 bool vehicleActive();
 uint16_t tireCircMm = TIRE_CIRC_MM_DEFAULT;  // konfigurierbar
 uint16_t speedTrimPermil = SPEED_TRIM_PERMIL_DEFAULT; // 1000 = 1.000
+// [ODOMETER] Gesamt-km + Teilstrecke aus den Reed-Pulsen (exakter als Speed-
+// Integration): mm = Pulse * Radumfang * Trim / (1000 * PULSES_PER_REV).
+// Persistiert in NVS (odo_mm/trip_mm), gespart geschrieben (60s, nur bei Aenderung).
+uint64_t odoMm = 0;                          // Gesamtstrecke in mm (Lebensdauer)
+uint64_t tripMm = 0;                         // Teilstrecke in mm (Reset per GUI)
+uint64_t odoLastSavedMm = 0;
+uint32_t lastOdoSaveMs = 0;
 #endif
 
 String uartLine;
@@ -2442,6 +2449,9 @@ void setupSpeedReed()
   if (networkPreferences.isKey("trim_pm")) {
     speedTrimPermil = networkPreferences.getUShort("trim_pm", SPEED_TRIM_PERMIL_DEFAULT);
   }
+  odoMm = networkPreferences.getULong64("odo_mm", 0);    // [ODOMETER]
+  tripMm = networkPreferences.getULong64("trip_mm", 0);
+  odoLastSavedMm = odoMm;
 #endif
   pinMode(SPEED_REED_PIN, INPUT_PULLUP);
   attachInterrupt(digitalPinToInterrupt(SPEED_REED_PIN), speedReedIsr, FALLING);
@@ -2470,6 +2480,24 @@ void updateSpeedReed()
   speedKmh = hz * static_cast<float>(tireCircMm) * 0.0036f
              / static_cast<float>(PULSES_PER_REV)
              * (static_cast<float>(speedTrimPermil) / 1000.0f);
+
+  // [ODOMETER] Strecke direkt aus den Pulsen (exakt, kein Integrationsfehler).
+  if (pulses > 0) {
+    const uint64_t addMm = static_cast<uint64_t>(pulses) * tireCircMm * speedTrimPermil
+                           / (1000ULL * PULSES_PER_REV);
+    odoMm += addMm;
+    tripMm += addMm;
+  }
+  // NVS-schonend sichern: alle 60 s, und nur wenn wirklich gefahren wurde.
+#if ENABLE_WEB_GUI
+  if (now - lastOdoSaveMs >= 60000 && odoMm != odoLastSavedMm) {
+    lastOdoSaveMs = now;
+    odoLastSavedMm = odoMm;
+    ensurePreferences();
+    networkPreferences.putULong64("odo_mm", odoMm);
+    networkPreferences.putULong64("trip_mm", tripMm);
+  }
+#endif
 }
 #else
 void setupSpeedReed() {}

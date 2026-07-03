@@ -17,6 +17,7 @@ h1 { font-size: 1.22rem; color: #9ed85b; margin: 4px 0 14px; }
 .card { padding: 16px; border: 1px solid #26372e; border-radius: 10px; background: #101a15; }
 .topline { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 12px; }
 .lambda { font-size: 3.2rem; font-weight: 700; color: #9ed85b; margin: 2px 0 10px; line-height: 1; }
+.lambda.lambda-wait { font-size: 2rem; color: #ffd166; letter-spacing: 2px; }
 .tag { display: inline-block; padding: 5px 10px; border-radius: 20px; background: #26372e; color: #bde87a; }
 .row { display: flex; justify-content: space-between; gap: 14px; border-top: 1px solid #26372e; padding: 12px 0; }
 .row strong { text-align: right; }
@@ -201,6 +202,7 @@ input:focus, select:focus { outline: none; border-color: #78ad43; }
 <div class="metric"><span>Verteiler &deg;C</span><strong id="liveTuneTemp">- C</strong></div>
 <div class="metric"><span>123 BLE</span><strong id="liveTuneConn">scan</strong></div>
 <div class="metric"><span>Sonde h</span><strong id="liveHours">0.00</strong></div>
+<div class="metric"><span>Trip km</span><strong id="liveTrip">0.00</strong></div>
 </div>
 <p class="hint">Messstelle hinten im Auspuff: Lambda kann bei Falschluft magerer wirken als der Motor wirklich laeuft.</p>
 </div>
@@ -360,7 +362,17 @@ input:focus, select:focus { outline: none; border-color: #78ad43; }
 <p class="hint">Reed-Kontakt gegen GND auf GPIO 27. Default: 10 Pulse pro Radumdrehung, Reifen 205/80 R14 = 2147 mm. Trim per GPS abgleichen: Trim = GPS / Reed.</p>
 <div class="row"><span>Live Frequenz</span><strong id="spdhz">- Hz</strong></div>
 <div class="row"><span>Live Geschwindigkeit</span><strong id="spdkmh">- km/h</strong></div>
+<div class="row"><span>Gesamt / Teilstrecke</span><strong id="odoKm">- / - km</strong></div>
 <div class="row"><span>Pulse gesamt</span><strong id="spdpc">0</strong></div>
+<form action="/odo" method="post" style="margin-top:8px">
+<input type="hidden" name="trip" value="reset">
+<button type="submit" class="secondary">Teilstrecke &rarr; 0</button>
+</form>
+<form action="/odo" method="post" style="margin-top:8px">
+<label for="odoSet">Gesamt-km setzen (z.B. Tacho-Stand)</label>
+<input id="odoSet" name="total_km" type="number" min="0" max="2000000" step="0.1" value="0">
+<button type="submit">Setzen</button>
+</form>
 <div class="row"><span>Pulse pro Umdrehung</span><strong id="spdppr">10</strong></div>
 <form action="/speed" method="post" style="margin-top:12px">
 <label>Reifenumfang (mm) <input type="number" name="tire" min="500" max="4000" id="ctlTire" value="2147"></label>
@@ -903,7 +915,12 @@ async function refresh() {
     const d = await r.json();
     lastJson = d;
     document.getElementById('source').textContent = d.source;
-    document.getElementById('lambda').textContent = d.valid ? d.lambda.toFixed(3) : '-.---';
+    // [LAMBDA-GATE] Lambda-Wert NUR bei Status OK (Code 3) anzeigen -- vorher steht
+    // dort der Status (WAIT/HEAT/ERR), damit kein Wert bei kalter/heizender Sonde zum
+    // Abstimmen verleitet.
+    { const lamEl=document.getElementById('lambda'); const ok=(d.status_code===3);
+      if (ok && d.valid) { lamEl.textContent = d.lambda.toFixed(3); lamEl.classList.remove('lambda-wait'); }
+      else { lamEl.textContent = d.status || '—'; lamEl.classList.add('lambda-wait'); } }
     document.getElementById('status').textContent = d.status;
     const lts=document.getElementById('lambdaTestStatus'); if(lts) lts.textContent = d.lambda_test_mode || 'off';
     document.getElementById('temp').textContent = d.valid ? d.temperature + ' C' : '- C';
@@ -925,7 +942,7 @@ async function refresh() {
       if (e = gid('g123dMap')) e.textContent = Math.round(Number(d.map ?? 0));
       if (e = gid('g123dRpm')) e.textContent = Math.round(rpm);
       if (e = gid('g123dSpeed')) e.textContent = Number(d.speed_kmh ?? 0).toFixed(0);
-      if (e = gid('g123dLam')) e.textContent = d.valid ? Number(d.lambda).toFixed(2) : '-.--';
+      if (e = gid('g123dLam')) e.textContent = (d.status_code===3 && d.valid) ? Number(d.lambda).toFixed(2) : (d.status || '--');
       if (e = gid('g123dVolt')) e.textContent = Number(d.volt ?? 0).toFixed(1);
       if (e = gid('g123dTemp')) e.textContent = Math.round(Number(d.tune_temp ?? 0));
       const ck = gid('g123Clock'); if (ck && d.time_text) ck.textContent = String(d.time_text).slice(11, 16);
@@ -1126,6 +1143,7 @@ async function refresh() {
     document.getElementById('hours').textContent = Number(d.device_hours ?? 0).toFixed(2) + ' / ' + Number(d.engine_hours ?? 0).toFixed(2) + ' / ' + Number(d.sensor_hours ?? 0).toFixed(2) + ' h';
     { const e=document.getElementById('hoursSetup'); if(e) e.textContent = Number(d.device_hours ?? 0).toFixed(1) + ' / ' + Number(d.engine_hours ?? 0).toFixed(1) + ' / ' + Number(d.sensor_hours ?? 0).toFixed(1) + ' h'; }
     document.getElementById('liveHours').textContent = Number(d.sensor_hours ?? 0).toFixed(2) + ' h';
+    { const t=document.getElementById('liveTrip'); if(t) t.textContent = Number(d.trip_km ?? 0).toFixed(2) + ' km'; }
     document.getElementById('liveHoursMeta').textContent = Number(d.device_hours ?? 0).toFixed(2) + ' / ' + Number(d.engine_hours ?? 0).toFixed(2) + ' / ' + Number(d.sensor_hours ?? 0).toFixed(2) + ' h';
     const apd=document.getElementById('apdiag'); if(apd) apd.textContent = (d.ap_ip || '-') + ' / ' + (d.ap_retry_count ?? 0);
     document.getElementById('liveTuneMeta').textContent = (d.tune_age_ms ?? 0) + ' ms / ' + (d.tune_rx ?? 0);
@@ -1136,6 +1154,7 @@ async function refresh() {
       document.getElementById('liveSpeed').textContent = Number(d.speed_kmh ?? 0).toFixed(1) + ' km/h';
       document.getElementById('liveSpeedMeta').textContent = Number(d.speed_hz ?? 0).toFixed(2) + ' Hz / ' + (d.speed_pulses ?? 0);
       document.getElementById('spdpc').textContent = d.speed_pulses ?? 0;
+      { const o=document.getElementById('odoKm'); if(o) o.textContent = Number(d.odo_km ?? 0).toFixed(1) + ' / ' + Number(d.trip_km ?? 0).toFixed(2) + ' km'; }
       document.getElementById('spdppr').textContent = d.speed_pulses_per_rev ?? 10;
       var ctlTire = document.getElementById('ctlTire');
       var ctlTrim = document.getElementById('ctlTrim');

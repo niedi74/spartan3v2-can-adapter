@@ -387,6 +387,27 @@ void setupWebGui()
     server.sendHeader("Location", "/", true);
     server.send(303, "text/plain", "");
   });
+#if SPEED_REED_PIN >= 0
+  server.on("/odo", HTTP_POST, []() {
+    // [ODOMETER] trip=reset ODER total_km setzen (z.B. Tacho-Stand uebernehmen).
+    if (server.arg("trip") == "reset") {
+      tripMm = 0;
+      Serial.println("Odometer:    Teilstrecke auf 0");
+    } else if (server.hasArg("total_km")) {
+      const double km = server.arg("total_km").toDouble();
+      if (km < 0.0 || km > 2000000.0) { server.send(400, "text/plain", "km 0..2000000"); return; }
+      odoMm = static_cast<uint64_t>(km * 1000000.0 + 0.5);
+      Serial.printf("Odometer:    Gesamt gesetzt auf %.1f km\n", km);
+    } else { server.send(400, "text/plain", "trip=reset oder total_km=..."); return; }
+    ensurePreferences();
+    networkPreferences.putULong64("odo_mm", odoMm);
+    networkPreferences.putULong64("trip_mm", tripMm);
+    odoLastSavedMm = odoMm;
+    logHubEvent("odometer", server.hasArg("total_km") ? "set" : "trip_reset");
+    server.sendHeader("Location", "/", true);
+    server.send(303, "text/plain", "");
+  });
+#endif
 #endif
   server.on("/wifi_scan", HTTP_GET, []() {
     // Netzwerke scannen (blockiert ~3-5s; der AP kann kurz aussetzen).
