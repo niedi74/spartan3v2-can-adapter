@@ -245,9 +245,11 @@ input:focus, select:focus { outline: none; border-color: #78ad43; }
 </div><!-- /tab g123 -->
 <div class="tab-section" data-tab="curve" hidden>
 <div class="card">
-<h3 style="margin-top:0">Z&uuml;ndkurve &middot; Referenz</h3>
-<p class="hint">Deine aktuelle <code>.123</code>-Kurve (aus der 123TUNE+ App) hier hinterlegen &mdash; bleibt auf dem Hub gespeichert und ist jederzeit abrufbar. Reine Ablage/Anzeige, es wird nichts an die 123 geschrieben.</p>
-<form id="curveForm" method="post" action="/curve" enctype="multipart/form-data">
+<h3 style="margin-top:0">Z&uuml;ndkurven &middot; Referenz (3 Slots)</h3>
+<div id="curveSlots" style="display:flex;gap:8px;margin:4px 0 12px;flex-wrap:wrap"></div>
+<p class="hint">Bis zu <b>3</b> <code>.123</code>-Kurven (aus der 123TUNE+ App) hinterlegen und umschalten &mdash; bleiben auf dem Hub gespeichert (&#9679; = belegt). Reine Ablage/Anzeige, es wird nichts an die 123 geschrieben.</p>
+<form id="curveForm" method="post" action="/curve?slot=1" enctype="multipart/form-data">
+<label id="curveUpLbl">Datei in Slot 1 hochladen</label>
 <input class="file" type="file" name="curve" accept=".123,application/xml,text/xml" required>
 <button type="submit">Hochladen &amp; speichern</button>
 </form>
@@ -261,8 +263,8 @@ input:focus, select:focus { outline: none; border-color: #78ad43; }
 <h3>MAP-Kurve (Druck &rarr; Vorz&uuml;ndung)</h3>
 <svg id="curveMapSvg" viewBox="0 0 640 300" style="width:100%;height:auto;background:#0d1712;border:1px solid #26372e;border-radius:8px;margin:8px 0"></svg>
 <div id="curveMapTbl" class="mono"></div>
-<div style="margin-top:14px"><a class="buttonlink" href="/curve" download="zuendkurve.123">.123 herunterladen</a></div>
-<form method="post" action="/curve_delete" style="margin-top:8px"><button type="submit" class="danger">Hinterlegte Kurve l&ouml;schen</button></form>
+<div style="margin-top:14px"><a id="curveDl" class="buttonlink" href="/curve?slot=1" download="zuendkurve.123">.123 herunterladen</a></div>
+<form id="curveDelForm" method="post" action="/curve_delete?slot=1" style="margin-top:8px"><button type="submit" class="danger">Diese Kurve (Slot) l&ouml;schen</button></form>
 </div>
 </div>
 </div><!-- /tab curve -->
@@ -667,7 +669,7 @@ function showTab(name) {
   document.getElementById('tabLive').classList.toggle('on', name === 'live');
   document.getElementById('tab123').classList.toggle('on', name === 'g123');
   { const t=document.getElementById('tabCurve'); if(t) t.classList.toggle('on', name === 'curve'); }
-  if (name === 'curve' && window.curveLoad) curveLoad();
+  if (name === 'curve' && window.curveSelect) curveSelect(curveSlot);
   document.getElementById('tabDiag').classList.toggle('on', name === 'diag');
   document.getElementById('tabLog').classList.toggle('on', name === 'log');
   document.getElementById('tabSetup').classList.toggle('on', name === 'setup');
@@ -947,8 +949,8 @@ async function curveLoad(){
   const meta=document.getElementById('curveMeta'), view=document.getElementById('curveView');
   if(!meta) return;
   try{
-    const r=await fetch('/curve',{cache:'no-store'});
-    if(!r.ok){ meta.textContent='— keine Kurve hinterlegt —'; view.hidden=true; window.curveTx=null; return; }
+    const r=await fetch('/curve?slot='+curveSlot,{cache:'no-store'});
+    if(!r.ok){ meta.textContent='— Slot '+curveSlot+' leer — Datei hochladen —'; view.hidden=true; window.curveTx=null; return; }
     const xml=new DOMParser().parseFromString(await r.text(),'text/xml');
     const g=t=>{ const e=xml.querySelector(t); return e?e.textContent.trim():''; };
     const esc=s=>s.replace(/&/g,'&amp;').replace(/</g,'&lt;');
@@ -976,7 +978,25 @@ async function curveLoad(){
   }catch(e){ meta.textContent='Fehler beim Laden der Kurve'; view.hidden=true; }
 }
 window.curveLoad=curveLoad;
-try{ const cs=document.querySelector('[data-tab="curve"]'); if(cs && !cs.hidden) curveLoad(); }catch(e){}
+var curveSlot=1; window.curveMask=0;
+try{ const s=+localStorage.getItem('curveSlot'); if(s>=1&&s<=3) curveSlot=s; }catch(e){}
+function curveRenderSlots(){
+  const box=document.getElementById('curveSlots'); if(!box) return;
+  let h='';
+  for(let n=1;n<=3;n++){ const filled=!!(window.curveMask&(1<<(n-1)));
+    h+='<button type="button" class="tab'+(n===curveSlot?' on':'')+'" style="flex:1;min-width:96px" onclick="curveSelect('+n+')">Kurve '+n+' '+(filled?'&#9679;':'&#9675;')+'</button>'; }
+  box.innerHTML=h;
+}
+function curveSelect(n){
+  curveSlot=n; try{localStorage.setItem('curveSlot',n)}catch(e){}
+  const f=document.getElementById('curveForm'); if(f) f.action='/curve?slot='+n;
+  const l=document.getElementById('curveUpLbl'); if(l) l.textContent='Datei in Slot '+n+' hochladen';
+  const dl=document.getElementById('curveDl'); if(dl) dl.href='/curve?slot='+n;
+  const df=document.getElementById('curveDelForm'); if(df) df.action='/curve_delete?slot='+n;
+  curveRenderSlots(); curveLoad();
+}
+window.curveSelect=curveSelect;
+try{ const cs=document.querySelector('[data-tab="curve"]'); if(cs && !cs.hidden) curveSelect(curveSlot); }catch(e){}
 function g123InitGauges() {
   g123Build('g123gAdv', { min: 0, max: 55, minor: 33, majorEvery: 3, labels: [10, 20, 30, 40, 50], lbl: 13, title: ['Kurbelwelle °', 'Vorverstellung'], tsz: 11,
     texts: [{ id: 'g123dAdv', t: '0', x: 150, y: 160, a: 'middle', c: '#7a7a7a', s: 24, mono: true, w: '700' }] });
@@ -1189,6 +1209,7 @@ async function refresh() {
     try {
       const _cs=document.querySelector('[data-tab="curve"]');
       const _live=document.getElementById('curveLive');
+      if (_cs && !_cs.hidden && window.curveMask !== (d.curve_slots||0)) { window.curveMask=d.curve_slots||0; curveRenderSlots(); }
       if (window.curveTx && _cs && !_cs.hidden) {
         const _svg=document.getElementById('curveAdvSvg');
         if (d.tune_connected && Number(d.rpm) > 0) {

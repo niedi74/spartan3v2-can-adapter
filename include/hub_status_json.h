@@ -399,13 +399,10 @@ String statusJson()
   json += String(static_cast<double>(tripMm) / 1000000.0, 2);
 #endif
   {
-    size_t curveBytes = 0;
-    const bool curvePresent = logFsReady && SPIFFS.exists(kCurveFile);
-    if (curvePresent) { File cf = SPIFFS.open(kCurveFile, FILE_READ); if (cf) { curveBytes = cf.size(); cf.close(); } }
-    json += ",\"curve_present\":";
-    json += curvePresent ? "true" : "false";
-    json += ",\"curve_bytes\":";
-    json += String(static_cast<unsigned long>(curveBytes));
+    uint8_t curveSlots = 0;  // Bit0=Slot1, Bit1=Slot2, Bit2=Slot3 (nur exists, kein open)
+    if (logFsReady) { for (int s = 1; s <= 3; s++) if (SPIFFS.exists(curveFile(s))) curveSlots |= (1 << (s - 1)); }
+    json += ",\"curve_slots\":";
+    json += String((int)curveSlots);
   }
   json += "}";
   return json;

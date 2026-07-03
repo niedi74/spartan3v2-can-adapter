@@ -555,7 +555,9 @@ bool ntpResyncRequested = false;
 uint32_t lastNtpSyncMs = 0;
 const char *kLogFile = "/drive.csv";
 const char *kOldLogFile = "/drive_old.csv";
-const char *kCurveFile = "/curve.123";  // [KURVE] hinterlegte 123-Zuendkurve (.123-XML)
+// [KURVE] bis zu 3 hinterlegte 123-Zuendkurven (.123-XML) als Slots.
+const char *kCurveFiles[3] = { "/curve1.123", "/curve2.123", "/curve3.123" };
+inline const char *curveFile(int slot) { if (slot < 1 || slot > 3) slot = 1; return kCurveFiles[slot - 1]; }
 const size_t kMaxLogBytes = 200000;  // 200 KB: kleine Dateien halten SPIFFS schnell (grosse Logs blockieren loop() -> Webserver/Display-Timeouts)
 const uint32_t kLogIntervalMs = 500;
 const uint16_t kLogColSpartan = 0x0001;
