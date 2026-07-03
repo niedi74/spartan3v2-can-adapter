@@ -176,6 +176,7 @@ input:focus, select:focus { outline: none; border-color: #78ad43; }
 <div class="tabs">
 <button type="button" id="tabLive" class="tab on" onclick="showTab('live')">Live</button>
 <button type="button" id="tab123" class="tab" onclick="showTab('g123')">123</button>
+<button type="button" id="tabCurve" class="tab" onclick="showTab('curve')">Kurve</button>
 <button type="button" id="tabDiag" class="tab" onclick="showTab('diag')">Diagnose</button>
 <button type="button" id="tabLog" class="tab" onclick="showTab('log')">Log</button>
 <button type="button" id="tabSetup" class="tab" onclick="showTab('setup')">Setup</button>
@@ -242,6 +243,28 @@ input:focus, select:focus { outline: none; border-color: #78ad43; }
 <div id="g123Conn" class="g123-conn" style="margin-top:14px">123 &mdash;</div>
 </div>
 </div><!-- /tab g123 -->
+<div class="tab-section" data-tab="curve" hidden>
+<div class="card">
+<h3 style="margin-top:0">Z&uuml;ndkurve &middot; Referenz</h3>
+<p class="hint">Deine aktuelle <code>.123</code>-Kurve (aus der 123TUNE+ App) hier hinterlegen &mdash; bleibt auf dem Hub gespeichert und ist jederzeit abrufbar. Reine Ablage/Anzeige, es wird nichts an die 123 geschrieben.</p>
+<form id="curveForm" method="post" action="/curve" enctype="multipart/form-data">
+<input class="file" type="file" name="curve" accept=".123,application/xml,text/xml" required>
+<button type="submit">Hochladen &amp; speichern</button>
+</form>
+<div id="curveMeta" class="hint" style="margin-top:12px">&mdash; keine Kurve hinterlegt &mdash;</div>
+<div id="curveView" hidden>
+<h3>Zentrifugalkurve (Drehzahl &rarr; Vorz&uuml;ndung)</h3>
+<div class="row"><span>Drehzahlbegrenzer</span><strong id="curveMaxRpm">-</strong></div>
+<svg id="curveAdvSvg" viewBox="0 0 640 300" style="width:100%;height:auto;background:#0d1712;border:1px solid #26372e;border-radius:8px;margin:8px 0"></svg>
+<div id="curveAdvTbl" class="mono"></div>
+<h3>MAP-Kurve (Druck &rarr; Vorz&uuml;ndung)</h3>
+<svg id="curveMapSvg" viewBox="0 0 640 300" style="width:100%;height:auto;background:#0d1712;border:1px solid #26372e;border-radius:8px;margin:8px 0"></svg>
+<div id="curveMapTbl" class="mono"></div>
+<div style="margin-top:14px"><a class="buttonlink" href="/curve" download="zuendkurve.123">.123 herunterladen</a></div>
+<form method="post" action="/curve_delete" style="margin-top:8px"><button type="submit" class="danger">Hinterlegte Kurve l&ouml;schen</button></form>
+</div>
+</div>
+</div><!-- /tab curve -->
 <div class="tab-section" data-tab="diag" hidden>
 <details class="setup">
 <summary>123Tune BLE Diagnose</summary>
@@ -642,6 +665,8 @@ function showTab(name) {
   });
   document.getElementById('tabLive').classList.toggle('on', name === 'live');
   document.getElementById('tab123').classList.toggle('on', name === 'g123');
+  { const t=document.getElementById('tabCurve'); if(t) t.classList.toggle('on', name === 'curve'); }
+  if (name === 'curve' && window.curveLoad) curveLoad();
   document.getElementById('tabDiag').classList.toggle('on', name === 'diag');
   document.getElementById('tabLog').classList.toggle('on', name === 'log');
   document.getElementById('tabSetup').classList.toggle('on', name === 'setup');
@@ -650,7 +675,7 @@ function showTab(name) {
 }
 try {
   const saved = localStorage.getItem('spartanTab');
-  if (saved === 'setup' || saved === 'log' || saved === 'diag' || saved === 'dev' || saved === 'g123') showTab(saved);
+  if (saved === 'setup' || saved === 'log' || saved === 'diag' || saved === 'dev' || saved === 'g123' || saved === 'curve') showTab(saved);
 } catch (e) {}
 function credShow() {
   const v = (document.getElementById('credFor') || {}).value || '1';
@@ -891,6 +916,57 @@ function g123ToggleLock() {
 }
 function g123TuneMode() { if (!g123Armed) return; g123TunePost('mode'); }
 function g123Adv(dir) { g123TunePost(dir); }
+// [KURVE] hinterlegte .123-Zuendkurve laden, parsen und wie in der App zeichnen.
+const cNS='http://www.w3.org/2000/svg';
+function cEl(t,a){ const e=document.createElementNS(cNS,t); for(const k in a) e.setAttribute(k,a[k]); return e; }
+function drawCurveGraph(svg, pts, xmax, ymin, ymax, xlabel){
+  while(svg.firstChild) svg.removeChild(svg.firstChild);
+  const W=640,H=300,L=52,R=16,T=14,B=40;
+  const px=v=>L+(v/xmax)*(W-L-R);
+  const py=v=>T+(1-(v-ymin)/(ymax-ymin))*(H-T-B);
+  for(let i=0;i<=5;i++){ const yv=ymin+(ymax-ymin)*i/5, y=py(yv);
+    svg.appendChild(cEl('line',{x1:L,y1:y,x2:W-R,y2:y,stroke:'#26372e','stroke-width':1}));
+    const tl=cEl('text',{x:L-6,y:y+4,'text-anchor':'end','font-size':11,fill:'#9ca99f'}); tl.textContent=Math.round(yv); svg.appendChild(tl); }
+  const xs=Math.min(8,Math.max(4,Math.round(xmax/1000)));
+  for(let i=0;i<=xs;i++){ const xv=xmax*i/xs, x=px(xv);
+    svg.appendChild(cEl('line',{x1:x,y1:T,x2:x,y2:H-B,stroke:'#1c2a22','stroke-width':1}));
+    const tl=cEl('text',{x:x,y:H-B+16,'text-anchor':'middle','font-size':11,fill:'#9ca99f'}); tl.textContent=Math.round(xv); svg.appendChild(tl); }
+  const xl=cEl('text',{x:(L+W-R)/2,y:H-4,'text-anchor':'middle','font-size':11,fill:'#9ca99f'}); xl.textContent=xlabel; svg.appendChild(xl);
+  if(!pts.length) return;
+  const d=pts.map((p,i)=>(i?'L':'M')+px(p.x).toFixed(1)+' '+py(p.y).toFixed(1)).join(' ');
+  svg.appendChild(cEl('path',{d:d,fill:'none',stroke:'#ff5630','stroke-width':2.5}));
+  pts.forEach(p=>svg.appendChild(cEl('circle',{cx:px(p.x),cy:py(p.y),r:4,fill:'#fff',stroke:'#ff5630','stroke-width':2})));
+}
+function curveTable(rows,h1,h2){
+  let s='<table style="width:100%;border-collapse:collapse;margin-top:4px"><tr><th style="text-align:left;color:#9ca99f;font-weight:400">'+h1+'</th><th style="text-align:right;color:#9ca99f;font-weight:400">'+h2+'</th></tr>';
+  rows.forEach(r=>{ s+='<tr><td style="border-top:1px solid #26372e;padding:5px 0">'+r[0]+'</td><td style="border-top:1px solid #26372e;padding:5px 0;text-align:right">'+r[1]+'</td></tr>'; });
+  return s+'</table>';
+}
+async function curveLoad(){
+  const meta=document.getElementById('curveMeta'), view=document.getElementById('curveView');
+  if(!meta) return;
+  try{
+    const r=await fetch('/curve',{cache:'no-store'});
+    if(!r.ok){ meta.textContent='— keine Kurve hinterlegt —'; view.hidden=true; return; }
+    const xml=new DOMParser().parseFromString(await r.text(),'text/xml');
+    const g=t=>{ const e=xml.querySelector(t); return e?e.textContent.trim():''; };
+    const esc=s=>s.replace(/&/g,'&amp;').replace(/</g,'&lt;');
+    const head=[g('Brand'),g('Model'),g('Engine')].filter(Boolean).join(' ')||'Zündkurve';
+    const com=g('Comments');
+    meta.innerHTML='<b style="color:#e6ede8">'+esc(head)+'</b>'+(g('DateModified')?' &middot; '+esc(g('DateModified')):'')+(g('Author')?' &middot; '+esc(g('Author')):'')+(com?'<br><span style="white-space:pre-wrap;font-size:.85rem">'+esc(com)+'</span>':'');
+    const adv=[...xml.querySelectorAll('AdvanceCurve > AdvancePoint')].map(p=>({x:+((p.querySelector('RPM')||{}).textContent||0),y:+((p.querySelector('AdvanceDegrees')||{}).textContent||0)})).filter(p=>p.x>0);
+    document.getElementById('curveMaxRpm').textContent=(g('AdvanceCurve > MaxRPM')||g('MaxRPM')||'-')+' U/min';
+    drawCurveGraph(document.getElementById('curveAdvSvg'),adv,Math.max(8000,...adv.map(p=>p.x)),0,50,'U/min');
+    document.getElementById('curveAdvTbl').innerHTML=curveTable(adv.map((p,i)=>[(i+1)+'. '+p.x+' U/min',p.y.toFixed(1)+' °']),'U/min','Grad KW');
+    const vac=[...xml.querySelectorAll('VacuumCurve > VacuumPoint')].map(p=>({x:+((p.querySelector('kP')||{}).textContent||0),y:+((p.querySelector('VacuumDegrees')||{}).textContent||0)}));
+    const ys=vac.map(p=>p.y);
+    drawCurveGraph(document.getElementById('curveMapSvg'),vac,Math.max(200,...vac.map(p=>p.x)),Math.min(0,...ys),Math.max(20,...ys),'kPa');
+    document.getElementById('curveMapTbl').innerHTML=curveTable(vac.map(p=>[p.x+' kPa',p.y.toFixed(1)+' °']),'kPa','Grad');
+    view.hidden=false;
+  }catch(e){ meta.textContent='Fehler beim Laden der Kurve'; view.hidden=true; }
+}
+window.curveLoad=curveLoad;
+try{ const cs=document.querySelector('[data-tab="curve"]'); if(cs && !cs.hidden) curveLoad(); }catch(e){}
 function g123InitGauges() {
   g123Build('g123gAdv', { min: 0, max: 55, minor: 33, majorEvery: 3, labels: [10, 20, 30, 40, 50], lbl: 13, title: ['Kurbelwelle °', 'Vorverstellung'], tsz: 11,
     texts: [{ id: 'g123dAdv', t: '0', x: 150, y: 160, a: 'middle', c: '#7a7a7a', s: 24, mono: true, w: '700' }] });

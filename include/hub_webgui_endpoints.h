@@ -256,6 +256,39 @@ void setupWebGui()
   server.on("/connecttest.txt", []() { server.send(200, "text/plain", "Microsoft Connect Test"); });
   server.on("/download", HTTP_GET, []() { sendLogFile(kLogFile, "spartan_hub_drive.csv"); });
   server.on("/download_old", HTTP_GET, []() { sendLogFile(kOldLogFile, "spartan_hub_drive_old.csv"); });
+  // [KURVE] Hinterlegte 123-Zuendkurve (.123-XML): lesen (Anzeige/Download) + hochladen.
+  server.on("/curve", HTTP_GET, []() {
+    if (!logFsReady || !SPIFFS.exists(kCurveFile)) { server.send(404, "text/plain", "keine Kurve hinterlegt"); return; }
+    File f = SPIFFS.open(kCurveFile, FILE_READ);
+    if (!f) { server.send(500, "text/plain", "Lesefehler"); return; }
+    server.streamFile(f, "application/xml");
+    f.close();
+  });
+  server.on("/curve", HTTP_POST, []() {
+    const bool ok = logFsReady && SPIFFS.exists(kCurveFile);
+    server.sendHeader("Location", "/", true);
+    server.send(ok ? 303 : 500, "text/plain", ok ? "" : "Speichern fehlgeschlagen (SPIFFS?)");
+  }, []() {
+    static File cf;
+    HTTPUpload &up = server.upload();
+    if (up.status == UPLOAD_FILE_START) {
+      if (logFsReady) cf = SPIFFS.open(kCurveFile, FILE_WRITE);
+      Serial.printf("Kurve:       Upload '%s' -> %s\n", up.filename.c_str(), cf ? "open" : "FS-Fehler");
+    } else if (up.status == UPLOAD_FILE_WRITE) {
+      if (cf) cf.write(up.buf, up.currentSize);
+    } else if (up.status == UPLOAD_FILE_END) {
+      if (cf) { cf.close(); Serial.printf("Kurve:       gespeichert (%u Bytes)\n", static_cast<unsigned>(up.totalSize)); }
+      logHubEvent("curve", "upload");
+    } else if (up.status == UPLOAD_FILE_ABORTED) {
+      if (cf) { cf.close(); SPIFFS.remove(kCurveFile); }
+    }
+  });
+  server.on("/curve_delete", HTTP_POST, []() {
+    if (logFsReady) SPIFFS.remove(kCurveFile);
+    logHubEvent("curve", "delete");
+    server.sendHeader("Location", "/", true);
+    server.send(303, "text/plain", "");
+  });
   server.on("/log/events", HTTP_GET, []() {
     uint16_t limit = 100;
     if (server.hasArg("limit")) {

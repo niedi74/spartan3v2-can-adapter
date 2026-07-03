@@ -398,6 +398,15 @@ String statusJson()
   json += ",\"trip_km\":";
   json += String(static_cast<double>(tripMm) / 1000000.0, 2);
 #endif
+  {
+    size_t curveBytes = 0;
+    const bool curvePresent = logFsReady && SPIFFS.exists(kCurveFile);
+    if (curvePresent) { File cf = SPIFFS.open(kCurveFile, FILE_READ); if (cf) { curveBytes = cf.size(); cf.close(); } }
+    json += ",\"curve_present\":";
+    json += curvePresent ? "true" : "false";
+    json += ",\"curve_bytes\":";
+    json += String(static_cast<unsigned long>(curveBytes));
+  }
   json += "}";
   return json;
 }
