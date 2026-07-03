@@ -954,6 +954,7 @@ async function curveLoad(){
     const g=t=>{ const e=xml.querySelector(t); return e?e.textContent.trim():''; };
     const esc=s=>s.replace(/&/g,'&amp;').replace(/</g,'&lt;');
     const head=[g('Brand'),g('Model'),g('Engine')].filter(Boolean).join(' ')||'Zündkurve';
+    window.curveNames[curveSlot]=[g('Brand'),g('Model')].filter(Boolean).join(' ')||('Slot'+curveSlot); curveRenderSlots();
     const com=g('Comments');
     meta.innerHTML='<b style="color:#e6ede8">'+esc(head)+'</b>'+(g('DateModified')?' &middot; '+esc(g('DateModified')):'')+(g('Author')?' &middot; '+esc(g('Author')):'')+(com?'<br><span style="white-space:pre-wrap;font-size:.85rem">'+esc(com)+'</span>':'');
     const adv=[...xml.querySelectorAll('AdvanceCurve > AdvancePoint')].map(p=>({x:+((p.querySelector('RPM')||{}).textContent||0),y:+((p.querySelector('AdvanceDegrees')||{}).textContent||0)})).filter(p=>p.x>0);
@@ -986,12 +987,26 @@ async function curveLoad(){
 window.curveLoad=curveLoad;
 var curveSlot=1; window.curveMask=0;
 try{ const s=+localStorage.getItem('curveSlot'); if(s>=1&&s<=3) curveSlot=s; }catch(e){}
+window.curveNames=window.curveNames||{};
 function curveRenderSlots(){
   const box=document.getElementById('curveSlots'); if(!box) return;
   let h='';
   for(let n=1;n<=3;n++){ const filled=!!(window.curveMask&(1<<(n-1)));
-    h+='<button type="button" class="tab'+(n===curveSlot?' on':'')+'" style="flex:1;min-width:96px" onclick="curveSelect('+n+')">Kurve '+n+' '+(filled?'&#9679;':'&#9675;')+'</button>'; }
+    const nm=(filled && window.curveNames[n])?(' &middot; '+window.curveNames[n]):'';
+    h+='<button type="button" class="tab'+(n===curveSlot?' on':'')+'" style="flex:1;min-width:96px;font-size:.82rem" onclick="curveSelect('+n+')">Kurve '+n+(filled?' &#9679;':' &#9675;')+nm+'</button>'; }
   box.innerHTML=h;
+}
+// Namen der belegten Slots (Brand+Model) fuer die Button-Beschriftung holen (einmal, gecacht).
+async function curveEnsureNames(){
+  for(let n=1;n<=3;n++){ const filled=!!(window.curveMask&(1<<(n-1)));
+    if(!filled){ if(window.curveNames[n]){ delete window.curveNames[n]; curveRenderSlots(); } continue; }
+    if(window.curveNames[n]) continue;
+    try{ const r=await fetch('/curve?slot='+n,{cache:'no-store'}); if(!r.ok) continue;
+      const x=new DOMParser().parseFromString(await r.text(),'text/xml');
+      const b=(x.querySelector('Brand')||{}).textContent||'', m=(x.querySelector('Model')||{}).textContent||'';
+      window.curveNames[n]=(b+' '+m).trim()||('Slot'+n); curveRenderSlots();
+    }catch(e){}
+  }
 }
 function curveSelect(n){
   curveSlot=n; try{localStorage.setItem('curveSlot',n)}catch(e){}
@@ -1002,6 +1017,30 @@ function curveSelect(n){
   curveRenderSlots(); curveLoad();
 }
 window.curveSelect=curveSelect;
+// [KURVE] Upload + Loeschen per AJAX -> KEIN Seiten-Neuladen, Kurve erscheint sofort.
+(function(){
+  const cf=document.getElementById('curveForm');
+  if(cf) cf.addEventListener('submit', async function(ev){
+    ev.preventDefault();
+    const fi=cf.querySelector('input[type=file]'); if(!fi||!fi.files.length) return;
+    const meta=document.getElementById('curveMeta'); if(meta) meta.textContent='lädt hoch …';
+    try{ const fd=new FormData(); fd.append('curve', fi.files[0]);
+      await fetch(cf.action,{method:'POST',body:fd,redirect:'manual'});
+      fi.value=''; delete window.curveNames[curveSlot];
+      window.curveMask=(window.curveMask||0)|(1<<(curveSlot-1));
+      curveEnsureNames(); curveLoad();
+    }catch(e){ if(meta) meta.textContent='Upload fehlgeschlagen'; }
+  });
+  const df=document.getElementById('curveDelForm');
+  if(df) df.addEventListener('submit', async function(ev){
+    ev.preventDefault();
+    try{ await fetch(df.action,{method:'POST',body:new FormData(),redirect:'manual'});
+      delete window.curveNames[curveSlot];
+      window.curveMask=(window.curveMask||0)&~(1<<(curveSlot-1));
+      curveRenderSlots(); curveLoad();
+    }catch(e){}
+  });
+})();
 // [KURVE-READ] echte Kurve aus der 123 lesen (10@..13@), dekodieren, blau overlayen.
 function decodeReadCurve(hex){
   const raw=[]; for(let i=0;i+1<hex.length;i+=2) raw.push(parseInt(hex.substr(i,2),16));
@@ -1246,7 +1285,7 @@ async function refresh() {
     try {
       const _cs=document.querySelector('[data-tab="curve"]');
       const _live=document.getElementById('curveLive');
-      if (_cs && !_cs.hidden && window.curveMask !== (d.curve_slots||0)) { window.curveMask=d.curve_slots||0; curveRenderSlots(); }
+      if (_cs && !_cs.hidden && window.curveMask !== (d.curve_slots||0)) { window.curveMask=d.curve_slots||0; curveRenderSlots(); curveEnsureNames(); }
       if (window.curveTx && _cs && !_cs.hidden) {
         const _svg=document.getElementById('curveAdvSvg');
         if (d.tune_connected && Number(d.rpm) > 0) {
