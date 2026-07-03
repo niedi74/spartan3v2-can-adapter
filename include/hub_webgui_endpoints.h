@@ -296,6 +296,26 @@ void setupWebGui()
     server.sendHeader("Location", "/", true);
     server.send(303, "text/plain", "");
   });
+#if ENABLE_BLE_HUB
+  // [KURVE-READ] echte EEPROM-Kurve aus der 123 lesen: POST startet, GET liefert
+  // Status + erfasste Roh-Bytes als Hex (Browser dekodiert 10@..13@ -> Kurve).
+  server.on("/api/curve_read", HTTP_POST, []() {
+    const bool ok = startCurveRead();
+    server.send(ok ? 200 : 409, "application/json",
+                ok ? "{\"ok\":true}" : "{\"ok\":false,\"error\":\"123 nicht streaming\"}");
+  });
+  server.on("/api/curve_read", HTTP_GET, []() {
+    String j = "{\"active\":"; j += curveReadActive ? "true" : "false";
+    j += ",\"len\":"; j += String(static_cast<unsigned>(curveReadLen));
+    j += ",\"raw\":\"";
+    static const char *H = "0123456789abcdef";
+    const uint16_t n = curveReadLen;
+    for (uint16_t i = 0; i < n; i++) { uint8_t b = static_cast<uint8_t>(curveReadBuf[i]); j += H[b >> 4]; j += H[b & 0xF]; }
+    j += "\"}";
+    server.sendHeader("Connection", "close");
+    server.send(200, "application/json", j);
+  });
+#endif
   server.on("/log/events", HTTP_GET, []() {
     uint16_t limit = 100;
     if (server.hasArg("limit")) {

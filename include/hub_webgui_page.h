@@ -254,6 +254,11 @@ input:focus, select:focus { outline: none; border-color: #78ad43; }
 <button type="submit">Hochladen &amp; speichern</button>
 </form>
 <div id="curveMeta" class="hint" style="margin-top:12px">&mdash; keine Kurve hinterlegt &mdash;</div>
+<div style="margin-top:12px">
+<button type="button" id="curveReadBtn" class="secondary" onclick="curveReadFrom123()">Kurve aus 123 lesen (experimentell)</button>
+<span id="curveReadStat" class="hint"></span>
+</div>
+<p class="hint">Liest die tats&auml;chlich in der 123 gespeicherte Zentrifugalkurve (Befehle 10@..13@) und legt sie als <b>blaue</b> Linie &uuml;ber die gew&auml;hlte Referenz. <b>Experimentell</b> &mdash; am echten Ger&auml;t zu best&auml;tigen; der Emu liefert nur eine grobe N&auml;herung.</p>
 <div id="curveView" hidden>
 <h3>Zentrifugalkurve (Drehzahl &rarr; Vorz&uuml;ndung)</h3>
 <div class="row"><span>Drehzahlbegrenzer</span><strong id="curveMaxRpm">-</strong></div>
@@ -969,6 +974,13 @@ async function curveLoad(){
     window.curveRefAt=(rpm)=>{ const p=window.curveAdvPts; if(!p||!p.length) return null;
       if(rpm<=p[0].x) return p[0].y; if(rpm>=p[p.length-1].x) return p[p.length-1].y;
       for(let i=1;i<p.length;i++){ if(rpm<=p[i].x){ const a=p[i-1],b=p[i]; return a.y+(b.y-a.y)*(rpm-a.x)/(b.x-a.x); } } return null; };
+    // [KURVE-READ] gelesene 123-Kurve (blau, gestrichelt) ueber die Referenz legen
+    if(window.curveRead123 && window.curveRead123.length){
+      const svg2=document.getElementById('curveAdvSvg'), rp=window.curveRead123;
+      const rd=rp.map((pt,i)=>(i?'L':'M')+window.curveTx(pt.x,pt.y).map(v=>v.toFixed(1)).join(' ')).join(' ');
+      svg2.appendChild(cEl('path',{d:rd,fill:'none',stroke:'#4aa3ff','stroke-width':2,'stroke-dasharray':'6 3'}));
+      rp.forEach(pt=>{ const xy=window.curveTx(pt.x,pt.y); svg2.appendChild(cEl('circle',{cx:xy[0],cy:xy[1],r:3.5,fill:'#4aa3ff'})); });
+    }
     document.getElementById('curveAdvTbl').innerHTML=curveTable(adv.map((p,i)=>[(i+1)+'. '+p.x+' U/min',p.y.toFixed(1)+' °']),'U/min','Grad KW');
     const vac=[...xml.querySelectorAll('VacuumCurve > VacuumPoint')].map(p=>({x:+((p.querySelector('kP')||{}).textContent||0),y:+((p.querySelector('VacuumDegrees')||{}).textContent||0)}));
     const ys=vac.map(p=>p.y);
@@ -996,6 +1008,37 @@ function curveSelect(n){
   curveRenderSlots(); curveLoad();
 }
 window.curveSelect=curveSelect;
+// [KURVE-READ] echte Kurve aus der 123 lesen (10@..13@), dekodieren, blau overlayen.
+function decodeReadCurve(hex){
+  const raw=[]; for(let i=0;i+1<hex.length;i+=2) raw.push(parseInt(hex.substr(i,2),16));
+  const s=raw.map(x=>String.fromCharCode(x)).join('');
+  const eeprom=new Array(64).fill(0xFF); let got=0;
+  for(let k=0;k<4;k++){ const hdr='1'+k+'@'; let idx=s.indexOf(hdr); if(idx<0) continue;
+    const rest=s.slice(idx+hdr.length, idx+hdr.length+90);
+    const toks=rest.split(/[^0-9A-Fa-f]+/).filter(t=>t.length>=2);
+    for(let j=0;j<16 && j<toks.length;j++){ const v=parseInt(toks[j].substr(0,2),16); if(!isNaN(v)){ eeprom[k*16+j]=v; got++; } } }
+  if(got<8) return [];
+  const pts=[];
+  for(let a=2;a<=20;a+=2){ const rB=eeprom[a],dB=eeprom[a+1];
+    if(rB===0||rB===0xFF||dB===0xFF) continue; pts.push({x:rB*50,y:dB*0.2}); }
+  const seen={}; return pts.filter(p=>{ if(seen[p.x]) return false; seen[p.x]=1; return true; }).sort((p,q)=>p.x-q.x);
+}
+async function curveReadFrom123(){
+  const stat=document.getElementById('curveReadStat'), btn=document.getElementById('curveReadBtn');
+  if(stat) stat.textContent=' liest…'; if(btn) btn.disabled=true;
+  try{
+    const jr=await (await fetch('/api/curve_read',{method:'POST'})).json();
+    if(!jr.ok){ if(stat) stat.textContent=' — 123 nicht streaming'; if(btn) btn.disabled=false; return; }
+    let raw='';
+    for(let i=0;i<12;i++){ await new Promise(s=>setTimeout(s,400));
+      const g=await (await fetch('/api/curve_read',{cache:'no-store'})).json(); raw=g.raw||''; if(!g.active) break; }
+    const pts=decodeReadCurve(raw);
+    if(!pts.length){ if(stat) stat.textContent=' — keine Kurvendaten erkannt (am echten Gerät testen)'; if(btn) btn.disabled=false; return; }
+    window.curveRead123=pts; if(stat) stat.textContent=' — '+pts.length+' Punkte gelesen (blau)'; curveLoad();
+  }catch(e){ if(stat) stat.textContent=' — Fehler'; }
+  if(btn) btn.disabled=false;
+}
+window.curveReadFrom123=curveReadFrom123;
 try{ const cs=document.querySelector('[data-tab="curve"]'); if(cs && !cs.hidden) curveSelect(curveSlot); }catch(e){}
 function g123InitGauges() {
   g123Build('g123gAdv', { min: 0, max: 55, minor: 33, majorEvery: 3, labels: [10, 20, 30, 40, 50], lbl: 13, title: ['Kurbelwelle °', 'Vorverstellung'], tsz: 11,

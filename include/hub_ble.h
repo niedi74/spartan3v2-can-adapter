@@ -211,6 +211,20 @@ class TuneClientCallbacks : public NimBLEClientCallbacks {
 
 void onTuneNotify(NimBLERemoteCharacteristic *, uint8_t *data, size_t length, bool)
 {
+  // [KURVE-READ] Im Lese-Modus die Roh-Bytes sammeln (Blockantworten 10@..13@),
+  // NICHT als Live-Frame dekodieren. Der Browser trennt spaeter Header/Hex/Rauschen.
+  if (curveReadActive) {
+    // Live-Frames sind ~5 Byte, Block-Antwort-Fragmente (10@..13@) ~20 Byte.
+    // Filter length>8 -> nur die Block-Fragmente sammeln, Live-Rauschen raus.
+    if (length > 8) {
+      portENTER_CRITICAL(&stateMux);
+      for (size_t i = 0; i < length && curveReadLen < sizeof(curveReadBuf); i++) {
+        curveReadBuf[curveReadLen++] = static_cast<char>(data[i]);
+      }
+      portEXIT_CRITICAL(&stateMux);
+    }
+    return;
+  }
   Serial.printf("123TUNE BLE: notify len=%u :", static_cast<unsigned>(length));
   for (size_t i = 0; i < length && i < 20; i++) {
     Serial.printf(" %02X", data[i]);
@@ -491,6 +505,42 @@ bool tuneAdvReset()
   }
   logHubEvent("tune_reset", "0");
   return true;
+}
+
+// [KURVE-READ] EEPROM-Kurvenlesung starten (nur wenn 123 streamt). updateTuneBle()
+// staffelt dann die Bloecke 10@..13@; onTuneNotify sammelt die Antworten.
+bool startCurveRead()
+{
+  if (!tuneStreaming()) return false;
+  portENTER_CRITICAL(&stateMux);
+  curveReadLen = 0;
+  portEXIT_CRITICAL(&stateMux);
+  curveReadStartMs = millis();
+  curveReadPhase = 1;
+  curveReadActive = true;
+  Serial.println("Kurve-Read:  Start (10@..13@)");
+  logHubEvent("curve_read", "start");
+  return true;
+}
+
+// Pump: aus updateTuneBle() aufrufen -> staffelt Blockbefehle, schliesst das
+// Capture-Fenster nach ~1,8 s.
+void pumpCurveRead()
+{
+  if (!curveReadActive) return;
+  const uint32_t el = millis() - curveReadStartMs;
+  static const char *B[4] = { "10@\r", "11@\r", "12@\r", "13@\r" };
+  if (curveReadPhase >= 1 && curveReadPhase <= 4 && el >= static_cast<uint32_t>(curveReadPhase - 1) * 300) {
+    if (tuneNusRx) tuneNusRx->writeValue(reinterpret_cast<const uint8_t *>(B[curveReadPhase - 1]), 4, false);
+    Serial.printf("Kurve-Read:  Block %d gesendet (%lums)\n", curveReadPhase, static_cast<unsigned long>(el));
+    curveReadPhase++;
+  }
+  if (el > 1800) {
+    curveReadActive = false;
+    curveReadPhase = 0;
+    Serial.printf("Kurve-Read:  Fenster zu, %u Bytes erfasst\n", static_cast<unsigned>(curveReadLen));
+    logHubEvent("curve_read", "done");
+  }
 }
 
 void runTuneReadDump()
@@ -841,6 +891,9 @@ void updateTuneBle()
     connectTune();
     return;
   }
+  pumpCurveRead();  // [KURVE-READ] Blockbefehle staffeln, Fenster schliessen
+  // Waehrend der Kurvenlesung keine $-Pings/Stale-Logik dazwischenfunken.
+  if (curveReadActive) return;
   sendTunePing();
   if (tuneConnected) {
     const TuneSnapshot tune = tuneSnapshot();

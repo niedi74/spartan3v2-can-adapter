@@ -444,6 +444,14 @@ uint32_t tuneLastPingMs = 0;
 // Netto-Offset in Schritten (der echte Winkel steht live auf dem 0x31-Advance-Gauge).
 bool tuneModeActive = false;
 int  tuneAdvSteps = 0;
+// [KURVE-READ] EEPROM-Kurve aus der 123 lesen (Befehle 10@..13@). Im Lese-Modus
+// sammelt onTuneNotify die Roh-Antworten in curveReadBuf; updateTuneBle staffelt die
+// Blockbefehle; der Browser dekodiert. Reiner Capture -> minimale Chip-Last.
+volatile bool curveReadActive = false;
+char     curveReadBuf[640];
+volatile uint16_t curveReadLen = 0;
+uint32_t curveReadStartMs = 0;
+uint8_t  curveReadPhase = 0;   // 1..4 = naechster zu sendender Block, 0 = idle
 uint32_t tuneScanSeen = 0;
 uint32_t tuneScanCandidates = 0;
 String tuneSavedAddress = "";
