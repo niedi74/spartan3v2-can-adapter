@@ -103,22 +103,6 @@ String statusJson()
   json += "\",\"ble_display\":";
   json += ENABLE_BLE_DISPLAY ? "true" : "false";
 #endif
-#if ENABLE_ESP_NOW_HUB
-  json += ",\"esp_now_ready\":";
-  json += espNowReady ? "true" : "false";
-  json += ",\"esp_now_channel\":";
-  json += String(espNowActiveChannel > 0 ? espNowActiveChannel : ESP_NOW_WIFI_CHANNEL);
-  json += ",\"esp_now_channel_pref\":";
-  json += String(hubEspNowChannelPref);
-  json += ",\"esp_now_tx\":";
-  json += String(espNowTxCount);
-  json += ",\"esp_now_tx_fail\":";
-  json += String(espNowTxFailCount);
-  json += ",\"esp_now_seq\":";
-  json += String(espNowSeq);
-#endif
-  json += ",\"hub_feat_espnow\":";
-  json += hubFeatEspNow ? "true" : "false";
   json += ",\"hub_feat_ap\":";
   json += hubFeatAp ? "true" : "false";
   json += ",\"hub_feat_wifi\":";
@@ -127,8 +111,6 @@ String statusJson()
   json += hubFeatLog ? "true" : "false";
   json += ",\"hub_feat_ble123\":";
   json += hubFeatBle123 ? "true" : "false";
-  json += ",\"hub_feat_blebm6\":";
-  json += hubFeatBleBm6 ? "true" : "false";
 #if ENABLE_BLE_HUB
   json += ",\"ble_hub_clients\":[";
   for (uint8_t i = 0; i < bleHubClientCount; i++) {
@@ -160,8 +142,6 @@ String statusJson()
     json += String(now - bleScanDevices[i].seenMs);
     json += ",\"tune\":";
     json += bleScanDevices[i].tuneLike ? "true" : "false";
-    json += ",\"bm6\":";
-    json += bleScanDevices[i].bm6Like ? "true" : "false";
     json += "}";
   }
   json += "]";
@@ -345,40 +325,10 @@ String statusJson()
   json += String(tune.voltage, 1);
   json += ",\"tune_amp\":";
   json += String(tune.coilCurrent, 2);
-#if ENABLE_BM6
-  json += ",\"bm6_connected\":";
-  json += bm6Connected ? "true" : "false";
-  json += ",\"bm6_voltage\":";
-  json += String(bm6Voltage, 2);
-  json += ",\"bm6_temperature\":";
-  json += String(static_cast<int>(bm6Temperature));
-  json += ",\"bm6_rx_count\":";
-  json += String(static_cast<unsigned long>(bm6RxCount));
-  json += ",\"bm6_poll_sec\":";
-  json += String(bm6PollIntervalMs / 1000);
   json += ",\"uart_rx_pin\":";
   json += String(bridgeUartRxPin);
   json += ",\"uart_tx_pin\":";
   json += String(bridgeUartTxPin);
-  json += ",\"bm6_decode_fail\":";
-  json += String(static_cast<unsigned long>(bm6DecodeFailCount));
-  json += ",\"bm6_age_ms\":";
-  json += String(bm6LastRxMs == 0 ? 0UL : static_cast<unsigned long>(now - bm6LastRxMs));
-  json += ",\"bm6_saved_address\":\"";
-  json += bm6SavedAddress;
-  json += "\",\"bm6_aux_saved_address\":\"";
-  json += bm6AuxSavedAddress;
-  json += "\",\"bm6_active_slot\":\"";
-  json += bm6ActiveSlot == 0 ? "main" : "aux";
-  json += "\",\"bm6_aux_voltage\":";
-  json += String(bm6AuxVoltage, 2);
-  json += ",\"bm6_aux_temperature\":";
-  json += String(static_cast<int>(bm6AuxTemperature));
-  json += ",\"bm6_aux_rx_count\":";
-  json += String(static_cast<unsigned long>(bm6AuxRxCount));
-  json += ",\"bm6_aux_age_ms\":";
-  json += String(bm6AuxLastRxMs == 0 ? 0UL : static_cast<unsigned long>(now - bm6AuxLastRxMs));
-#endif
 #endif
 #if SPEED_REED_PIN >= 0
   json += ",\"speed_hz\":";

@@ -328,7 +328,7 @@ input:focus, select:focus { outline: none; border-color: #78ad43; }
 <details class="setup" open>
 <summary>Event-Log (Ringbuffer)</summary>
 <div class="inside">
-<p class="hint">State-Transitions fuer 123TUNE, BLE, BM6, WiFi/HTTP und ESP-NOW. Auto-Refresh alle 2 s.</p>
+<p class="hint">State-Transitions fuer 123TUNE, BLE und WiFi/HTTP. Auto-Refresh alle 2 s.</p>
 <div class="row"><span>Events</span><strong id="eventCount">0</strong></div>
 <div class="row"><span>123 State</span><strong id="tuneLinkState">-</strong></div>
 <form action="/log/events_clear" method="post" style="margin-top:8px"><button class="secondary" type="submit">Event-Log leeren</button></form>
@@ -359,7 +359,6 @@ input:focus, select:focus { outline: none; border-color: #78ad43; }
 <form action="/log_columns" method="post">
 <label><input type="checkbox" name="spartan" id="colSpartan" value="1"> Spartan Lambda/Temp/Status</label>
 <label><input type="checkbox" name="tune" id="colTune" value="1"> 123 RPM/ADV/MAP/Volt</label>
-<label><input type="checkbox" name="bm6" id="colBm6" value="1"> BM6 Batterie</label>
 <label><input type="checkbox" name="speed" id="colSpeed" value="1"> Speed/Reed</label>
 <label><input type="checkbox" name="heater" id="colHeater" value="1"> Heater Analog</label>
 <label><input type="checkbox" name="hours" id="colHours" value="1"> Betriebsstunden</label>
@@ -648,11 +647,9 @@ async function devBleScan(){
     results.innerHTML=devs.map(x=>{
       const name=x.name||'---';
       const is123=x.tune?'✓123':'';
-      const isBm6=x.bm6?'✓BM6':'';
       return `<div style="padding:3px 0;border-bottom:1px solid #2a3a2e">
-        <span style="color:#9ed85b">${x.addr}</span> ${name} rssi=${x.rssi} ${is123}${isBm6}
+        <span style="color:#9ed85b">${x.addr}</span> ${name} rssi=${x.rssi} ${is123}
         ${x.tune?`<button type="button" style="margin-left:6px;font-size:10px" onclick="devSetTune('${x.addr}')">als 123 setzen</button>`:''}
-        ${x.bm6?`<button type="button" style="margin-left:4px;font-size:10px" onclick="devSetBm6('${x.addr}')">als BM6 setzen</button>`:''}
       </div>`;
     }).join('');
   } catch(e){status.textContent=' Fehler';}
@@ -690,10 +687,9 @@ document.getElementById('tunePreset')?.addEventListener('change', (e) => {
   document.getElementById('tune_mac').value = e.target.value || '';
 });
 async function saveBleTarget(kind, addr) {
-  const isBm6 = kind === 'bm6';
-  const target = isBm6 ? 'bm6_mac' : 'tune_mac';
-  const endpoint = isBm6 ? '/bm6_target' : '/ble_target';
-  const field = isBm6 ? 'bm6_mac' : 'tune_mac';
+  const target = 'tune_mac';
+  const endpoint = '/ble_target';
+  const field = 'tune_mac';
   const input = document.getElementById(target);
   input.value = addr;
   try {
@@ -750,13 +746,12 @@ function syncBlePresetOptions(selectId, devices, kind, savedAddr) {
   devices.forEach(x => {
     const addr = String(x.addr || '').toLowerCase();
     if (!addr || seen.has(addr)) return;
-    if (kind === 'bm6' && !x.bm6 && addr !== String(savedAddr || '').toLowerCase()) return;
     if (kind === 'tune' && !x.tune && addr !== String(savedAddr || '').toLowerCase()) return;
     const opt = document.createElement('option');
     opt.value = addr;
     opt.dataset.scan = '1';
     const name = x.name ? ' ' + x.name : '';
-    opt.textContent = (kind === 'bm6' ? 'Scan BM6' : 'Scan 123') + name + ' ' + addr + ' ' + (x.rssi ?? 0) + ' dBm';
+    opt.textContent = 'Scan 123' + name + ' ' + addr + ' ' + (x.rssi ?? 0) + ' dBm';
     sel.appendChild(opt);
     seen.add(addr);
   });
@@ -1258,7 +1253,6 @@ async function refresh() {
     const cols = Number(d.log_columns ?? 63);
     document.getElementById('colSpartan').checked = !!(cols & 1);
     document.getElementById('colTune').checked = !!(cols & 2);
-    document.getElementById('colBm6').checked = !!(cols & 4);
     document.getElementById('colSpeed').checked = !!(cols & 8);
     document.getElementById('colHeater').checked = !!(cols & 16);
     document.getElementById('colHours').checked = !!(cols & 32);

@@ -16,14 +16,6 @@
 #define ENABLE_BLE_DISPLAY ENABLE_BLE_HUB
 #endif
 
-#ifndef ENABLE_ESP_NOW_HUB
-#define ENABLE_ESP_NOW_HUB 0
-#endif
-
-#if ENABLE_ESP_NOW_HUB
-#include <esp_now.h>
-#include "spartan_cockpit_frame.h"
-#endif
 #include "tune123_decode.h"  // gemeinsamer 123-Decoder (Hub/M5/Waveshare)
 
 #if ENABLE_WEB_GUI
@@ -40,7 +32,7 @@
 #include <esp_sntp.h>
 #include <esp_wifi.h>
 #endif
-#if defined(ENABLE_BLE_HUB) && defined(ENABLE_ESP_NOW_HUB)
+#if defined(ENABLE_BLE_HUB)
 #include "esp_coexist.h"   // BLE/WiFi-Funkpriorität (123-BLE-Empfang stabil halten)
 #endif
 
@@ -244,10 +236,6 @@ bool lcdReady = false;
 
 constexpr uint32_t kDisplayIntervalMs = 200;
 constexpr uint32_t kBleNotifyIntervalMs = 250;
-// ESP-NOW-Cockpit-Broadcast: deutlich schneller als der BLE-Status-Notify,
-// damit RPM/Advance auf M5/Touch flüssig wirken (nicht "slow motion").
-// 40 ms = 25 Hz. Frames sind winzig (17 B), das ist für ESP-NOW unkritisch.
-constexpr uint32_t kEspNowSendIntervalMs = 40;
 constexpr uint32_t kCanStaleMs = 500;
 // BLE-Bridge UART: optionaler zweiter ESP32 liefert 123-Daten per UART.
 // Pin-Belegung wird zur Laufzeit per Dev-Tab gesetzt und in NVS gespeichert.
@@ -283,33 +271,6 @@ enum class TuneLinkState : uint8_t {
   Streaming,
 };
 
-#ifndef ENABLE_BM6
-#define ENABLE_BM6 1
-#endif
-
-constexpr char kBm6TargetAddress[] = "3c:ab:72:7f:d0:bc";
-constexpr char kBm6ServiceUuid[] = "0000fff0-0000-1000-8000-00805f9b34fb";
-constexpr char kBm6WriteUuid[] = "0000fff3-0000-1000-8000-00805f9b34fb";
-constexpr char kBm6NotifyUuid[] = "0000fff4-0000-1000-8000-00805f9b34fb";
-constexpr uint32_t kBm6ScanWindowMs = 1500;   // 1.5s: BM6 findet sich, 123-Link ueberlebt den Scan
-constexpr uint32_t kBm6ReconnectDelayMs = 8000;
-constexpr uint32_t kBm6TriggerIntervalMs = 2000;  // interner Polling-Takt (verbunden)
-uint32_t bm6PollIntervalMs = 60000;               // Abfrageintervall: Standard 60s, per /bm6_interval
-constexpr uint32_t kBm6MainSlotMs = 45000;   // Batterie (main)
-constexpr uint32_t kBm6AuxSlotMs = 15000;    // Zusatzbatterie poll window
-constexpr uint32_t kBm6CacheMaxAgeMs = 120000;
-const uint8_t kBm6AesKey[16] = {
-    0x6C, 0x65, 0x61, 0x67, 0x65, 0x6E, 0x64, 0xFF,
-    0xFE, 0x30, 0x31, 0x30, 0x30, 0x30, 0x30, 0x39};
-const uint8_t kBm6TriggerPlain[16] = {
-    0xD1, 0x55, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
-#endif
-#if ENABLE_ESP_NOW_HUB
-#ifndef ESP_NOW_WIFI_CHANNEL
-#define ESP_NOW_WIFI_CHANNEL 6
-#endif
-constexpr uint8_t kEspNowBroadcastAddr[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 #endif
 
 struct SpartanReading {
@@ -461,42 +422,11 @@ struct BleScanDevice {
   String name;
   int rssi = 0;
   bool tuneLike = false;
-  bool bm6Like = false;
   uint32_t seenMs = 0;
 };
 constexpr uint8_t kBleScanDeviceMax = 12;
 BleScanDevice bleScanDevices[kBleScanDeviceMax];
 uint8_t bleScanDeviceCount = 0;
-#if ENABLE_BM6
-NimBLEClient *bm6Client = nullptr;
-NimBLERemoteCharacteristic *bm6WriteChar = nullptr;
-NimBLEAddress bm6TargetAddress;
-String bm6SavedAddress = "";
-String bm6AuxSavedAddress = "";
-uint8_t bm6ActiveSlot = 0;  // 0=main (Batterie), 1=aux (Zusatzbatterie)
-uint32_t bm6SlotStartedMs = 0;
-bool bm6DoConnect = false;
-bool bm6Connected = false;
-uint32_t bm6NextScanMs = 0;
-uint32_t bm6LastTriggerMs = 0;
-uint32_t bm6LastRxMs = 0;
-uint32_t bm6RxCount = 0;
-uint32_t bm6DecodeFailCount = 0;
-float bm6Voltage = 0.0f;
-int8_t bm6Temperature = 0;
-uint32_t bm6AuxLastRxMs = 0;
-uint32_t bm6AuxRxCount = 0;
-float bm6AuxVoltage = 0.0f;
-int8_t bm6AuxTemperature = 0;
-#endif
-#endif
-#if ENABLE_ESP_NOW_HUB
-volatile uint32_t espNowTxCount = 0;
-volatile uint32_t espNowTxFailCount = 0;
-uint16_t espNowSeq = 0;
-bool espNowReady = false;
-uint8_t espNowActiveChannel = 0;
-uint32_t lastEspNowSendMs = 0;
 #endif
 #if ENABLE_WEB_GUI
 WebServer server(80);
@@ -508,13 +438,10 @@ bool otaAuthFailed = false;   // [OTA-LOCK] Token fehlte/falsch -> Upload verwor
 size_t otaRxBytes = 0;
 uint32_t otaStartedMs = 0;
 String otaToken;              // [OTA-LOCK] leer = OTA gesperrt (Schutz vor Fremd-/Fehl-OTA)
-bool hubFeatEspNow = true;
 bool hubFeatAp = true;
 bool hubFeatWifi = true;
 bool hubFeatLog = true;
 bool hubFeatBle123 = false;
-bool hubFeatBleBm6 = false;
-uint8_t hubEspNowChannelPref = 0;  // 0=auto/follow STA, otherwise fixed 1..14
 // WiFi-Profile: 0=Bus(AP-only), 1=Zuhause, 2=Handy
 struct HubWifiProfile {
   char ssid[33];
@@ -580,11 +507,12 @@ const size_t kMaxLogBytes = 200000;  // 200 KB: kleine Dateien halten SPIFFS sch
 const uint32_t kLogIntervalMs = 500;
 const uint16_t kLogColSpartan = 0x0001;
 const uint16_t kLogColTune = 0x0002;
-const uint16_t kLogColBm6 = 0x0004;
+// 0x0004 war die BM6-Spalte (entfernt); Bitwerte bleiben stabil, damit in NVS
+// gespeicherte Masken (log_cols) weiterhin richtig interpretiert werden.
 const uint16_t kLogColSpeed = 0x0008;
 const uint16_t kLogColHeater = 0x0010;
 const uint16_t kLogColHours = 0x0020;
-const uint16_t kLogColDefault = kLogColSpartan | kLogColTune | kLogColBm6 |
+const uint16_t kLogColDefault = kLogColSpartan | kLogColTune |
                                 kLogColSpeed | kLogColHeater | kLogColHours;
 uint16_t logColumnMask = kLogColDefault;
 struct WifiApStation {
@@ -651,13 +579,10 @@ void saveHubFeatures()
 {
   ensurePreferences();
   networkPreferences.putUChar("hf_ver", 1);
-  networkPreferences.putBool("hf_espnow", hubFeatEspNow);
   networkPreferences.putBool("hf_ap", hubFeatAp);
   networkPreferences.putBool("hf_wifi", hubFeatWifi);
   networkPreferences.putBool("hf_log", hubFeatLog);
   networkPreferences.putBool("hf_ble123", hubFeatBle123);
-  networkPreferences.putBool("hf_blebm6", hubFeatBleBm6);
-  networkPreferences.putUChar("espnow_ch", hubEspNowChannelPref);
   networkPreferences.putUChar("lambda_test", static_cast<uint8_t>(lambdaTestMode));
 }
 
@@ -713,34 +638,28 @@ void loadHubFeatures()
   if (hubApMask.length() == 0) hubApMask = "255.255.255.0";
   if (!networkPreferences.isKey("hf_ver")) {
 #if BLE_BRIDGE
-    // BLE-Coprozessor: KEIN WLAN/AP/ESP-NOW (Funk frei, kein Brownout), 123+BM6 AN.
-    hubFeatEspNow = false; hubFeatAp = false; hubFeatWifi = false; hubFeatLog = false;
-    hubFeatBle123 = true;  hubFeatBleBm6 = true;
+    // BLE-Coprozessor: KEIN WLAN/AP (Funk frei, kein Brownout), nur 123-BLE AN.
+    hubFeatAp = false; hubFeatWifi = false; hubFeatLog = false;
+    hubFeatBle123 = true;
 #else
 #ifdef MINIMAL_123
-    // Minimal-Modus: NUR 123-BLE + Lambda(CAN) + Log + Web. KEIN BM6 (2. BLE-
-    // Verbindung), KEIN ESP-NOW. Das entlastet den NimBLE-ACL-Pool -> stabile 123.
-    hubFeatEspNow = false;  // kein ESP-NOW (entlastet Funk + NimBLE-Host)
+    // Minimal-Modus: NUR 123-BLE + Lambda(CAN) + Log + Web. Eine einzige BLE-
+    // Verbindung entlastet den NimBLE-ACL-Pool -> stabile 123.
     hubFeatAp = true;       // AP fuer Web/API-Zugriff waehrend Fahrt
     hubFeatWifi = true;     // STA an: Hub im Heimnetz erreichbar (Verifikation + Zugriff)
     hubFeatLog = true;
     hubFeatBle123 = true;
-    hubFeatBleBm6 = false;  // BM6 AUS -> nur EINE BLE-Verbindung = stabiler ACL-Pool
 #else
-    hubFeatEspNow = true;
     hubFeatAp = true;
     hubFeatWifi = true;
     hubFeatLog = true;
 #ifdef DEFAULT_BLE123_ON
     hubFeatBle123 = true;
-    hubFeatBleBm6 = true;
 #else
     hubFeatBle123 = false;
-    hubFeatBleBm6 = false;
 #endif
 #endif
 #endif
-    hubEspNowChannelPref = 0;
     saveHubFeatures();
     Serial.println("Hub feats:   defaults gesetzt");
     return;
@@ -749,20 +668,14 @@ void loadHubFeatures()
   if (networkPreferences.isKey("ssid")) {
     defaultWifi = networkPreferences.getString("ssid", "").length() > 0;
   }
-  hubFeatEspNow = networkPreferences.getBool("hf_espnow", true);
   hubFeatAp = networkPreferences.getBool("hf_ap", true);
   hubFeatWifi = networkPreferences.getBool("hf_wifi", defaultWifi);
   hubFeatLog = networkPreferences.getBool("hf_log", true);
   hubFeatBle123 = networkPreferences.getBool("hf_ble123", false);
-  hubFeatBleBm6 = networkPreferences.getBool("hf_blebm6", false);
   const uint8_t savedLambdaTest = networkPreferences.getUChar("lambda_test", 0);
   lambdaTestMode = savedLambdaTest <= static_cast<uint8_t>(LambdaTestMode::Sweep)
       ? static_cast<LambdaTestMode>(savedLambdaTest)
       : LambdaTestMode::Off;
-  hubEspNowChannelPref = networkPreferences.getUChar("espnow_ch", 0);
-  if (hubEspNowChannelPref > 14) {
-    hubEspNowChannelPref = 0;
-  }
 }
 
 bool parseApAddress(const String &text, const char *fallback, IPAddress &out)
@@ -896,7 +809,7 @@ String jsonEscape(const String &raw)
 }
 
 #if ENABLE_BLE_HUB
-void recordBleScanDevice(const NimBLEAdvertisedDevice *device, bool tuneLike, bool bm6Like)
+void recordBleScanDevice(const NimBLEAdvertisedDevice *device, bool tuneLike)
 {
   String address = device->getAddress().toString().c_str();
   address.toLowerCase();
@@ -916,9 +829,9 @@ void recordBleScanDevice(const NimBLEAdvertisedDevice *device, bool tuneLike, bo
       }
     }
   }
-  Serial.printf("[BLE-SCAN] %s rssi=%d name=%s mfg=%s tune=%d bm6=%d\n",
+  Serial.printf("[BLE-SCAN] %s rssi=%d name=%s mfg=%s tune=%d\n",
                 address.c_str(), rssi, name.length() ? name.c_str() : "---",
-                mfg.c_str(), tuneLike ? 1 : 0, bm6Like ? 1 : 0);
+                mfg.c_str(), tuneLike ? 1 : 0);
 
   uint8_t slot = bleScanDeviceCount;
   for (uint8_t i = 0; i < bleScanDeviceCount; i++) {
@@ -940,7 +853,6 @@ void recordBleScanDevice(const NimBLEAdvertisedDevice *device, bool tuneLike, bo
   bleScanDevices[slot].name = name;
   bleScanDevices[slot].rssi = rssi;
   bleScanDevices[slot].tuneLike = bleScanDevices[slot].tuneLike || tuneLike;
-  bleScanDevices[slot].bm6Like = bleScanDevices[slot].bm6Like || bm6Like;
   bleScanDevices[slot].seenMs = now;
 }
 #endif
@@ -1195,15 +1107,6 @@ void resumeBleDisplayAdvertising()
 void pauseBleDisplayAdvertising() {}
 void resumeBleDisplayAdvertising() {}
 #endif
-
-bool bleRadioFreeForBm6Scan()
-{
-  if (bleCentralScanActive || tuneDoConnect) return false;
-  if (tuneLinkState == TuneLinkState::Scanning || tuneLinkState == TuneLinkState::Connecting) {
-    return false;
-  }
-  return true;
-}
 
 void markBleCentralScanEnded()
 {
@@ -1577,7 +1480,6 @@ String logHeader()
   String header = "ms;epoch;time";
   if (logCol(kLogColSpartan)) header += ";source;lambda_valid;lambda;spartan_temp_c;spartan_status";
   if (logCol(kLogColTune)) header += ";rpm;advance;map;tune_volt;tune_temp;tune_amp";
-  if (logCol(kLogColBm6)) header += ";bm6_volt;bm6_temp";
   if (logCol(kLogColSpeed)) header += ";speed_kmh;speed_hz;speed_pulses";
   if (logCol(kLogColHeater)) header += ";heater_v";
   if (logCol(kLogColHours)) header += ";device_h;engine_h;sensor_h";
@@ -1927,13 +1829,6 @@ void appendLiveCsv()
              tune.temperature,
              tune.coilCurrent);
   }
-  if (logCol(kLogColBm6)) {
-#if ENABLE_BLE_HUB && ENABLE_BM6
-    f.printf(";%.2f;%d", bm6Voltage, static_cast<int>(bm6Temperature));
-#else
-    f.print(";0.00;0");
-#endif
-  }
   if (logCol(kLogColSpeed)) {
 #if SPEED_REED_PIN >= 0
     f.printf(";%.1f;%.2f;%lu",
@@ -1978,8 +1873,6 @@ void appendLiveCsv() {}
 #endif
 
 #include "hub_ble.h"
-
-#include "hub_espnow.h"
 
 void setupHourmeters()
 {
@@ -2048,14 +1941,11 @@ void updateHourmeters()
 #if ENABLE_WEB_GUI
 void printHubFeatStatus()
 {
-  Serial.printf("Hub feats:   ESP-NOW=%s AP=%s WLAN=%s LOG=%s 123=%s BM6=%s ch=%u\n",
-                hubFeatEspNow ? "on" : "off",
+  Serial.printf("Hub feats:   AP=%s WLAN=%s LOG=%s 123=%s\n",
                 hubFeatAp ? "on" : "off",
                 hubFeatWifi ? "on" : "off",
                 hubFeatLog ? "on" : "off",
-                hubFeatBle123 ? "on" : "off",
-                hubFeatBleBm6 ? "on" : "off",
-                hubEspNowChannelPref);
+                hubFeatBle123 ? "on" : "off");
 }
 
 void applyHubFeatures()
@@ -2087,27 +1977,12 @@ void applyHubFeatures()
       Serial.printf("Home WiFi:   reconnecting to '%s' (Profil %d)\n", ssid, hubWifiProfile);
     }
   }
-#if ENABLE_ESP_NOW_HUB
-  if (!hubFeatEspNow && espNowReady) {
-    teardownEspNowHub();
-  } else if (hubFeatEspNow && espNowReady &&
-             espNowActiveChannel != espNowEffectiveChannel()) {
-    teardownEspNowHub();
-  }
-#endif
 #if ENABLE_BLE_HUB
   if (!hubFeatBle123 && tuneConnected) {
     resetTuneClient();
   } else if (hubFeatBle123 && !tuneConnected && !tuneDoConnect && tuneNextScanMs == 0) {
     scheduleTuneScan(true);
   }
-#if ENABLE_BM6
-  if (!hubFeatBleBm6 && bm6Connected) {
-    resetBm6Client();
-  } else if (hubFeatBleBm6 && !bm6Connected && !bm6DoConnect && bm6NextScanMs == 0) {
-    scheduleBm6Scan();
-  }
-#endif
 #endif
 }
 
@@ -2145,7 +2020,7 @@ bool handleHubFeatSerialLine(const String &line)
 
   const int sp = rest.indexOf(' ');
   if (sp < 0) {
-    Serial.println("Hub feats:   usage: hub feat <name> on|off | espnow ch 0|6|11 | status");
+    Serial.println("Hub feats:   usage: hub feat <name> on|off | status");
     return true;
   }
   String feat = rest.substring(0, sp);
@@ -2154,22 +2029,7 @@ bool handleHubFeatSerialLine(const String &line)
   feat.toLowerCase();
 
   bool changed = false;
-  if (feat == "espnow" && arg.startsWith("ch ")) {
-    int channel = arg.substring(3).toInt();
-    if (channel < 0 || channel > 14) {
-      channel = 0;
-    }
-    hubEspNowChannelPref = static_cast<uint8_t>(channel);
-    changed = true;
-  } else if (feat == "espnow") {
-    if (arg.equalsIgnoreCase("on") || arg == "1") {
-      hubFeatEspNow = true;
-      changed = true;
-    } else if (arg.equalsIgnoreCase("off") || arg == "0") {
-      hubFeatEspNow = false;
-      changed = true;
-    }
-  } else if (feat == "ap") {
+  if (feat == "ap") {
     if (arg.equalsIgnoreCase("on") || arg == "1") {
       hubFeatAp = true;
       changed = true;
@@ -2201,16 +2061,8 @@ bool handleHubFeatSerialLine(const String &line)
       hubFeatBle123 = false;
       changed = true;
     }
-  } else if (feat == "blebm6") {
-    if (arg.equalsIgnoreCase("on") || arg == "1") {
-      hubFeatBleBm6 = true;
-      changed = true;
-    } else if (arg.equalsIgnoreCase("off") || arg == "0") {
-      hubFeatBleBm6 = false;
-      changed = true;
-    }
   } else {
-    Serial.println("Hub feats:   unknown feature (espnow/ap/wifi/log/ble123/blebm6)");
+    Serial.println("Hub feats:   unknown feature (ap/wifi/log/ble123)");
     return true;
   }
 
@@ -2764,11 +2616,6 @@ void printBootDetails()
 #else
   Serial.println("BLE stack:   disabled");
 #endif
-#if ENABLE_ESP_NOW_HUB
-  Serial.printf("ESP-NOW:     cockpit broadcast (default ch %d, follows STA)\n", ESP_NOW_WIFI_CHANNEL);
-#else
-  Serial.println("ESP-NOW:     disabled");
-#endif
 }
 
 }  // namespace
@@ -2799,14 +2646,12 @@ void setup()
   detectW25Q();   // externen W25Q128-Flash erkennen (Check, noch ohne Dateisystem)
 
 #if BLE_BRIDGE
-  // BLE-Bridge: NUR 123\TUNE+, dediziert, kein BM6, kein WLAN, kein Hintergrund-Scan.
+  // BLE-Bridge: NUR 123\TUNE+, dediziert, kein WLAN, kein Hintergrund-Scan.
   // Architektur: feste MAC aus NVS (oder Compile-Default) -> direkt verbinden -> bei
   // Trennung direkt reconnect ohne erneuten Scan. Einmaliger Scan nur wenn keine MAC
   // gespeichert (erstes Setup). Danach: Verbindung halten = einzige Aufgabe.
   Serial.println("\n=== BLE-Bridge: NUR 123\\TUNE+, dediziert ===");
   hubFeatBle123 = true;
-  hubFeatBleBm6 = false;   // BM6 = zweitrangig, separater Chip spaeter
-  hubFeatEspNow = false;
   hubFeatAp     = false;
   hubFeatWifi   = false;
   NimBLEDevice::init("BLE-Bridge-123");
@@ -2839,9 +2684,8 @@ void setup()
   loadHubFeatures();
   setupBleHub();
   setupWebGui();
-  setupEspNowHub();
 #if defined(ENABLE_BLE_HUB)
-  // Hub/Client: BALANCE — BLE-Empfang stabil, WiFi-AP/ESP-NOW erreichbar.
+  // Hub/Client: BALANCE — BLE-Empfang stabil, WiFi-AP erreichbar.
   // PREFER_BT hungerte hier das AP aus (Ping-Timeouts, keine WebGUI).
   if (esp_coex_preference_set(ESP_COEX_PREFER_BALANCE) == ESP_OK) {
     Serial.println("Coex:        BLE/WiFi Balance gesetzt (PREFER_BALANCE)");
@@ -2866,7 +2710,7 @@ void loop()
   M5.update();
 #endif
 #if BLE_BRIDGE
-  // Bridge-Loop: NUR 123-State-Machine, kein BM6, kein Hintergrund-Scan.
+  // Bridge-Loop: NUR 123-State-Machine, kein Hintergrund-Scan.
   // Nach Trennung: direkt reconnect auf gespeicherte MAC (kein neuer Scan).
   updateTuneBle();
   {
@@ -2902,7 +2746,6 @@ void loop()
   appendLiveCsv();
   updateWebGui();
   updateBleHub();
-  updateEspNowHub();
   updateDisplay();
   delay(10);
 }

@@ -116,23 +116,12 @@ void setupWebGui()
     server.send(200,"application/json","{\"ok\":true,\"rx\":"+String(rx)+",\"tx\":"+String(tx)+"}");
     delay(300); ESP.restart();
   });
-  server.on("/bm6_interval", HTTP_GET, []() {
-    uint32_t sec = server.arg("sec").toInt();
-    if (sec >= 10 && sec <= 3600) {
-      bm6PollIntervalMs = sec * 1000;
-      Serial.printf("BM6:         Abfrageintervall %lus\n", (unsigned long)sec);
-    }
-    server.send(200, "application/json",
-                "{\"ok\":true,\"bm6_poll_sec\":" + String(bm6PollIntervalMs/1000) + "}");
-  });
   server.on("/hub_feat", HTTP_GET, []() {
     // Dev-Tab: Hub-Features zur Laufzeit schalten (kein Reflash).
     const String name = server.arg("name");
     const bool on = (server.arg("val") == "on" || server.arg("val") == "1");
     bool known = true;
     if (name == "ble123") hubFeatBle123 = on;
-    else if (name == "blebm6") hubFeatBleBm6 = on;
-    else if (name == "espnow") hubFeatEspNow = on;
     else if (name == "log") hubFeatLog = on;
     else known = false;
     if (known) {
@@ -396,7 +385,6 @@ void setupWebGui()
     uint16_t mask = 0;
     if (server.hasArg("spartan")) mask |= kLogColSpartan;
     if (server.hasArg("tune")) mask |= kLogColTune;
-    if (server.hasArg("bm6")) mask |= kLogColBm6;
     if (server.hasArg("speed")) mask |= kLogColSpeed;
     if (server.hasArg("heater")) mask |= kLogColHeater;
     if (server.hasArg("hours")) mask |= kLogColHours;
@@ -635,49 +623,6 @@ void setupWebGui()
     server.send(400, "text/plain", "BLE hub nicht aktiv");
 #endif
   });
-  server.on("/bm6_target", HTTP_POST, []() {
-#if ENABLE_BLE_HUB && ENABLE_BM6
-    const String mac = normalizeMacInput(server.arg("bm6_mac"));
-    if (!looksLikeMacAddress(mac)) {
-      server.send(400, "text/plain", "BM6 BLE-Adresse ungueltig. Format aa:bb:cc:dd:ee:ff");
-      return;
-    }
-    ensurePreferences();
-    bm6SavedAddress = mac;
-    networkPreferences.putString("bm6_mac", bm6SavedAddress);
-    bm6ActiveSlot = 0;
-    resetBm6Client();
-    bm6DoConnect = false;
-    scheduleBm6Scan();
-    Serial.printf("BM6 BLE:     target override %s\n", bm6SavedAddress.c_str());
-    server.sendHeader("Location", "/", true);
-    server.send(303, "text/plain", "");
-#else
-    server.send(400, "text/plain", "BM6 nicht aktiv");
-#endif
-  });
-  server.on("/bm6_aux_target", HTTP_POST, []() {
-#if ENABLE_BLE_HUB && ENABLE_BM6
-    const String mac = normalizeMacInput(server.arg("bm6_aux_mac"));
-    if (mac.length() > 0 && !looksLikeMacAddress(mac)) {
-      server.send(400, "text/plain", "BM6 Aux-Adresse ungueltig. Format aa:bb:cc:dd:ee:ff");
-      return;
-    }
-    ensurePreferences();
-    bm6AuxSavedAddress = mac;
-    networkPreferences.putString("bm6_aux_mac", bm6AuxSavedAddress);
-    bm6ActiveSlot = 0;
-    resetBm6Client();
-    bm6DoConnect = false;
-    scheduleBm6Scan();
-    Serial.printf("BM6 BLE:     aux target %s\n",
-                  bm6AuxSavedAddress.length() ? bm6AuxSavedAddress.c_str() : "(disabled)");
-    server.sendHeader("Location", "/", true);
-    server.send(303, "text/plain", "");
-#else
-    server.send(400, "text/plain", "BM6 nicht aktiv");
-#endif
-  });
   server.on("/uart_cmd", HTTP_POST, []() {
     sendSpartanUartCommand(server.arg("cmd"));
     server.sendHeader("Location", "/", true);
@@ -709,7 +654,6 @@ void setupWebGui()
   });
   server.on("/hub_features", HTTP_POST, []() {
     const bool wasApOn = hubFeatAp;
-    const bool nextEspNow = server.hasArg("espnow");
     bool nextAp = server.hasArg("ap");
     bool nextWifi = server.hasArg("wifi");
     String guardMessage;
@@ -720,19 +664,10 @@ void setupWebGui()
       nextAp = true;
       guardMessage = "AP bleibt an: erst Home-WLAN speichern/verbinden, dann SoftAP ausschalten.";
     }
-    hubFeatEspNow = nextEspNow;
     hubFeatAp = nextAp;
     hubFeatWifi = nextWifi;
     hubFeatLog = server.hasArg("log");
     hubFeatBle123 = server.hasArg("ble123");
-    hubFeatBleBm6 = server.hasArg("blebm6");
-    if (server.hasArg("espnow_ch")) {
-      int channel = server.arg("espnow_ch").toInt();
-      if (channel < 0 || channel > 14) {
-        channel = 0;
-      }
-      hubEspNowChannelPref = static_cast<uint8_t>(channel);
-    }
     saveHubFeatures();
     logHubEvent("hub_feat", guardMessage.length() ? "guarded" : "saved");
     if (guardMessage.length() > 0) {

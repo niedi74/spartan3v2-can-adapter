@@ -3,11 +3,11 @@
 #include <stdint.h>
 #include <string.h>
 
-// Shared cockpit frame for Spartan hub -> display clients (ESP-NOW broadcast).
+// Shared cockpit frame for Spartan hub -> display clients.
 // Copy this header into M5/Waveshare firmware for decoding.
 //
 // v2 (2026-06-17): added the 123 internal voltage / temperature / coil current
-// so ESP-NOW clients show the same Volt/Temp/Coil as a 123-direct connection.
+// so display clients show the same Volt/Temp/Coil as a 123-direct connection.
 
 constexpr uint8_t kSpartanCockpitMagic = 0x53;  // 'S'
 constexpr uint8_t kSpartanCockpitVersion = 2;
