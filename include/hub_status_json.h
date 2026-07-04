@@ -398,12 +398,10 @@ String statusJson()
   json += ",\"trip_km\":";
   json += String(static_cast<double>(tripMm) / 1000000.0, 2);
 #endif
-  {
-    uint8_t curveSlots = 0;  // Bit0=Slot1, Bit1=Slot2, Bit2=Slot3 (nur exists, kein open)
-    if (logFsReady) { for (int s = 1; s <= 3; s++) if (SPIFFS.exists(curveFile(s))) curveSlots |= (1 << (s - 1)); }
-    json += ",\"curve_slots\":";
-    json += String((int)curveSlots);
-  }
+  // [KURVE] gecachte Slot-Bitmaske (refreshCurveSlotCache bei Boot/Upload/Delete)
+  // statt 3x SPIFFS.exists() pro Poll -- statusJson laeuft mit 5-10 Hz.
+  json += ",\"curve_slots\":";
+  json += String((int)curveSlotMask);
   json += "}";
   return json;
 }

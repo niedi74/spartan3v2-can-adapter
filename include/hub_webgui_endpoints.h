@@ -20,6 +20,7 @@ void setupWebGui()
   if (logFsReady && SPIFFS.exists("/curve.123") && !SPIFFS.exists(kCurveFiles[0])) {
     SPIFFS.rename("/curve.123", kCurveFiles[0]);
   }
+  refreshCurveSlotCache();  // [KURVE] Slot-Bitmaske initial fuellen (danach nur Upload/Delete)
   Serial.printf("Logs:        SPIFFS %s, current=%s, old=%s\n",
                 logFsReady ? "OK" : "FAIL",
                 humanBytes(logFileSize(kLogFile)).c_str(),
@@ -285,14 +286,17 @@ void setupWebGui()
     } else if (up.status == UPLOAD_FILE_END) {
       if (cf) { cf.close(); Serial.printf("Kurve:       Slot%d gespeichert (%u Bytes)\n", slot, static_cast<unsigned>(up.totalSize)); }
       logHubEvent("curve", "upload");
+      refreshCurveSlotCache();
     } else if (up.status == UPLOAD_FILE_ABORTED) {
       if (cf) { cf.close(); SPIFFS.remove(curveFile(slot)); }
+      refreshCurveSlotCache();
     }
   });
   server.on("/curve_delete", HTTP_POST, []() {
     const int slot = server.hasArg("slot") ? server.arg("slot").toInt() : 1;
     if (logFsReady) SPIFFS.remove(curveFile(slot));
     logHubEvent("curve", "delete");
+    refreshCurveSlotCache();
     server.sendHeader("Location", "/", true);
     server.send(303, "text/plain", "");
   });

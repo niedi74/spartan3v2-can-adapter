@@ -566,6 +566,16 @@ const char *kOldLogFile = "/drive_old.csv";
 // [KURVE] bis zu 3 hinterlegte 123-Zuendkurven (.123-XML) als Slots.
 const char *kCurveFiles[3] = { "/curve1.123", "/curve2.123", "/curve3.123" };
 inline const char *curveFile(int slot) { if (slot < 1 || slot > 3) slot = 1; return kCurveFiles[slot - 1]; }
+// [KURVE] Slot-Belegung als Cache (Bit0=Slot1..Bit2=Slot3): statusJson wird mit
+// 5-10 Hz gepollt, 3x SPIFFS.exists() pro Poll frisst FS-Zeit im loop() (gleiches
+// Muster wie refreshLogSizeCache). Refresh nur bei Boot/Upload/Delete.
+uint8_t curveSlotMask = 0;
+void refreshCurveSlotCache()
+{
+  uint8_t m = 0;
+  if (logFsReady) { for (int s = 1; s <= 3; s++) if (SPIFFS.exists(curveFile(s))) m |= (1 << (s - 1)); }
+  curveSlotMask = m;
+}
 const size_t kMaxLogBytes = 200000;  // 200 KB: kleine Dateien halten SPIFFS schnell (grosse Logs blockieren loop() -> Webserver/Display-Timeouts)
 const uint32_t kLogIntervalMs = 500;
 const uint16_t kLogColSpartan = 0x0001;

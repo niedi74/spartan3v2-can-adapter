@@ -167,6 +167,22 @@ void scheduleTuneScan(bool fastRetry = false)
   setTuneLinkState(TuneLinkState::Idle, fastRetry ? "retry_fast" : "retry_scheduled");
 }
 
+// [KURVE-READ] Laufende Kurvenlesung sofort abbrechen (Disconnect/Reset). Ohne
+// das blockiert curveReadActive in updateTuneBle() den Reconnect bis zum 6-s-
+// Fenster, und der halbe Puffer wuerde spaeter als fertige Kurve dekodiert.
+// Teilstand wird verworfen -> Browser meldet "keine Kurvendaten" statt Falschkurve.
+void abortCurveRead(const char *why)
+{
+  if (!curveReadActive) return;
+  curveReadActive = false;
+  curveReadPhase = 0;
+  portENTER_CRITICAL(&stateMux);
+  curveReadLen = 0;
+  portEXIT_CRITICAL(&stateMux);
+  Serial.printf("Kurve-Read:  Abbruch (%s), Teilpuffer verworfen\n", why);
+  logHubEvent("curve_read", "abort");
+}
+
 void resetTuneClient()
 {
   if (tuneClient == nullptr) return;
@@ -179,6 +195,7 @@ void resetTuneClient()
   tuneConnected = false;
   tuneLastPingMs = 0;
   tuneModeActive = false; tuneAdvSteps = 0;  // [TUNE-LIVE] Offset verfaellt bei Trennung
+  abortCurveRead("reset");                   // [KURVE-READ] Lesefenster nicht ueberleben lassen
   setTuneLinkState(TuneLinkState::Idle, "reset");
 }
 
@@ -189,6 +206,7 @@ class TuneClientCallbacks : public NimBLEClientCallbacks {
     tuneConnected = false;
     tuneNusRx = nullptr;
     tuneModeActive = false; tuneAdvSteps = 0;  // [TUNE-LIVE] Offset verfaellt bei Trennung
+    abortCurveRead("disconnect");              // [KURVE-READ] sonst blockiert das Lesefenster den Reconnect
     char detail[24];
     snprintf(detail, sizeof(detail), "disconnect|r%d", reason);
     Serial.printf("123TUNE BLE: disconnected reason=%d\n", reason);

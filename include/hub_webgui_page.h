@@ -1067,9 +1067,10 @@ async function curveReadFrom123(){
   try{
     const jr=await (await fetch('/api/curve_read',{method:'POST'})).json();
     if(!jr.ok){ if(stat) stat.textContent=' — 123 nicht streaming'; if(btn) btn.disabled=false; return; }
-    let raw='';
-    for(let i=0;i<12;i++){ await new Promise(s=>setTimeout(s,400));
-      const g=await (await fetch('/api/curve_read',{cache:'no-store'})).json(); raw=g.raw||''; if(!g.active) break; }
+    let raw='', active=true;
+    for(let i=0;i<18;i++){ await new Promise(s=>setTimeout(s,400));
+      const g=await (await fetch('/api/curve_read',{cache:'no-store'})).json(); raw=g.raw||''; active=!!g.active; if(!active) break; }
+    if(active){ if(stat) stat.textContent=' — Timeout, Daten unvollständig — nochmal versuchen'; if(btn) btn.disabled=false; return; }
     const pts=decodeReadCurve(raw);
     if(!pts.length){ if(stat) stat.textContent=' — keine Kurvendaten erkannt (am echten Gerät testen)'; if(btn) btn.disabled=false; return; }
     window.curveRead123=pts; if(stat) stat.textContent=' — '+pts.length+' Punkte gelesen (blau)'; curveLoad();
