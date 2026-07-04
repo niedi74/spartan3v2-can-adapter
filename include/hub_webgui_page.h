@@ -416,11 +416,15 @@ input:focus, select:focus { outline: none; border-color: #78ad43; }
 <summary>Wartung &middot; Betriebsstunden</summary>
 <div class="inside">
 <div class="row"><span>Ger&auml;t / Motor / Sonde</span><strong id="hoursSetup">- / - / - h</strong></div>
-<p class="hint">Bei <b>neuer Lambda-Sonde</b> die Sonden-Stunden auf 0 setzen. Z&auml;hlung l&auml;uft automatisch: Ger&auml;t = Strom an, Motor = l&auml;uft, Sonde = aktiv/heizt.</p>
+<p class="hint">Z&auml;hlung l&auml;uft automatisch: Ger&auml;t = Strom an, Motor = l&auml;uft, Sonde = aktiv/heizt. Zum Anpassen Z&auml;hler w&auml;hlen und Stunden setzen (z.B. Sonde 0 bei Sensorwechsel, Motor/Ger&auml;t bei &Uuml;bernahme bekannter St&auml;nde).</p>
 <form action="/hourmeter" method="post">
-<input type="hidden" name="meter" value="sensor">
-<label for="sensorH">Sonde-Stunden setzen</label>
-<input id="sensorH" name="hours" type="number" min="0" max="200000" step="0.1" value="0">
+<label for="meterSel">Z&auml;hler setzen</label>
+<select id="meterSel" name="meter">
+<option value="sensor">Sonde</option>
+<option value="engine">Motor</option>
+<option value="device">Ger&auml;t</option>
+</select>
+<input id="meterH" name="hours" type="number" min="0" max="200000" step="0.1" value="0">
 <button type="submit">Setzen</button>
 </form>
 <form action="/hourmeter" method="post" style="margin-top:8px">

@@ -119,7 +119,7 @@ static uint32_t hubCfgCrc32(const uint8_t *data, size_t len)
 }
 
 #define HUB_CFG_MAGIC   0x48424346UL   // 'HBCF'
-#define HUB_CFG_VERSION 2              // v2: Backup aus effektiven Globals (v1 hatte leeres p1_pass)
+#define HUB_CFG_VERSION 3              // v3: + Betriebsstunden/Odometer (v2: effektive Globals)
 #define HUB_CFG_ADDR    0x000000UL     // Sektor 0 des W25Q
 
 #pragma pack(push, 1)
@@ -134,6 +134,10 @@ struct HubConfigBlob {
   char     ap_ssid[33]; char ap_pass[65]; char ap_ip[16];
   uint8_t  ap_chan;
   char     mdns_host[33];
+  // [v3] Betriebsstunden + Odometer: ueberleben so auch ein erase_flash (NVS weg).
+  // Stand vom letzten Backup-Trigger (manuelles Setzen/Config-Aenderung), kein Zyklus-Write.
+  uint64_t dev_sec; uint64_t eng_sec; uint64_t sns_sec;
+  uint64_t odo_mm;  uint64_t trip_mm;
   uint32_t crc32;
 };
 #pragma pack(pop)
@@ -161,6 +165,8 @@ void saveConfigToW25Q()
   strlcpy(b.ap_ip, hubApIp.c_str(), sizeof(b.ap_ip));
   b.ap_chan = hubApChannel;
   strlcpy(b.mdns_host, hubHostname.c_str(), sizeof(b.mdns_host));
+  b.dev_sec = deviceSeconds; b.eng_sec = engineSeconds; b.sns_sec = sensorSeconds;  // [v3]
+  b.odo_mm = odoMm; b.trip_mm = tripMm;
   b.crc32 = hubCfgCrc32(reinterpret_cast<const uint8_t *>(&b), sizeof(b) - sizeof(b.crc32));
   w25qSectorErase(HUB_CFG_ADDR);
   w25qWriteData(HUB_CFG_ADDR, reinterpret_cast<const uint8_t *>(&b), sizeof(b));
@@ -197,7 +203,15 @@ void restoreConfigFromW25Q()
   networkPreferences.putString("ap_ip", b.ap_ip);
   networkPreferences.putUChar("ap_chan", b.ap_chan);
   networkPreferences.putString("mdns_host", b.mdns_host);
+  // [v3] Betriebsstunden + Odometer zurueck ins NVS (loadHourmeters/setupSpeedReed lesen spaeter)
+  networkPreferences.putULong64("dev_sec", b.dev_sec);
+  networkPreferences.putULong64("eng_sec", b.eng_sec);
+  networkPreferences.putULong64("sns_sec", b.sns_sec);
+  networkPreferences.putULong64("odo_mm", b.odo_mm);
+  networkPreferences.putULong64("trip_mm", b.trip_mm);
   networkPreferences.putUChar("cfg_w25q", HUB_CFG_VERSION);
-  Serial.printf("Config:      aus W25Q-Backup wiederhergestellt (Profil %d, SSID1 '%s')\n",
-                b.wifi_prof, b.p1_ssid);
+  Serial.printf("Config:      aus W25Q-Backup wiederhergestellt (Profil %d, SSID1 '%s', %.1f Geraete-h, %.1f km)\n",
+                b.wifi_prof, b.p1_ssid,
+                static_cast<double>(b.dev_sec) / 3600.0,
+                static_cast<double>(b.odo_mm) / 1000000.0);
 }

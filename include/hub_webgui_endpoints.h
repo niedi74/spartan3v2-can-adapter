@@ -434,6 +434,7 @@ void setupWebGui()
     else if (m == "device") deviceSeconds = secs;
     else { server.send(400, "text/plain", "meter=sensor|engine|device"); return; }
     saveHourmeters();
+    hubCfgDirty = true;   // [W25Q-CFG] neuer Stand mit ins Chip-Backup (v3)
     Serial.printf("Wartung:     %s-Betriebsstunden gesetzt auf %.2f h\n", m.c_str(), h);
     logHubEvent("hourmeter", m.c_str());
     server.sendHeader("Location", "/", true);
@@ -455,6 +456,7 @@ void setupWebGui()
     networkPreferences.putULong64("odo_mm", odoMm);
     networkPreferences.putULong64("trip_mm", tripMm);
     odoLastSavedMm = odoMm;
+    hubCfgDirty = true;   // [W25Q-CFG] neuer Stand mit ins Chip-Backup (v3)
     logHubEvent("odometer", server.hasArg("total_km") ? "set" : "trip_reset");
     server.sendHeader("Location", "/", true);
     server.send(303, "text/plain", "");

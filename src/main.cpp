@@ -624,7 +624,9 @@ void loadHubFeatures()
 {
   ensurePreferences();
   restoreConfigFromW25Q();   // [W25Q-CFG] frisches NVS (nach Flash/erase) aus Backup fuellen
-  if (w25qDetected && !networkPreferences.isKey("cfg_w25q")) hubCfgDirty = true;  // Erst-Backup
+  // Erst-Backup UND Versions-Upgrade (3 = HUB_CFG_VERSION in hub_w25q.h): altes v2-Blob
+  // wird zeitnah als v3 (mit Betriebsstunden/Odometer) neu geschrieben.
+  if (w25qDetected && networkPreferences.getUChar("cfg_w25q", 0) != 3) hubCfgDirty = true;
   hubApSsid = networkPreferences.getString("ap_ssid", WEB_AP_SSID);
   hubApPassword = networkPreferences.getString("ap_pass", WEB_AP_PASSWORD);
   hubApIp = networkPreferences.getString("ap_ip", "192.168.4.1");
