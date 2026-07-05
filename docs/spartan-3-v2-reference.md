@@ -172,6 +172,8 @@ Status values:
 | MaxxECU | `SETCANFORMAT0` | `SETCANID1024` | `SETCANBAUD500000` |  |
 | Extended CAN | `SETCANFORMAT5` | See extended CAN doc | See extended CAN doc | Firmware 1.08+ |
 
+The MegaSquirt side of format 0 (broadcast IDs, 29-bit protocol, Microsquirt wiring) is documented in [`megasquirt-can-reference.md`](megasquirt-can-reference.md).
+
 ## CAN Termination Guidance
 
 - If Spartan 3 is the only slave on the CAN bus, enable Spartan termination with `SETCANR1`.
