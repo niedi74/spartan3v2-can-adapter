@@ -215,3 +215,80 @@ void restoreConfigFromW25Q()
                 static_cast<double>(b.dev_sec) / 3600.0,
                 static_cast<double>(b.odo_mm) / 1000000.0);
 }
+
+// --- [KURVE-W25Q] Zuendkurven-Slots als Roh-Backup auf dem Chip ---
+// Eine SPIFFS-Format-Recovery (Brownout, korruptes FS) loescht sonst die einzigen
+// Kopien der .123-Kurven. Layout: 8 KB je Slot ab 0x2000 (Sektor 0 = Config-Blob).
+// Die ersten 64 KB (0x0000-0xFFFF) des W25Q sind fuer Roh-Blobs reserviert -- ein
+// kuenftiges Dateisystem (LittleFS-Logger) muss dahinter beginnen!
+#define HUB_CURVE_MAGIC       0x43313233UL   // 'C123'
+#define HUB_CURVE_BASE        0x2000UL
+#define HUB_CURVE_SLOT_BYTES  0x2000UL       // 2 Sektoren je Slot
+struct HubCurveHdr { uint32_t magic; uint16_t len; uint16_t rsvd; uint32_t crc32; };
+#define HUB_CURVE_MAX  (HUB_CURVE_SLOT_BYTES - sizeof(HubCurveHdr))
+
+// Slot 1..3 (wie curveFile()). Fehlende/geloeschte SPIFFS-Datei -> Chip-Kopie leeren.
+void saveCurveToW25Q(int slot)
+{
+  if (!w25qDetected || slot < 1 || slot > 3) return;
+  const uint32_t addr = HUB_CURVE_BASE + (uint32_t)(slot - 1) * HUB_CURVE_SLOT_BYTES;
+  w25qSectorErase(addr);
+  w25qSectorErase(addr + 0x1000);
+  if (!logFsReady || !SPIFFS.exists(curveFile(slot))) {
+    Serial.printf("Kurve W25Q:  Slot %d geleert\n", slot);   // 0xFF = kein Magic = leer
+    return;
+  }
+  File f = SPIFFS.open(curveFile(slot), FILE_READ);
+  if (!f) return;
+  const size_t len = f.size();
+  if (len == 0 || len > HUB_CURVE_MAX) {
+    f.close();
+    Serial.printf("Kurve W25Q:  Slot %d nicht gesichert (%u B, max %u)\n",
+                  slot, (unsigned)len, (unsigned)HUB_CURVE_MAX);
+    return;
+  }
+  uint8_t *buf = (uint8_t *)malloc(len);
+  if (!buf) { f.close(); return; }
+  f.read(buf, len);
+  f.close();
+  HubCurveHdr h;
+  h.magic = HUB_CURVE_MAGIC; h.len = (uint16_t)len; h.rsvd = 0;
+  h.crc32 = hubCfgCrc32(buf, len);
+  w25qWriteData(addr, reinterpret_cast<const uint8_t *>(&h), sizeof(h));
+  w25qWriteData(addr + sizeof(h), buf, len);
+  free(buf);
+  Serial.printf("Kurve W25Q:  Slot %d gesichert (%u B)\n", slot, (unsigned)len);
+}
+
+// Beim Boot: SPIFFS-Slots, die fehlen (z.B. nach Format-Recovery), vom Chip zurueckholen.
+void restoreCurvesFromW25Q()
+{
+  if (!w25qDetected || !logFsReady) return;
+  for (int slot = 1; slot <= 3; slot++) {
+    const uint32_t addr = HUB_CURVE_BASE + (uint32_t)(slot - 1) * HUB_CURVE_SLOT_BYTES;
+    HubCurveHdr h;
+    w25qReadData(addr, reinterpret_cast<uint8_t *>(&h), sizeof(h));
+    const bool chipValid = (h.magic == HUB_CURVE_MAGIC && h.len > 0 && h.len <= HUB_CURVE_MAX);
+    if (SPIFFS.exists(curveFile(slot))) {
+      // Slot existiert nur in SPIFFS (Kurve von vor diesem Feature) -> initial spiegeln
+      if (!chipValid) saveCurveToW25Q(slot);
+      continue;
+    }
+    if (!chipValid) continue;
+    uint8_t *buf = (uint8_t *)malloc(h.len);
+    if (!buf) return;
+    w25qReadData(addr + sizeof(h), buf, h.len);
+    if (hubCfgCrc32(buf, h.len) != h.crc32) {
+      Serial.printf("Kurve W25Q:  Slot %d CRC ungueltig - kein Restore\n", slot);
+      free(buf);
+      continue;
+    }
+    File f = SPIFFS.open(curveFile(slot), FILE_WRITE);
+    if (f) {
+      f.write(buf, h.len);
+      f.close();
+      Serial.printf("Kurve W25Q:  Slot %d wiederhergestellt (%u B)\n", slot, (unsigned)h.len);
+    }
+    free(buf);
+  }
+}

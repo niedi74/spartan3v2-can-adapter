@@ -172,6 +172,7 @@ input:focus, select:focus { outline: none; border-color: #78ad43; }
 </style>
 </head>
 <body><main>
+<div id="staleBanner" style="display:none;position:fixed;top:0;left:0;right:0;z-index:99;background:#c62828;color:#fff;text-align:center;padding:6px 10px;font-weight:700">Verbindung zum Hub verloren &mdash; Werte eingefroren (<span id="staleSecs">0</span>s)</div>
 <h1>SPARTAN 3 v2 Motorraum Hub</h1>
 <div class="tabs">
 <button type="button" id="tabLive" class="tab on" onclick="showTab('live')">Live</button>
@@ -184,7 +185,7 @@ input:focus, select:focus { outline: none; border-color: #78ad43; }
 </div>
 <div class="tab-section" data-tab="live">
 <div class="card">
-<div class="topline"><span id="source" class="tag">START</span><span id="wifiTop" class="mono">offline</span></div>
+<div class="topline"><span id="source" class="tag">START</span><span id="liveTuneOffBadge" class="tag" hidden style="background:#e53935;color:#fff">TUNE +0</span><span id="wifiTop" class="mono">offline</span></div>
 <p class="hint" id="featBadges" style="margin:0 0 10px;line-height:1.9">
 <span class="tag" id="featAp">AP -</span>
 <span class="tag" id="featWifi">WLAN -</span>
@@ -825,10 +826,18 @@ if (otaForm) {
     xhr.send(fd);
   });
 }
+// [TUNE-SAFE] Token im Browser merken: der Tune-Endpoint braucht ihn bei jedem
+// Request — ohne localStorage muesste man ihn am Handy nach jedem Neuladen tippen.
+{ const tokEl = document.getElementById('otaTok');
+  if (tokEl) {
+    tokEl.value = localStorage.getItem('otaTok') || '';
+    tokEl.addEventListener('input', () => localStorage.setItem('otaTok', tokEl.value));
+  } }
 const otaTokSave = document.getElementById('otaTokSave');
 if (otaTokSave) {
   otaTokSave.addEventListener('click', async () => {
     const t = (document.getElementById('otaTok')||{}).value || '';
+    localStorage.setItem('otaTok', t);
     otaTokSave.disabled = true;
     try {
       const r = await fetch('/api/ota/token', { method:'POST',
@@ -900,11 +909,21 @@ function g123Set(id, frac) { const n = document.getElementById(id + 'N'); if (!n
 // Tune-Button aktiv. Verstellung wirkt LIVE auf die echte Zuendung -> bewusst
 // zweistufig. Server prueft zusaetzlich streaming + Tuning-Modus.
 var g123Armed = false;
+var g123PingTimer = null;
 async function g123TunePost(act) {
   try { const r = await fetch('/api/tune/live', { method:'POST',
-      headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:'act=' + act });
+      headers:{'Content-Type':'application/x-www-form-urlencoded',
+               'X-OTA-Token': (document.getElementById('otaTok')||{}).value || ''},
+      body:'act=' + act });
+    if (r.status === 403) { alert('Tune gesperrt: OTA-Token im Setup eintragen.'); return { ok:false }; }
     return await r.json();
   } catch (e) { return { ok:false }; }
+}
+// [TUNE-SAFE] Keepalive: solange der Tune-Modus laeuft, alle 15 s pingen, sonst
+// raeumt der Hub nach 60 s Funkstille den Offset selbst ab (Dead-Man).
+function g123PingSync(tuneOn) {
+  if (tuneOn && !g123PingTimer) g123PingTimer = setInterval(() => g123TunePost('ping'), 15000);
+  if (!tuneOn && g123PingTimer) { clearInterval(g123PingTimer); g123PingTimer = null; }
 }
 function g123ToggleLock() {
   const d = lastJson || {};
@@ -1096,10 +1115,24 @@ function g123InitGauges() {
     texts: [{ id: 'g123dTemp', t: '0', x: 120, y: 166, a: 'middle', c: '#7a7a7a', s: 22, mono: true, w: '700' }] });
 }
 try { g123InitGauges(); } catch (e) {}
+// [STALE] Fetch-Fehler nicht mehr schlucken: nach 3 Fehlversuchen Banner zeigen und
+// Anzeige ausgrauen — eingefrorene Werte sahen sonst wie Live-Werte aus (beim
+// Abstimmen gefaehrlich irrefuehrend).
+var staleFails = 0, staleSince = 0;
+function staleShow(on) {
+  const b = document.getElementById('staleBanner');
+  const m = document.querySelector('main');
+  if (b) b.style.display = on ? 'block' : 'none';
+  if (m) m.style.opacity = on ? '0.45' : '';
+  if (on) { const s = document.getElementById('staleSecs');
+    if (s) s.textContent = Math.round((Date.now() - staleSince) / 1000); }
+}
 async function refresh() {
   try {
     const r = await fetch('/state?client=hub-webgui', {cache:'no-store'});
     const d = await r.json();
+    if (staleFails >= 3) staleShow(false);
+    staleFails = 0;
     lastJson = d;
     document.getElementById('source').textContent = d.source;
     // [LAMBDA-GATE] Lambda-Wert NUR bei Status OK (Code 3) anzeigen -- vorher steht
@@ -1112,7 +1145,16 @@ async function refresh() {
     const lts=document.getElementById('lambdaTestStatus'); if(lts) lts.textContent = d.lambda_test_mode || 'off';
     document.getElementById('temp').textContent = d.valid ? d.temperature + ' C' : '- C';
     document.getElementById('main123').textContent = (d.rpm ?? 0) + ' / ' + Number(d.advance ?? 0).toFixed(1) + ' / ' + (d.map ?? 0);
-    document.getElementById('liveTuneVolt').textContent = Number(d.volt ?? 0).toFixed(1) + ' V';
+    // [VOLT-WARN] Unterspannung faerbt rot: laesst den Spartan auf CAN verstummen
+    // und sieht dann wie ein Wiring-Fehler aus — hier ist die echte Ursache sichtbar.
+    { const v = Number(d.volt ?? 0); const ve = document.getElementById('liveTuneVolt');
+      ve.textContent = v.toFixed(1) + ' V';
+      ve.style.color = (v > 0.5 && v < 12.5) ? (v < 11.8 ? '#e53935' : '#fb8c00') : ''; }
+    // [TUNE-SAFE] Aktiver Zuend-Offset auch im Live-Tab sichtbar (nicht nur im 123-Tab)
+    { const badge = document.getElementById('liveTuneOffBadge');
+      if (badge) { const s = Number(d.tune_adv_steps ?? 0); const on = !!d.tune_mode;
+        badge.hidden = !(on || s !== 0);
+        badge.textContent = 'TUNE ' + (s > 0 ? '+' : '') + s; } }
     document.getElementById('liveTuneAmp').textContent = Number(d.tune_amp ?? 0).toFixed(2) + ' A';
     document.getElementById('liveTuneTemp').textContent = (d.tune_temp ?? 0) + ' C';
     // 123-Cockpit-Tab (VDO-Look) — Nadeln + Digital-Insets
@@ -1141,6 +1183,7 @@ async function refresh() {
       const tbtn = gid('g123TuneBtn');
       if (tbtn) { tbtn.disabled = !(g123Armed && streaming); tbtn.classList.toggle('on', tuneOn); tbtn.textContent = tuneOn ? 'Tuning AN' : 'Tune'; }
       const panel = gid('g123TunePanel'); if (panel) panel.hidden = !tuneOn;
+      g123PingSync(tuneOn);   // [TUNE-SAFE] Dead-Man-Keepalive an/aus
       const off = gid('g123Off'); if (off) { const s = Number(d.tune_adv_steps ?? 0); off.textContent = (s > 0 ? '+' : '') + s; }
       const dis = !(tuneOn && streaming);
       ['g123AdvDown','g123AdvUp','g123Reset'].forEach(id => { const b = gid(id); if (b) b.disabled = dis; });
@@ -1366,7 +1409,11 @@ async function refresh() {
       if (ctlTrim && document.activeElement !== ctlTrim) ctlTrim.value = d.speed_trim_permil ?? 1000;
     }
     document.getElementById('jsondump').textContent = JSON.stringify(d, null, 2);
-  } catch (e) {}
+  } catch (e) {
+    staleFails++;
+    if (staleFails === 3) staleSince = Date.now();
+    if (staleFails >= 3) staleShow(true);
+  }
 }
 refresh();
 let pollIntervalMs = 200;  // Standard 200ms = 5 Hz, flüssig aber sparsam

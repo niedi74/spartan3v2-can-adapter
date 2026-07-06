@@ -498,12 +498,20 @@ bool tuneModeToggle()
 }
 
 // Zuendung vor (A) / zurueck (R) um einen Schritt -- nur im Tuning-Modus.
+// [TUNE-SAFE] Hartes Limit +/-10: mehr ist kein Feintuning mehr, und der
+// Reset-Guard (60 Iterationen) muss den Offset immer vollstaendig abbauen koennen.
+#define TUNE_ADV_MAX_STEPS 10
 bool tuneAdvStep(int dir)
 {
   if (!tuneModeActive) { Serial.println("123TUNE BLE: adv-step blockiert (Tuning-Modus aus)"); return false; }
+  const int next = tuneAdvSteps + ((dir >= 0) ? 1 : -1);
+  if (next > TUNE_ADV_MAX_STEPS || next < -TUNE_ADV_MAX_STEPS) {
+    Serial.printf("123TUNE BLE: adv-step blockiert (Limit %+d erreicht)\n", tuneAdvSteps);
+    return false;
+  }
   const char c = (dir >= 0) ? 'A' : 'R';
   if (!sendTuneRaw(c)) return false;
-  tuneAdvSteps += (dir >= 0) ? 1 : -1;
+  tuneAdvSteps = next;
   return true;
 }
 
@@ -597,6 +605,16 @@ void runTuneReadDump()
 void updateTuneBle()
 {
   const uint32_t now = millis();
+  // [TUNE-SAFE] Dead-Man: verliert die GUI den Hub (Handy-WLAN weg), darf der
+  // Zuend-Offset nicht am laufenden Motor stehen bleiben. Ohne Tune-API-Aktivitaet
+  // (Steps/Ping der GUI) fuer 60 s -> Offset abbauen und Modus verlassen.
+  if (tuneModeActive && tuneLastLiveApiMs != 0 &&
+      (now - tuneLastLiveApiMs) > kTuneDeadManMs) {
+    Serial.println("123TUNE BLE: Dead-Man (60s ohne GUI) -> Offset 0 + Tune aus");
+    tuneAdvReset();
+    if (tuneModeActive) tuneModeToggle();
+    logHubEvent("tune_deadman", "auto_off");
+  }
   if (tuneDoConnect) {
     connectTune();
     return;

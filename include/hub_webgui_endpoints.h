@@ -20,6 +20,7 @@ void setupWebGui()
   if (logFsReady && SPIFFS.exists("/curve.123") && !SPIFFS.exists(kCurveFiles[0])) {
     SPIFFS.rename("/curve.123", kCurveFiles[0]);
   }
+  restoreCurvesFromW25Q();  // [KURVE-W25Q] nach Format-Recovery: Slots vom Chip zurueckholen
   refreshCurveSlotCache();  // [KURVE] Slot-Bitmaske initial fuellen (danach nur Upload/Delete)
   Serial.printf("Logs:        SPIFFS %s, current=%s, old=%s\n",
                 logFsReady ? "OK" : "FAIL",
@@ -36,6 +37,8 @@ void setupWebGui()
       refreshLogSizeCache();
       ensureLogHeader();
       logHubEvent("log_fs", "format_recovered_header");
+      restoreCurvesFromW25Q();     // [KURVE-W25Q] Format hat die Slots geleert -> vom Chip
+      refreshCurveSlotCache();
     }
   }
   // WiFi-Profile laden
@@ -151,16 +154,25 @@ void setupWebGui()
     server.sendHeader("Connection", "close");
     server.send(200, "application/json", otaProgressJson());
   });
-  // [TUNE-LIVE] Live-Zuendwinkel: mode (T an/aus), step (A/R), reset (auf 0).
-  // Sicherheitskritisch -> nur bei streaming; die GUI legt es hinter das Lock.
+  // [TUNE-LIVE] Live-Zuendwinkel: mode (T an/aus), step (A/R), reset (auf 0),
+  // ping (Dead-Man-Keepalive der GUI). Sicherheitskritisch -> nur bei streaming,
+  // GUI-Lock ist nur Optik: [TUNE-SAFE] serverseitig gilt der OTA-Token (wenn
+  // gesetzt), sonst kann jedes Geraet im Funknetz die Zuendung verstellen.
   server.on("/api/tune/live", HTTP_POST, []() {
+    if (otaToken.length() > 0 &&
+        (!server.hasHeader("X-OTA-Token") || server.header("X-OTA-Token") != otaToken)) {
+      server.send(403, "application/json", "{\"ok\":false,\"error\":\"token\"}");
+      return;
+    }
+    tuneLastLiveApiMs = millis();   // [TUNE-SAFE] Dead-Man fuettern
     const String act = server.arg("act");
     bool ok = false;
     if (act == "mode")        ok = tuneModeToggle();
     else if (act == "up")     ok = tuneAdvStep(+1);
     else if (act == "down")   ok = tuneAdvStep(-1);
     else if (act == "reset")  ok = tuneAdvReset();
-    else { server.send(400, "application/json", "{\"ok\":false,\"error\":\"act=mode|up|down|reset\"}"); return; }
+    else if (act == "ping")   ok = true;
+    else { server.send(400, "application/json", "{\"ok\":false,\"error\":\"act=mode|up|down|reset|ping\"}"); return; }
     String body = String("{\"ok\":") + (ok ? "true" : "false") +
                   ",\"tune_mode\":" + (tuneModeActive ? "true" : "false") +
                   ",\"tune_adv_steps\":" + String(tuneAdvSteps) +
@@ -276,9 +288,11 @@ void setupWebGui()
       if (cf) { cf.close(); Serial.printf("Kurve:       Slot%d gespeichert (%u Bytes)\n", slot, static_cast<unsigned>(up.totalSize)); }
       logHubEvent("curve", "upload");
       refreshCurveSlotCache();
+      saveCurveToW25Q(slot);   // [KURVE-W25Q] Chip-Spiegel aktualisieren
     } else if (up.status == UPLOAD_FILE_ABORTED) {
       if (cf) { cf.close(); SPIFFS.remove(curveFile(slot)); }
       refreshCurveSlotCache();
+      saveCurveToW25Q(slot);   // [KURVE-W25Q] Abbruch -> Chip-Kopie ebenfalls leeren
     }
   });
   server.on("/curve_delete", HTTP_POST, []() {
@@ -286,6 +300,7 @@ void setupWebGui()
     if (logFsReady) SPIFFS.remove(curveFile(slot));
     logHubEvent("curve", "delete");
     refreshCurveSlotCache();
+    saveCurveToW25Q(slot);   // [KURVE-W25Q] Chip-Spiegel mitloeschen
     server.sendHeader("Location", "/", true);
     server.send(303, "text/plain", "");
   });

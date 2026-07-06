@@ -224,6 +224,9 @@
 // updateWebGui, Endpoints) erreichbar sind; Definition global neben detectW25Q().
 void saveConfigToW25Q();
 void restoreConfigFromW25Q();
+// [KURVE-W25Q] Zuendkurven-Slots auf den Chip spiegeln (Format-Recovery-Schutz)
+void saveCurveToW25Q(int slot);
+void restoreCurvesFromW25Q();
 bool hubCfgDirty = false;   // Config geaendert -> Backup beim naechsten Halt schreiben
 
 namespace {
@@ -405,6 +408,11 @@ uint32_t tuneLastPingMs = 0;
 // Netto-Offset in Schritten (der echte Winkel steht live auf dem 0x31-Advance-Gauge).
 bool tuneModeActive = false;
 int  tuneAdvSteps = 0;
+// [TUNE-SAFE] Dead-Man: Zeitstempel der letzten /api/tune/live-Aktion (inkl. GUI-Ping).
+// Bleibt die GUI 60 s stumm (Handy-WLAN abgerissen), raeumt updateTuneBle() den
+// Offset ab und verlaesst den Tune-Modus.
+uint32_t tuneLastLiveApiMs = 0;
+constexpr uint32_t kTuneDeadManMs = 60000;
 // [KURVE-READ] EEPROM-Kurve aus der 123 lesen (Befehle 10@..13@). Im Lese-Modus
 // sammelt onTuneNotify die Roh-Antworten in curveReadBuf; updateTuneBle staffelt die
 // Blockbefehle; der Browser dekodiert. Reiner Capture -> minimale Chip-Last.
@@ -1481,7 +1489,7 @@ String logHeader()
 {
   String header = "ms;epoch;time";
   if (logCol(kLogColSpartan)) header += ";source;lambda_valid;lambda;spartan_temp_c;spartan_status";
-  if (logCol(kLogColTune)) header += ";rpm;advance;map;tune_volt;tune_temp;tune_amp";
+  if (logCol(kLogColTune)) header += ";rpm;advance;map;tune_volt;tune_temp;tune_amp;tune_mode;tune_offset";
   if (logCol(kLogColSpeed)) header += ";speed_kmh;speed_hz;speed_pulses";
   if (logCol(kLogColHeater)) header += ";heater_v";
   if (logCol(kLogColHours)) header += ";device_h;engine_h;sensor_h";
@@ -1823,13 +1831,24 @@ void appendLiveCsv()
              spartan.status);
   }
   if (logCol(kLogColTune)) {
-    f.printf(";%.0f;%.1f;%.0f;%.1f;%.0f;%.2f",
+    // [TUNE-SAFE] tune_mode/tune_offset mitschreiben: ohne sie ist ein Live-Eingriff
+    // in die Zuendung im Log unsichtbar und Kurven-Vergleiche sind wertlos.
+#if ENABLE_BLE_HUB
+    const unsigned tMode = tuneModeActive ? 1u : 0u;
+    const int tOffset = tuneAdvSteps;
+#else
+    const unsigned tMode = 0u;
+    const int tOffset = 0;
+#endif
+    f.printf(";%.0f;%.1f;%.0f;%.1f;%.0f;%.2f;%u;%d",
              tune.rpm,
              tune.advance,
              tune.map,
              tune.voltage,
              tune.temperature,
-             tune.coilCurrent);
+             tune.coilCurrent,
+             tMode,
+             tOffset);
   }
   if (logCol(kLogColSpeed)) {
 #if SPEED_REED_PIN >= 0
