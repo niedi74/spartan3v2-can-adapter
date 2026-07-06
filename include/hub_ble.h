@@ -516,18 +516,12 @@ bool tuneAdvStep(int dir)
 }
 
 // Offset auf 0: die gezaehlten Schritte gegenlaeufig zuruecksenden (bleibt im
-// Tuning-Modus). Kleiner Abstand zwischen den Writes gegen Notify-Kollision.
+// Tuning-Modus). [TUNE-SAFE] Nicht-blockierend: nur Flag setzen, updateTuneBle()
+// draint die Schritte einzeln mit 30ms-Abstand (gegen Notify-Kollision).
 bool tuneAdvReset()
 {
   if (!tuneModeActive) return false;
-  int guard = 0;
-  while (tuneAdvSteps != 0 && guard++ < 60) {
-    const char c = (tuneAdvSteps > 0) ? 'R' : 'A';
-    if (!sendTuneRaw(c)) return false;
-    tuneAdvSteps += (tuneAdvSteps > 0) ? -1 : 1;
-    delay(30);
-  }
-  logHubEvent("tune_reset", "0");
+  tuneResetDraining = true;
   return true;
 }
 
@@ -607,13 +601,28 @@ void updateTuneBle()
   const uint32_t now = millis();
   // [TUNE-SAFE] Dead-Man: verliert die GUI den Hub (Handy-WLAN weg), darf der
   // Zuend-Offset nicht am laufenden Motor stehen bleiben. Ohne Tune-API-Aktivitaet
-  // (Steps/Ping der GUI) fuer 60 s -> Offset abbauen und Modus verlassen.
+  // (Steps/Ping der GUI) fuer 60 s -> Modus verlassen; die 123 verwirft den Offset
+  // beim T-Exit selbst. Retry gedrosselt, falls der T-Write gerade nicht durchgeht.
   if (tuneModeActive && tuneLastLiveApiMs != 0 &&
       (now - tuneLastLiveApiMs) > kTuneDeadManMs) {
-    Serial.println("123TUNE BLE: Dead-Man (60s ohne GUI) -> Offset 0 + Tune aus");
-    tuneAdvReset();
-    if (tuneModeActive) tuneModeToggle();
-    logHubEvent("tune_deadman", "auto_off");
+    static uint32_t deadManTryMs = 0;
+    if (now - deadManTryMs > 2000) {
+      deadManTryMs = now;
+      Serial.println("123TUNE BLE: Dead-Man (60s ohne GUI) -> Tune aus, Offset verworfen");
+      if (tuneModeToggle()) logHubEvent("tune_deadman", "auto_off");
+    }
+  }
+  // [TUNE-SAFE] Reset-Drain: Gegenschritte einzeln senden (nicht-blockierend)
+  if (tuneResetDraining) {
+    if (!tuneModeActive || tuneAdvSteps == 0) {
+      tuneResetDraining = false;
+      if (tuneAdvSteps == 0) logHubEvent("tune_reset", "0");
+    } else if (now - tuneResetLastStepMs >= 30) {
+      tuneResetLastStepMs = now;
+      const char c = (tuneAdvSteps > 0) ? 'R' : 'A';
+      if (sendTuneRaw(c)) tuneAdvSteps += (tuneAdvSteps > 0) ? -1 : 1;
+      else tuneResetDraining = false;   // Link weg -> Disconnect-Pfad raeumt auf
+    }
   }
   if (tuneDoConnect) {
     connectTune();

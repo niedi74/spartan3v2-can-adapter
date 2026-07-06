@@ -220,7 +220,13 @@ void setupWebGui()
     }
     const bool ok = !Update.hasError() && Update.remaining() == 0;
     server.sendHeader("Connection", "close");
-    server.send(ok ? 200 : 500, "text/plain", ok ? "OK" : "FAIL");
+    if (!ok && !otaMarkerFound && !otaMarkerForce) {   // [OTA-GUARD]
+      server.send(422, "text/plain",
+                  "Abgelehnt: Image traegt keinen Hub-FW-Marker (falsche Firmware?). "
+                  "Override: /update?force=1");
+    } else {
+      server.send(ok ? 200 : 500, "text/plain", ok ? "OK" : "FAIL");
+    }
     if (ok) {
       delay(700);
       ESP.restart();
@@ -244,6 +250,7 @@ void setupWebGui()
         logHubEvent("ota_reject", otaToken.length() == 0 ? "locked" : "badtoken");
         return;   // NICHT Update.begin() -> Firmware bleibt unberuehrt
       }
+      otaMarkerForce = server.hasArg("force");   // [OTA-GUARD] bewusster Override
       webOtaBeginUpload(upload.filename.c_str());
     } else if (upload.status == UPLOAD_FILE_WRITE) {
       if (otaAuthFailed) return;

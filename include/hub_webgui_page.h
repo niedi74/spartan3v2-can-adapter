@@ -204,7 +204,8 @@ input:focus, select:focus { outline: none; border-color: #78ad43; }
 <div class="metric"><span>Verteiler &deg;C</span><strong id="liveTuneTemp">- C</strong></div>
 <div class="metric"><span>123 BLE</span><strong id="liveTuneConn">scan</strong></div>
 <div class="metric"><span>Sonde h</span><strong id="liveHours">0.00</strong></div>
-<div class="metric"><span>Trip km</span><strong id="liveTrip">0.00</strong></div>
+<div class="metric"><span>km gesamt</span><strong id="liveOdo">0.0</strong></div>
+<div class="metric"><span>Trip km <a href="#" onclick="return liveTripReset()" style="float:right;color:#7fd4a8;text-decoration:none;font-weight:700">&#8634;&nbsp;0</a></span><strong id="liveTrip">0.00</strong></div>
 </div>
 <p class="hint">Messstelle hinten im Auspuff: Lambda kann bei Falschluft magerer wirken als der Motor wirklich laeuft.</p>
 </div>
@@ -936,6 +937,14 @@ function g123ToggleLock() {
 }
 function g123TuneMode() { if (!g123Armed) return; g123TunePost('mode'); }
 function g123Adv(dir) { g123TunePost(dir); }
+// [ODO] Trip-Reset direkt aus der Live-Kachel (Tankstelle) -- AJAX, kein Seitenreload.
+async function liveTripReset() {
+  if (confirm('Teilstrecke auf 0 setzen?')) {
+    try { await fetch('/odo', { method:'POST',
+      headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:'trip=reset' }); } catch (e) {}
+  }
+  return false;
+}
 // [KURVE] hinterlegte .123-Zuendkurve laden, parsen und wie in der App zeichnen.
 const cNS='http://www.w3.org/2000/svg';
 function cEl(t,a){ const e=document.createElementNS(cNS,t); for(const k in a) e.setAttribute(k,a[k]); return e; }
@@ -1391,6 +1400,7 @@ async function refresh() {
     { const e=document.getElementById('hoursSetup'); if(e) e.textContent = Number(d.device_hours ?? 0).toFixed(1) + ' / ' + Number(d.engine_hours ?? 0).toFixed(1) + ' / ' + Number(d.sensor_hours ?? 0).toFixed(1) + ' h'; }
     document.getElementById('liveHours').textContent = Number(d.sensor_hours ?? 0).toFixed(2) + ' h';
     { const t=document.getElementById('liveTrip'); if(t) t.textContent = Number(d.trip_km ?? 0).toFixed(2) + ' km'; }
+    { const o=document.getElementById('liveOdo'); if(o) o.textContent = Number(d.odo_km ?? 0).toFixed(1) + ' km'; }
     document.getElementById('liveHoursMeta').textContent = Number(d.device_hours ?? 0).toFixed(2) + ' / ' + Number(d.engine_hours ?? 0).toFixed(2) + ' / ' + Number(d.sensor_hours ?? 0).toFixed(2) + ' h';
     const apd=document.getElementById('apdiag'); if(apd) apd.textContent = (d.ap_ip || '-') + ' / ' + (d.ap_retry_count ?? 0);
     document.getElementById('liveTuneMeta').textContent = (d.tune_age_ms ?? 0) + ' ms / ' + (d.tune_rx ?? 0);

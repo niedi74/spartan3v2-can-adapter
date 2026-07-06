@@ -413,6 +413,11 @@ int  tuneAdvSteps = 0;
 // Offset ab und verlaesst den Tune-Modus.
 uint32_t tuneLastLiveApiMs = 0;
 constexpr uint32_t kTuneDeadManMs = 60000;
+// [TUNE-SAFE] Reset-Drain: tuneAdvReset() setzt nur das Flag, updateTuneBle() sendet
+// die Gegenschritte einzeln (30ms-Abstand) -- der alte delay(30)-Loop blockierte den
+// gesamten loop() (WebServer, CAN-0x510, Log) bis zu 1,8 s im HTTP-Handler.
+volatile bool tuneResetDraining = false;
+uint32_t tuneResetLastStepMs = 0;
 // [KURVE-READ] EEPROM-Kurve aus der 123 lesen (Befehle 10@..13@). Im Lese-Modus
 // sammelt onTuneNotify die Roh-Antworten in curveReadBuf; updateTuneBle staffelt die
 // Blockbefehle; der Browser dekodiert. Reiner Capture -> minimale Chip-Last.
@@ -1377,10 +1382,46 @@ bool webOtaRejectBusy()
   return true;
 }
 
+// [OTA-GUARD] Jede Hub-Firmware traegt diesen Marker im Flash-Image (die Konstante
+// selbst). Der Upload-Stream wird danach durchsucht: fehlt er, ist es keine Hub-FW
+// (Display/Emu/Fremd-Image) und Update.end() wird verweigert -- Schutz gegen den
+// "falsche Firmware auf falsches Geraet"-Fall. Override: /update?force=1.
+// Achtung: aeltere Hub-Staende (vor diesem Commit) tragen den Marker nicht --
+// Downgrade per OTA braucht dann force=1 (oder Kabel).
+const char kHubFwMarker[] = "SPARTAN3-HUBFW-MARK1";
+bool   otaMarkerFound = false;
+bool   otaMarkerForce = false;
+uint8_t otaMarkerTail[24];
+size_t otaMarkerTailLen = 0;
+
+void otaScanChunkForMarker(const uint8_t *data, size_t len)
+{
+  if (otaMarkerFound || len == 0) return;
+  const size_t ml = sizeof(kHubFwMarker) - 1;
+  if (otaMarkerTailLen > 0) {   // Chunk-Grenze: Tail des vorigen + Anfang des neuen
+    uint8_t joint[48];
+    const size_t take = (len < ml - 1) ? len : ml - 1;
+    memcpy(joint, otaMarkerTail, otaMarkerTailLen);
+    memcpy(joint + otaMarkerTailLen, data, take);
+    const size_t jl = otaMarkerTailLen + take;
+    for (size_t i = 0; i + ml <= jl; i++) {
+      if (memcmp(joint + i, kHubFwMarker, ml) == 0) { otaMarkerFound = true; return; }
+    }
+  }
+  for (size_t i = 0; i + ml <= len; i++) {
+    if (memcmp(data + i, kHubFwMarker, ml) == 0) { otaMarkerFound = true; return; }
+  }
+  const size_t keep = (len < ml - 1) ? len : ml - 1;
+  memcpy(otaMarkerTail, data + len - keep, keep);
+  otaMarkerTailLen = keep;
+}
+
 void webOtaBeginUpload(const char *filename)
 {
   otaBusy = true;
   otaRxBytes = 0;
+  otaMarkerFound = false;
+  otaMarkerTailLen = 0;
   otaStartedMs = millis();
   WiFi.setSleep(false);
   server.client().setNoDelay(true);
@@ -1399,6 +1440,7 @@ void webOtaWriteChunk(uint8_t *data, size_t len)
 {
   if (!otaBusy || !data || len == 0) return;
   otaRxBytes += len;
+  otaScanChunkForMarker(data, len);   // [OTA-GUARD]
   if (Update.write(data, len) != len) {
     Update.printError(Serial);
     Update.abort();
@@ -1417,6 +1459,14 @@ void webOtaWriteChunk(uint8_t *data, size_t len)
 void webOtaFinishUpload(size_t totalSize)
 {
   if (!otaBusy) return;
+  if (!otaMarkerFound && !otaMarkerForce) {   // [OTA-GUARD]
+    Update.abort();
+    otaBusy = false;
+    Serial.printf("OTA:         REJECT no_marker (%u bytes) - keine Hub-FW? force=1 als Override\n",
+                  static_cast<unsigned>(totalSize));
+    logHubEvent("ota_reject", "no_marker");
+    return;
+  }
   if (Update.end(true)) {
     Serial.printf("OTA:         success %u bytes\n", static_cast<unsigned>(totalSize));
   } else {
