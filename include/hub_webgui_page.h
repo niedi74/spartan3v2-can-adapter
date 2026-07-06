@@ -185,7 +185,7 @@ input:focus, select:focus { outline: none; border-color: #78ad43; }
 </div>
 <div class="tab-section" data-tab="live">
 <div class="card">
-<div class="topline"><span id="source" class="tag">START</span><span id="liveTuneOffBadge" class="tag" hidden style="background:#e53935;color:#fff">TUNE +0</span><span id="wifiTop" class="mono">offline</span></div>
+<div class="topline"><span id="source" class="tag">START</span><span id="liveTuneOffBadge" class="tag" style="display:none;background:#e53935;color:#fff">TUNE +0</span><span id="wifiTop" class="mono">offline</span></div>
 <p class="hint" id="featBadges" style="margin:0 0 10px;line-height:1.9">
 <span class="tag" id="featAp">AP -</span>
 <span class="tag" id="featWifi">WLAN -</span>
@@ -1162,7 +1162,8 @@ async function refresh() {
     // [TUNE-SAFE] Aktiver Zuend-Offset auch im Live-Tab sichtbar (nicht nur im 123-Tab)
     { const badge = document.getElementById('liveTuneOffBadge');
       if (badge) { const s = Number(d.tune_adv_steps ?? 0); const on = !!d.tune_mode;
-        badge.hidden = !(on || s !== 0);
+        // display statt hidden: .tag setzt display:inline-block und wuerde [hidden] ueberstimmen
+        badge.style.display = (on || s !== 0) ? 'inline-block' : 'none';
         badge.textContent = 'TUNE ' + (s > 0 ? '+' : '') + s; } }
     document.getElementById('liveTuneAmp').textContent = Number(d.tune_amp ?? 0).toFixed(2) + ' A';
     document.getElementById('liveTuneTemp').textContent = (d.tune_temp ?? 0) + ' C';
