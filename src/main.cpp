@@ -34,6 +34,7 @@
 #include <Update.h>
 #include <WebServer.h>
 #include <WiFi.h>
+#include <esp_wifi.h>
 #include <ESPmDNS.h>
 #include <SPI.h>   // externer W25Q128 (FSPI) - Erkennungs-Check
 #include <esp_netif.h>
@@ -541,6 +542,42 @@ bool applyStaticIpIfNeeded(uint8_t profileIdx)
   Serial.printf("WiFi Static: Profil %d -> %s (GW %s, Mask %s)\n", profileIdx, p.ip, p.gw, p.mask);
   return true;
 }
+
+// [WIFI-MAC-OVR] Manuelle STA-MAC statt Werks-eFuse (Verdacht auf nicht-eindeutige
+// Klon-MAC). Leer = Werks-MAC. Vorsicht: eine Test-MAC kann die Router-Assoziation
+// komplett zerschiessen (beobachtet auf dem Test-Hub) -- Recovery dann nur per
+// Serial: "hub wifi mac clear".
+char g_wifiMacOverride[18] = "";
+
+bool parseMac6(const char *s, uint8_t out[6])
+{
+  if (!s || strlen(s) < 17) return false;
+  int v[6];
+  if (sscanf(s, "%x:%x:%x:%x:%x:%x", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5]) != 6) return false;
+  for (int i = 0; i < 6; i++) {
+    if (v[i] < 0 || v[i] > 255) return false;
+    out[i] = static_cast<uint8_t>(v[i]);
+  }
+  return true;
+}
+
+void applyWifiMacOverrideIfNeeded()
+{
+  if (strlen(g_wifiMacOverride) == 0) return;
+  uint8_t mac[6];
+  if (!parseMac6(g_wifiMacOverride, mac)) {
+    Serial.printf("WiFi MAC:    Override '%s' ungueltig - ignoriert\n", g_wifiMacOverride);
+    return;
+  }
+  mac[0] &= 0xFE;   // Multicast-Bit raus
+  if (esp_wifi_set_mac(WIFI_IF_STA, mac) == ESP_OK) {
+    Serial.printf("WiFi MAC:    Override aktiv -> %02X:%02X:%02X:%02X:%02X:%02X\n",
+                  mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+  } else {
+    Serial.println("WiFi MAC:    esp_wifi_set_mac fehlgeschlagen");
+  }
+}
+
 uint8_t hubWifiProfile = 0;  // aktiv: 0=Bus, 1=Zuhause, 2=Handy
 bool haveSavedWifi = false;
 uint32_t homeWifiConnectStartedMs = 0;
@@ -4041,6 +4078,15 @@ bool handleHubFeatSerialLine(const String &line)
     }
     return true;
   }
+  // [WIFI-MAC-OVR] Recovery ohne WLAN, falls ein Override die STA-Verbindung zerschiesst.
+  if (line.equalsIgnoreCase("hub wifi mac clear")) {
+    ensurePreferences();
+    networkPreferences.putString("mac_ovr", "");
+    Serial.println("WiFi MAC:    Override geloescht -> Neustart");
+    delay(300);
+    ESP.restart();
+    return true;
+  }
   if (line.equalsIgnoreCase("hub logfs reset")) {
     logCurrentBytes = 0;
     logOldBytes = 0;
@@ -4228,6 +4274,8 @@ void setupWebGui()
   }
   hubWifiProfile = networkPreferences.getUChar("wifi_prof", DEFAULT_WIFI_PROFILE);
   if (hubWifiProfile > 2) hubWifiProfile = 0;
+  // [WIFI-MAC-OVR] geraeteweit (nicht pro Profil)
+  strlcpy(g_wifiMacOverride, networkPreferences.getString("mac_ovr", "").c_str(), sizeof(g_wifiMacOverride));
 
   const bool busMode = (hubWifiProfile == 0);
   const char* staSsid  = busMode ? "" : g_hubWifiProfiles[hubWifiProfile].ssid;
@@ -4237,6 +4285,7 @@ void setupWebGui()
 
   WiFi.setHostname(hubHostname.c_str());
   WiFi.mode(WIFI_AP_STA);
+  applyWifiMacOverrideIfNeeded();   // [WIFI-MAC-OVR] direkt nach mode(), vor jedem Connect
 #if ENABLE_BLE_HUB
   WiFi.setSleep(true);
 #else
@@ -4294,6 +4343,15 @@ void setupWebGui()
            "<label>Gateway</label><input name=gw value='" + String(g_hubWifiProfiles[1].gw) + "' placeholder='192.168.0.1'>"
            "<label>Subnetzmaske</label><input name=mask value='" + String(g_hubWifiProfiles[1].mask) + "'></div>"
            "<button>Verbinden &amp; speichern</button></form></div>";
+      // [WIFI-MAC-OVR] eigenes Kaertchen mit Warnung -- eine falsche/nicht-assoziierbare
+      // MAC kann die Heimnetz-Verbindung komplett kappen (Recovery dann nur per Serial:
+      // "hub wifi mac clear").
+      h += "<h2>WLAN-MAC</h2><div class=card>Aktiv: <b>" + WiFi.macAddress() + "</b>"
+           "<p class=mut>Nur bei Verdacht auf doppelte Werks-MAC (billige Klone) aendern. "
+           "Leer + Speichern = zurueck zur Werks-MAC. Loest Neustart aus.</p>"
+           "<form method=POST action=/wifi_mac><label>MAC-Override</label>"
+           "<input name=mac value='" + String(g_wifiMacOverride) + "' placeholder='AA:BB:CC:DD:EE:FF'>"
+           "<button>Speichern &amp; neustarten</button></form></div>";
       h += "<h2>Access Point</h2><div class=card>Aktiv: <b>" + apName + "</b> &middot; " + WiFi.softAPIP().toString();
       h += "<form method=POST action=/ap_config><label>AP-Name</label><input name=ssid value='" + apName + "'>"
            "<label>AP-Passwort (leer = offen, sonst min. 8)</label><input name=pass value='" + hubApPassword + "'>"
@@ -4689,6 +4747,22 @@ void setupWebGui()
     }
     server.sendHeader("Location", "/", true);
     server.send(303, "text/plain", "");
+  });
+  // [WIFI-MAC-OVR] Manuelle STA-MAC setzen/loeschen, wirkt erst nach Neustart.
+  server.on("/wifi_mac", HTTP_POST, []() {
+    const String mac = server.arg("mac");
+    uint8_t chk[6];
+    if (mac.length() > 0 && !parseMac6(mac.c_str(), chk)) {
+      server.send(400, "application/json", "{\"ok\":false,\"error\":\"Format AA:BB:CC:DD:EE:FF\"}");
+      return;
+    }
+    ensurePreferences();
+    networkPreferences.putString("mac_ovr", mac);
+    Serial.printf("WiFi MAC:    Override %s -> Neustart\n", mac.length() ? mac.c_str() : "geloescht");
+    logHubEvent("wifi_mac", mac.length() ? "set" : "clear");
+    server.send(200, "application/json", "{\"ok\":true,\"restart\":true}");
+    delay(400);
+    ESP.restart();
   });
   server.on("/wifi", HTTP_POST, []() {
     String ssid = server.arg("ssid");
