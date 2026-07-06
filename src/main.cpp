@@ -4280,9 +4280,19 @@ void setupWebGui()
              "<br><a class=btn href='/emu'>&#9654; Emulator-Steuerung (/emu)</a></div>");
       h += "<h2>Heim-WLAN</h2><div class=card>Status: <b>";
       h += sta ? ("verbunden, IP " + WiFi.localIP().toString()) : String("nicht verbunden");
-      h += "</b><form method=POST action=/wifi><label>WLAN-Name (SSID)</label>"
-           "<input name=ssid value='" + savedWifiSsid + "'>"
+      // [WIFI-STATIC] Ueber /wifi_profile_save (Slot 1) statt dem alten /wifi -- so
+      // greift die vorhandene DHCP/Static-Logik ohne zweiten Code-Pfad zu pflegen.
+      h += "</b><form method=POST action=/wifi_profile_save><input type=hidden name=slot value=1>"
+           "<label>WLAN-Name (SSID)</label><input name=ssid value='" + savedWifiSsid + "'>"
            "<label>Passwort</label><input name=pass type=password placeholder='leer = unveraendert'>"
+           "<label>IP-Vergabe</label>"
+           "<select name=ipm id=ipm onchange=\"document.getElementById('ipf').hidden=(this.value!='1')\">"
+           "<option value=0" + String(g_hubWifiProfiles[1].ipMode == 0 ? " selected" : "") + ">DHCP (automatisch)</option>"
+           "<option value=1" + String(g_hubWifiProfiles[1].ipMode == 1 ? " selected" : "") + ">Statisch</option></select>"
+           "<div id=ipf" + String(g_hubWifiProfiles[1].ipMode == 1 ? "" : " hidden") + ">"
+           "<label>IP-Adresse</label><input name=ip value='" + String(g_hubWifiProfiles[1].ip) + "' placeholder='192.168.0.80'>"
+           "<label>Gateway</label><input name=gw value='" + String(g_hubWifiProfiles[1].gw) + "' placeholder='192.168.0.1'>"
+           "<label>Subnetzmaske</label><input name=mask value='" + String(g_hubWifiProfiles[1].mask) + "'></div>"
            "<button>Verbinden &amp; speichern</button></form></div>";
       h += "<h2>Access Point</h2><div class=card>Aktiv: <b>" + apName + "</b> &middot; " + WiFi.softAPIP().toString();
       h += "<form method=POST action=/ap_config><label>AP-Name</label><input name=ssid value='" + apName + "'>"
