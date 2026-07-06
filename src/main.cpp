@@ -317,6 +317,16 @@ uint32_t lastCanStatusMs = 0;
 uint32_t canStatusErrors = 0;
 uint32_t lastCockpitCanTxMs = 0;
 uint32_t cockpitCanTxCount  = 0;
+// [CAN-DEV] Laufzeit-Parameter (Dev-Tab): Pins/Bitrate/IDs aus NVS, Default aus den
+// Build-Flags. Pin/Bitrate/ID-Aenderungen brauchen einen Neustart (sauberer TWAI-Reinit
+// mit neuer GPIO-Zuordnung); nur der An/Aus-Schalter wirkt sofort (Treiber-Uninstall).
+bool     hubFeatCan       = true;
+uint8_t  canRxPinCfg      = CAN_RX_PIN;
+uint8_t  canTxPinCfg      = CAN_TX_PIN;
+uint16_t canBitrateKbps   = 500;
+uint16_t spartanCanIdCfg  = SPARTAN_CAN_ID;
+uint16_t cockpitCanIdCfg  = COCKPIT_CAN_TX_ID;
+uint16_t cockpitCanTxIntervalMsCfg = COCKPIT_CAN_TX_INTERVAL_MS;
 uint32_t cockpitCanTxErrors = 0;
 portMUX_TYPE stateMux = portMUX_INITIALIZER_UNLOCKED;
 float tuneRpm = 0.0f;
@@ -658,6 +668,20 @@ void saveHubFeatures()
   networkPreferences.putBool("hf_log", hubFeatLog);
   networkPreferences.putBool("hf_ble123", hubFeatBle123);
   networkPreferences.putUChar("lambda_test", static_cast<uint8_t>(lambdaTestMode));
+  networkPreferences.putBool("hf_can", hubFeatCan);
+}
+
+// [CAN-DEV] Getrennt von saveHubFeatures(): Pins/Bitrate/IDs brauchen einen Neustart
+// (anders als der reine An/Aus-Schalter), deshalb eigener Speicherpfad + Log-Ausgabe.
+void saveCanConfig()
+{
+  ensurePreferences();
+  networkPreferences.putUChar("can_rx", canRxPinCfg);
+  networkPreferences.putUChar("can_tx", canTxPinCfg);
+  networkPreferences.putUShort("can_kbps", canBitrateKbps);
+  networkPreferences.putUShort("can_sid", spartanCanIdCfg);
+  networkPreferences.putUShort("can_cid", cockpitCanIdCfg);
+  networkPreferences.putUShort("can_txms", cockpitCanTxIntervalMsCfg);
 }
 
 void startHubMdns();  // fwd: in onHubWifiEvent (STA GOT IP) benoetigt
@@ -752,6 +776,14 @@ void loadHubFeatures()
   lambdaTestMode = savedLambdaTest <= static_cast<uint8_t>(LambdaTestMode::Sweep)
       ? static_cast<LambdaTestMode>(savedLambdaTest)
       : LambdaTestMode::Off;
+  // [CAN-DEV] Dev-Tab-Parameter: NVS-Wert, sonst Build-Flag-Default
+  hubFeatCan      = networkPreferences.getBool("hf_can", true);
+  canRxPinCfg     = networkPreferences.getUChar("can_rx", CAN_RX_PIN);
+  canTxPinCfg     = networkPreferences.getUChar("can_tx", CAN_TX_PIN);
+  canBitrateKbps  = networkPreferences.getUShort("can_kbps", 500);
+  spartanCanIdCfg = networkPreferences.getUShort("can_sid", SPARTAN_CAN_ID);
+  cockpitCanIdCfg = networkPreferences.getUShort("can_cid", COCKPIT_CAN_TX_ID);
+  cockpitCanTxIntervalMsCfg = networkPreferences.getUShort("can_txms", COCKPIT_CAN_TX_INTERVAL_MS);
 }
 
 bool parseApAddress(const String &text, const char *fallback, IPAddress &out)
@@ -2086,6 +2118,9 @@ void printHubFeatStatus()
                 hubFeatBle123 ? "on" : "off");
 }
 
+void setupCan();   // [CAN-DEV] Definition in hub_can.h (spaeter included)
+void stopCan();
+
 void applyHubFeatures()
 {
   if (!hubFeatAp) {
@@ -2122,6 +2157,13 @@ void applyHubFeatures()
     scheduleTuneScan(true);
   }
 #endif
+  // [CAN-DEV] Live-Schalter: Treiber starten/stoppen, keine Pins/Bitrate aendern
+  // sich hierbei (die brauchen einen Neustart, siehe /can_config).
+  if (hubFeatCan && !canReady) {
+    setupCan();
+  } else if (!hubFeatCan && canReady) {
+    stopCan();
+  }
 }
 
 bool handleHubFeatSerialLine(const String &line)

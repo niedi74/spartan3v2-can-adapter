@@ -1,14 +1,30 @@
 #pragma once
 // [CAN] setupCan()/updateCan(): Spartan-RX (0x400) + Cockpit-TX (0x510) auf dem
 // gemeinsamen TWAI-Controller. 1:1 aus main.cpp, an Originalstelle included.
+// [CAN-DEV] Pins/Bitrate/IDs kommen aus den *Cfg-Laufzeitvariablen (NVS, Default =
+// Build-Flags) -- Aenderung braucht Neustart, siehe loadHubFeatures()/canConfigChanged.
+static twai_timing_config_t canTimingFromKbps(uint16_t kbps)
+{
+  switch (kbps) {
+    case 1000: return TWAI_TIMING_CONFIG_1MBITS();
+    case 250:  return TWAI_TIMING_CONFIG_250KBITS();
+    case 125:  return TWAI_TIMING_CONFIG_125KBITS();
+    default:   return TWAI_TIMING_CONFIG_500KBITS();
+  }
+}
+
 void setupCan()
 {
 #if ENABLE_SPARTAN_CAN
+  if (!hubFeatCan) {
+    Serial.println("CAN:         disabled (Dev-Tab)");
+    return;
+  }
   twai_general_config_t general = TWAI_GENERAL_CONFIG_DEFAULT(
-      static_cast<gpio_num_t>(CAN_TX_PIN),
-      static_cast<gpio_num_t>(CAN_RX_PIN),
+      static_cast<gpio_num_t>(canTxPinCfg),
+      static_cast<gpio_num_t>(canRxPinCfg),
       TWAI_MODE_NORMAL);
-  twai_timing_config_t timing = TWAI_TIMING_CONFIG_500KBITS();
+  twai_timing_config_t timing = canTimingFromKbps(canBitrateKbps);
   twai_filter_config_t filter = TWAI_FILTER_CONFIG_ACCEPT_ALL();
 
   if (twai_driver_install(&general, &timing, &filter) != ESP_OK || twai_start() != ESP_OK) {
@@ -17,7 +33,21 @@ void setupCan()
   }
 
   canReady = true;
-  Serial.printf("CAN:         500 kbit/s RX=%u TX=%u Spartan ID=0x%03X\n", CAN_RX_PIN, CAN_TX_PIN, SPARTAN_CAN_ID);
+  Serial.printf("CAN:         %u kbit/s RX=%u TX=%u Spartan ID=0x%03X Cockpit ID=0x%03X\n",
+                canBitrateKbps, canRxPinCfg, canTxPinCfg, spartanCanIdCfg, cockpitCanIdCfg);
+#endif
+}
+
+// [CAN-DEV] Laufzeit-Aus (Dev-Tab-Schalter) -- Treiber sauber stoppen/deinstallieren,
+// damit die Pins frei werden und kein halbtoter TWAI-Zustand haengen bleibt.
+void stopCan()
+{
+#if ENABLE_SPARTAN_CAN
+  if (!canReady) return;
+  twai_stop();
+  twai_driver_uninstall();
+  canReady = false;
+  Serial.println("CAN:         disabled (Dev-Tab) -> Treiber gestoppt");
 #endif
 }
 
@@ -56,7 +86,7 @@ void updateCan()
 
   twai_message_t message;
   while (twai_receive(&message, 0) == ESP_OK) {
-    if (message.extd || message.identifier != SPARTAN_CAN_ID || message.data_length_code < 4) {
+    if (message.extd || message.identifier != spartanCanIdCfg || message.data_length_code < 4) {
       continue;
     }
 
@@ -75,7 +105,7 @@ void updateCan()
 
   // --- Cockpit-Frame an Display(s) senden: 0x510, 8 Byte, ~10 Hz ---
   // Gleicher TWAI-Controller wie der Spartan-RX (NORMAL-Mode -> sendefaehig).
-  if (now - lastCockpitCanTxMs >= COCKPIT_CAN_TX_INTERVAL_MS) {
+  if (now - lastCockpitCanTxMs >= cockpitCanTxIntervalMsCfg) {
     lastCockpitCanTxMs = now;
     const SpartanReading snap = readingSnapshot();
     uint16_t rpm = 0;
@@ -96,7 +126,7 @@ void updateCan()
     if (tuneFresh)  flags |= 0x02;   // 123-Daten frisch (rpm/adv/map gueltig)
 
     twai_message_t tx = {};
-    tx.identifier        = COCKPIT_CAN_TX_ID;
+    tx.identifier        = cockpitCanIdCfg;
     tx.data_length_code  = 8;
     tx.data[0] = static_cast<uint8_t>(lambdaX1000 >> 8);
     tx.data[1] = static_cast<uint8_t>(lambdaX1000 & 0xFF);

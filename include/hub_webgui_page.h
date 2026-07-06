@@ -593,6 +593,23 @@ Leer lassen + speichern = zurueck zur Werks-MAC. <b>Loest einen Neustart aus.</b
 <details class="setup" open><summary>Schalter</summary><div class="inside">
 <div class="row"><span>123 BLE</span><span><button type="button" onclick="devFeat('ble123','on')">AN</button> <button type="button" onclick="devFeat('ble123','off')">AUS</button> <strong id="dev_ble123" style="margin-left:8px">-</strong></span></div>
 <div class="row"><span>Logging</span><span><button type="button" onclick="devFeat('log','on')">AN</button> <button type="button" onclick="devFeat('log','off')">AUS</button> <strong id="dev_log" style="margin-left:8px">-</strong></span></div>
+<div class="row"><span>CAN</span><span><button type="button" onclick="devFeat('can','on')">AN</button> <button type="button" onclick="devFeat('can','off')">AUS</button> <strong id="dev_can" style="margin-left:8px">-</strong></span></div>
+</div></details>
+<details class="setup"><summary>CAN-Parameter</summary><div class="inside">
+<p class="hint">Pins/Bitrate/IDs brauchen einen <b>Neustart</b> (sauberer TWAI-Reinit). Der An/Aus-Schalter oben wirkt sofort, ohne Neustart.</p>
+<form id="canConfigForm" action="/can_config" method="post">
+<label>RX-Pin</label><input id="canRx" name="rx" type="number" min="0" max="48">
+<label>TX-Pin</label><input id="canTx" name="tx" type="number" min="0" max="48">
+<label>Bitrate</label>
+<select id="canKbps" name="kbps">
+<option value="125">125 kbit/s</option><option value="250">250 kbit/s</option>
+<option value="500">500 kbit/s</option><option value="1000">1000 kbit/s</option>
+</select>
+<label>Spartan-ID (hex, z.B. 400)</label><input id="canSid" name="sid" placeholder="400">
+<label>Cockpit-TX-ID (hex, z.B. 510)</label><input id="canCid" name="cid" placeholder="510">
+<label>Cockpit-TX-Intervall (ms)</label><input id="canTxms" name="txms" type="number" min="20" max="5000">
+<button type="submit">Speichern &amp; neustarten</button>
+</form>
 </div></details>
 <details class="setup"><summary>Lambda-Demo (Tischtest)</summary><div class="inside">
 <div class="row"><span>Modus</span><strong id="dev_lambda">-</strong></div>
@@ -1268,7 +1285,14 @@ async function refresh() {
     // Dev-Tab Schalterzustände spiegeln
     {
       const sd=(id,on)=>{const e=document.getElementById(id);if(e){e.textContent=on?'AN':'AUS';e.style.color=on?'#54d273':'#ff6a5a';}};
-      sd('dev_ble123', d.hub_feat_ble123); sd('dev_log', d.hub_feat_log);
+      sd('dev_ble123', d.hub_feat_ble123); sd('dev_log', d.hub_feat_log); sd('dev_can', d.hub_feat_can);
+      // [CAN-DEV] Formularfelder nur vorbelegen, wenn der Nutzer nicht gerade tippt
+      { const f = document.getElementById('canConfigForm');
+        if (f && document.activeElement && !f.contains(document.activeElement)) {
+          const set=(id,v)=>{const e=document.getElementById(id); if(e) e.value=v;};
+          set('canRx', d.can_rx_pin); set('canTx', d.can_tx_pin); set('canKbps', d.can_bitrate_kbps);
+          set('canSid', d.can_spartan_id); set('canCid', d.can_cockpit_id); set('canTxms', d.can_tx_interval_ms);
+        } }
       const dl=document.getElementById('dev_lambda'); if(dl) dl.textContent=(d.lambda_test_mode||'off');
     }
     document.getElementById('tuneLinkState').textContent = d.tune_link_state ?? '-';

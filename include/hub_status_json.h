@@ -111,6 +111,21 @@ String statusJson()
   json += hubFeatLog ? "true" : "false";
   json += ",\"hub_feat_ble123\":";
   json += hubFeatBle123 ? "true" : "false";
+  // [CAN-DEV] Dev-Tab: aktueller Ein/Aus-Zustand + die Parameter, die einen Neustart brauchen
+  json += ",\"hub_feat_can\":";
+  json += hubFeatCan ? "true" : "false";
+  json += ",\"can_rx_pin\":";
+  json += String(canRxPinCfg);
+  json += ",\"can_tx_pin\":";
+  json += String(canTxPinCfg);
+  json += ",\"can_bitrate_kbps\":";
+  json += String(canBitrateKbps);
+  json += ",\"can_spartan_id\":\"";
+  json += String(spartanCanIdCfg, HEX);
+  json += "\",\"can_cockpit_id\":\"";
+  json += String(cockpitCanIdCfg, HEX);
+  json += "\",\"can_tx_interval_ms\":";
+  json += String(cockpitCanTxIntervalMsCfg);
 #if ENABLE_BLE_HUB
   json += ",\"ble_hub_clients\":[";
   for (uint8_t i = 0; i < bleHubClientCount; i++) {

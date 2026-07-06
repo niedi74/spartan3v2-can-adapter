@@ -142,6 +142,7 @@ void setupWebGui()
     bool known = true;
     if (name == "ble123") hubFeatBle123 = on;
     else if (name == "log") hubFeatLog = on;
+    else if (name == "can") hubFeatCan = on;
     else known = false;
     if (known) {
       saveHubFeatures();
@@ -150,6 +151,45 @@ void setupWebGui()
     }
     server.send(known ? 200 : 400, "application/json",
                 String("{\"ok\":") + (known ? "true" : "false") + "}");
+  });
+  // [CAN-DEV] Pins/Bitrate/IDs -- braucht sauberen TWAI-Reinit mit neuer GPIO-
+  // Zuordnung, deshalb Speichern + Neustart statt Live-Anwendung.
+  server.on("/can_config", HTTP_POST, []() {
+    const int rx = server.arg("rx").toInt();
+    const int tx = server.arg("tx").toInt();
+    const int kbps = server.arg("kbps").toInt();
+    const long sid = strtol(server.arg("sid").c_str(), nullptr, 16);
+    const long cid = strtol(server.arg("cid").c_str(), nullptr, 16);
+    const int txms = server.hasArg("txms") ? server.arg("txms").toInt() : cockpitCanTxIntervalMsCfg;
+    if (rx < 0 || rx > 48 || tx < 0 || tx > 48 || rx == tx) {
+      server.send(400, "application/json", "{\"ok\":false,\"error\":\"Pins 0..48, RX != TX\"}");
+      return;
+    }
+    if (kbps != 125 && kbps != 250 && kbps != 500 && kbps != 1000) {
+      server.send(400, "application/json", "{\"ok\":false,\"error\":\"kbps: 125|250|500|1000\"}");
+      return;
+    }
+    if (sid < 0 || sid > 0x7FF || cid < 0 || cid > 0x7FF) {
+      server.send(400, "application/json", "{\"ok\":false,\"error\":\"IDs 0x000..0x7FF (Standard-ID)\"}");
+      return;
+    }
+    if (txms < 20 || txms > 5000) {
+      server.send(400, "application/json", "{\"ok\":false,\"error\":\"txms 20..5000\"}");
+      return;
+    }
+    canRxPinCfg = static_cast<uint8_t>(rx);
+    canTxPinCfg = static_cast<uint8_t>(tx);
+    canBitrateKbps = static_cast<uint16_t>(kbps);
+    spartanCanIdCfg = static_cast<uint16_t>(sid);
+    cockpitCanIdCfg = static_cast<uint16_t>(cid);
+    cockpitCanTxIntervalMsCfg = static_cast<uint16_t>(txms);
+    saveCanConfig();
+    Serial.printf("CAN config:  RX=%d TX=%d %dkbit Spartan=0x%03lX Cockpit=0x%03lX %dms -> Neustart\n",
+                  rx, tx, kbps, sid, cid, txms);
+    logHubEvent("can_config", "web");
+    server.send(200, "application/json", "{\"ok\":true,\"restart\":true}");
+    delay(400);
+    ESP.restart();
   });
   server.on("/lambda_test", HTTP_POST, []() {
     if (!server.hasArg("mode") || !setLambdaTestMode(server.arg("mode"))) {
