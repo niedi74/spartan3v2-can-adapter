@@ -170,6 +170,10 @@ String statusJson()
   json += WiFi.status() == WL_CONNECTED ? WiFi.SSID() : "";
   json += "\",\"wifi_ip\":\"";
   json += WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : "";
+  json += "\",\"wifi_mac\":\"";       // [WIFI-MAC-OVR] effektive STA-MAC (Werk oder Override)
+  json += WiFi.macAddress();
+  json += "\",\"wifi_mac_override\":\"";
+  json += g_wifiMacOverride;
   json += "\",\"ap_ip\":\"";
   json += WiFi.softAPIP().toString();
   json += "\",\"wifi_sta_channel\":";

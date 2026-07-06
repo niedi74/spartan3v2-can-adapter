@@ -26,6 +26,7 @@
 #include <Update.h>
 #include <WebServer.h>
 #include <WiFi.h>
+#include <esp_wifi.h>
 #include <ESPmDNS.h>
 #include <SPI.h>   // externer W25Q128 (FSPI) - Erkennungs-Check
 #include <esp_netif.h>
@@ -487,6 +488,44 @@ bool applyStaticIpIfNeeded(uint8_t profileIdx)
   WiFi.config(ip, gw, mask);
   Serial.printf("WiFi Static: Profil %d -> %s (GW %s, Mask %s)\n", profileIdx, p.ip, p.gw, p.mask);
   return true;
+}
+
+// [WIFI-MAC-OVR] Manuelle STA-MAC statt Werks-eFuse. Hintergrund: billige ESP32-Klone
+// haben die MAC teils nicht sauber ins eFuse programmiert und liefern dann bei mehreren
+// Geraeten die GLEICHE Default-MAC -> Verwechslungen/Konflikte im LAN (genau das Muster,
+// das den Emu zeitweise mit einem Fremdgeraet verwechselbar machte). Leer = Werks-MAC.
+char g_wifiMacOverride[18] = "";   // "AA:BB:CC:DD:EE:FF" oder leer
+
+bool parseMac6(const char *s, uint8_t out[6])
+{
+  if (!s || strlen(s) < 17) return false;
+  int v[6];
+  if (sscanf(s, "%x:%x:%x:%x:%x:%x", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5]) != 6) return false;
+  for (int i = 0; i < 6; i++) {
+    if (v[i] < 0 || v[i] > 255) return false;
+    out[i] = static_cast<uint8_t>(v[i]);
+  }
+  return true;
+}
+
+// Vor WiFi.mode()/erstem Connect aufrufen. Multicast-Bit (LSB von Byte 0) wird hart
+// geloescht -- eine Multicast-MAC als Unicast-Stationsadresse haengt sich sonst im
+// WLAN auf, ohne dass es offensichtlich waere.
+void applyWifiMacOverrideIfNeeded()
+{
+  if (strlen(g_wifiMacOverride) == 0) return;
+  uint8_t mac[6];
+  if (!parseMac6(g_wifiMacOverride, mac)) {
+    Serial.printf("WiFi MAC:    Override '%s' ungueltig - ignoriert\n", g_wifiMacOverride);
+    return;
+  }
+  mac[0] &= 0xFE;   // Multicast-Bit raus
+  if (esp_wifi_set_mac(WIFI_IF_STA, mac) == ESP_OK) {
+    Serial.printf("WiFi MAC:    Override aktiv -> %02X:%02X:%02X:%02X:%02X:%02X\n",
+                  mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+  } else {
+    Serial.println("WiFi MAC:    esp_wifi_set_mac fehlgeschlagen (WiFi-Treiber noch nicht bereit?)");
+  }
 }
 uint8_t hubWifiProfile = 0;  // aktiv: 0=Bus, 1=Zuhause, 2=Handy
 bool haveSavedWifi = false;
@@ -2087,6 +2126,16 @@ bool handleHubFeatSerialLine(const String &line)
     if (!setLambdaTestMode(mode)) {
       Serial.println("Lambda test: use off, fixed or sweep");
     }
+    return true;
+  }
+  // [WIFI-MAC-OVR] Recovery ohne WLAN: falls ein Override die STA-Verbindung
+  // zerschiesst, ist der Hub nur noch per USB/Serial erreichbar.
+  if (line.equalsIgnoreCase("hub wifi mac clear")) {
+    ensurePreferences();
+    networkPreferences.putString("mac_ovr", "");
+    Serial.println("WiFi MAC:    Override geloescht -> Neustart");
+    delay(300);
+    ESP.restart();
     return true;
   }
   if (line.equalsIgnoreCase("hub logfs reset")) {

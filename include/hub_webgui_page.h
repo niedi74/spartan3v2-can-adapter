@@ -443,6 +443,16 @@ input:focus, select:focus { outline: none; border-color: #78ad43; }
 <div class="row"><span>Verbindung</span><strong id="wifi">nicht eingerichtet</strong></div>
 <div class="row"><span>Hub-IP (externes Netz)</span><strong id="lanip">-</strong></div>
 <div class="row"><span>Gespeichert</span><strong id="wifisaved">-</strong></div>
+<div class="row"><span>WLAN-MAC (aktiv)</span><strong id="wifiMacNow">-</strong></div>
+
+<details style="margin:12px 0"><summary><b>MAC-Adresse ueberschreiben</b> (nur bei Verdacht auf Adress-Konflikt)</summary>
+<p class="hint">Manche billigen ESP-Klone haben keine eindeutige Werks-MAC programmiert und
+teilen sich dann eine Adresse mit anderen Geraeten im Netz &mdash; das sorgt fuer
+sporadische Verbindungsprobleme/Verwechslungen. Hier eine eigene MAC erzwingen.
+Leer lassen + speichern = zurueck zur Werks-MAC. <b>Loest einen Neustart aus.</b></p>
+<input id="macOvr" placeholder="AA:BB:CC:DD:EE:FF" style="font-family:monospace">
+<button type="button" id="macOvrSave">Speichern &amp; neustarten</button>
+</details>
 
 <p class="hint" style="margin:14px 0 6px"><b>1. Verbindungsmodus</b> &mdash; ein Tipp schaltet um:</p>
 <div id="wifiProfBtns"></div>
@@ -870,6 +880,22 @@ if (otaTokSave) {
       otaShow(0, d.ota_locked ? 'OTA-Token geloescht -> gesperrt' : 'OTA-Token gesetzt -> entsperrt');
     } catch (e) { otaShow(0, 'Token-Fehler'); }
     otaTokSave.disabled = false;
+  });
+}
+// [WIFI-MAC-OVR]
+const macOvrSave = document.getElementById('macOvrSave');
+if (macOvrSave) {
+  macOvrSave.addEventListener('click', async () => {
+    const v = (document.getElementById('macOvr')||{}).value || '';
+    if (v && !/^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$/.test(v)) { alert('Format: AA:BB:CC:DD:EE:FF'); return; }
+    if (!confirm((v ? 'MAC auf ' + v + ' setzen' : 'Auf Werks-MAC zuruecksetzen') + ' und neu starten?')) return;
+    macOvrSave.disabled = true;
+    try {
+      await fetch('/wifi_mac', { method:'POST',
+        headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:'mac=' + encodeURIComponent(v) });
+      alert('Gespeichert, Hub startet neu (ca. 10s).');
+    } catch (e) { alert('Fehler beim Speichern.'); }
+    macOvrSave.disabled = false;
   });
 }
 async function refreshEvents() {
@@ -1313,6 +1339,8 @@ async function refresh() {
     })();
     document.getElementById('lanip').textContent = d.wifi_connected ? d.wifi_ip : '-';
     document.getElementById('wifisaved').textContent = d.wifi_saved_ssid || '-';
+    { const m = document.getElementById('wifiMacNow'); if (m) m.textContent = d.wifi_mac || '-'; }
+    { const o = document.getElementById('macOvr'); if (o && !o.matches(':focus') && !o.value) o.value = d.wifi_mac_override || ''; }
     document.getElementById('liveWifiMeta').textContent = d.wifi_connected ? ((d.wifi_ssid || '-') + ' / ' + (d.wifi_ip || '-')) : ('AP ' + (d.ap_ip || '-'));
     document.getElementById('logstatus').textContent = d.log_ready ? 'bereit' : 'Dateisystem fehlt';
     document.getElementById('logcurrent').textContent = fmtBytes(d.log_current_bytes);

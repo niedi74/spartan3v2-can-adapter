@@ -78,6 +78,8 @@ void setupWebGui()
   }
   hubWifiProfile = networkPreferences.getUChar("wifi_prof", DEFAULT_WIFI_PROFILE);
   if (hubWifiProfile > 2) hubWifiProfile = 0;
+  // [WIFI-MAC-OVR] geraeteweit (nicht pro Profil) -- betrifft die STA-Hardwareadresse
+  strlcpy(g_wifiMacOverride, networkPreferences.getString("mac_ovr", "").c_str(), sizeof(g_wifiMacOverride));
 
   const bool busMode = (hubWifiProfile == 0);
   const char* staSsid  = busMode ? "" : g_hubWifiProfiles[hubWifiProfile].ssid;
@@ -87,6 +89,7 @@ void setupWebGui()
 
   WiFi.setHostname(hubHostname.c_str());
   WiFi.mode(WIFI_AP_STA);
+  applyWifiMacOverrideIfNeeded();   // [WIFI-MAC-OVR] direkt nach mode(), vor jedem Connect
 #if ENABLE_BLE_HUB
   WiFi.setSleep(true);
 #else
@@ -638,6 +641,23 @@ void setupWebGui()
     }
     server.sendHeader("Location", "/", true);
     server.send(303, "text/plain", "");
+  });
+  // [WIFI-MAC-OVR] Manuelle STA-MAC setzen/loeschen. Wirkt erst nach Neustart sauber
+  // (esp_wifi_set_mac() waehrend einer laufenden Verbindung ist unzuverlaessig).
+  server.on("/wifi_mac", HTTP_POST, []() {
+    const String mac = server.arg("mac");
+    uint8_t chk[6];
+    if (mac.length() > 0 && !parseMac6(mac.c_str(), chk)) {
+      server.send(400, "application/json", "{\"ok\":false,\"error\":\"Format AA:BB:CC:DD:EE:FF\"}");
+      return;
+    }
+    ensurePreferences();
+    networkPreferences.putString("mac_ovr", mac);
+    Serial.printf("WiFi MAC:    Override %s -> Neustart\n", mac.length() ? mac.c_str() : "geloescht");
+    logHubEvent("wifi_mac", mac.length() ? "set" : "clear");
+    server.send(200, "application/json", "{\"ok\":true,\"restart\":true}");
+    delay(400);
+    ESP.restart();
   });
   server.on("/wifi", HTTP_POST, []() {
     String ssid = server.arg("ssid");
