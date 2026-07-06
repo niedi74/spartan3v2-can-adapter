@@ -460,12 +460,34 @@ struct HubWifiProfile {
   char ssid[33];
   char pass[65];
   const char* label;
+  // [WIFI-STATIC] ipMode 0=DHCP (Default), 1=Static. Nur fuer STA-Profile 1/2 relevant.
+  // Motivation: Geraete ohne FritzBox-Reservierung (z.B. Tischtest-Emu) wandern sonst
+  // bei jedem Boot auf eine neue Lease-Adresse.
+  uint8_t ipMode;
+  char ip[16];
+  char gw[16];
+  char mask[16];
 };
 static HubWifiProfile g_hubWifiProfiles[3] = {
-  { "", "", "Bus" },        // Slot 0: AP-only, kein STA
-  { "", "", "Zuhause" },    // Slot 1: NVS p1_ssid/p1_pass
-  { "", "", "Handy"   },    // Slot 2: NVS p2_ssid/p2_pass
+  { "", "", "Bus",     0, "", "", "" },   // Slot 0: AP-only, kein STA
+  { "", "", "Zuhause", 0, "", "", "" },   // Slot 1: NVS p1_ssid/p1_pass
+  { "", "", "Handy",   0, "", "", "" },   // Slot 2: NVS p2_ssid/p2_pass
 };
+// [WIFI-STATIC] WiFi.config() muss VOR WiFi.begin() laufen. true = statisch angewendet.
+bool applyStaticIpIfNeeded(uint8_t profileIdx)
+{
+  if (profileIdx < 1 || profileIdx > 2) return false;
+  const HubWifiProfile &p = g_hubWifiProfiles[profileIdx];
+  if (p.ipMode != 1) return false;
+  IPAddress ip, gw, mask;
+  if (!ip.fromString(p.ip) || !gw.fromString(p.gw) || !mask.fromString(p.mask)) {
+    Serial.printf("WiFi Static: Profil %d ungueltige IP/GW/Mask - falle auf DHCP zurueck\n", profileIdx);
+    return false;
+  }
+  WiFi.config(ip, gw, mask);
+  Serial.printf("WiFi Static: Profil %d -> %s (GW %s, Mask %s)\n", profileIdx, p.ip, p.gw, p.mask);
+  return true;
+}
 uint8_t hubWifiProfile = 0;  // aktiv: 0=Bus, 1=Zuhause, 2=Handy
 bool haveSavedWifi = false;
 uint32_t homeWifiConnectStartedMs = 0;
@@ -795,6 +817,7 @@ void connectHomeWifiAligned(const char *ssid, const char *pass)
     WiFi.mode(WIFI_STA);   // SoftAP aus -> Funkeinheit frei fuer den Router-Kanal
     Serial.println("WLAN-Kanal:  AP fuer Connect kurz ausgesetzt (reine STA, ~5-20s)");
   }
+  applyStaticIpIfNeeded(hubWifiProfile);   // [WIFI-STATIC] vor WiFi.begin()!
   WiFi.begin(ssid, pass);
   homeWifiConnectStartedMs = millis();
 }

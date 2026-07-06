@@ -458,14 +458,29 @@ input:focus, select:focus { outline: none; border-color: #78ad43; }
 <input type="hidden" name="slot" value="1">
 <label>Zuhause SSID</label><input name="ssid" id="profSsid1">
 <label>Zuhause Passwort</label><input name="pass" type="password" id="profPass1">
+<label>IP-Vergabe</label>
+<select name="ipm" id="profIpm1" onchange="ipModeShow(1)"><option value="0">DHCP (automatisch)</option><option value="1">Statisch</option></select>
+<div id="profIpFields1" hidden>
+<label>IP-Adresse</label><input name="ip" id="profIp1" placeholder="192.168.0.80">
+<label>Gateway</label><input name="gw" id="profGw1" placeholder="192.168.0.1">
+<label>Subnetzmaske</label><input name="mask" id="profMask1" placeholder="255.255.255.0" value="255.255.255.0">
+</div>
 <button type="submit">Zuhause speichern &amp; verbinden</button>
 </form>
 <form id="credForm2" action="/wifi_profile_save" method="post" style="margin:6px 0" hidden>
 <input type="hidden" name="slot" value="2">
 <label>S24 Hotspot SSID</label><input name="ssid" id="profSsid2">
 <label>S24 Hotspot Passwort</label><input name="pass" type="password" id="profPass2">
+<label>IP-Vergabe</label>
+<select name="ipm" id="profIpm2" onchange="ipModeShow(2)"><option value="0">DHCP (automatisch)</option><option value="1">Statisch</option></select>
+<div id="profIpFields2" hidden>
+<label>IP-Adresse</label><input name="ip" id="profIp2" placeholder="192.168.0.80">
+<label>Gateway</label><input name="gw" id="profGw2" placeholder="192.168.0.1">
+<label>Subnetzmaske</label><input name="mask" id="profMask2" placeholder="255.255.255.0" value="255.255.255.0">
+</div>
 <button type="submit">S24 speichern &amp; verbinden</button>
 </form>
+<p class="hint">Statisch: nur sinnvoll, wenn IP/Gateway/Maske zum Zielnetz passen (sonst faellt der Hub beim naechsten Boot zurueck). FritzBox-Reservierung ist meist die robustere Wahl.</p>
 </details>
 
 <details style="margin:8px 0"><summary>Anderes Netz suchen (Scan)</summary>
@@ -689,6 +704,13 @@ function credShow() {
   if (f2) f2.hidden = (v !== '2');
 }
 credShow();
+// [WIFI-STATIC] Static-Felder nur zeigen, wenn im Select "Statisch" gewaehlt ist.
+function ipModeShow(slot) {
+  const sel = document.getElementById('profIpm' + slot);
+  const box = document.getElementById('profIpFields' + slot);
+  if (sel && box) box.hidden = (sel.value !== '1');
+}
+ipModeShow(1); ipModeShow(2);
 document.getElementById('tunePreset')?.addEventListener('change', (e) => {
   document.getElementById('tune_mac').value = e.target.value || '';
 });

@@ -63,6 +63,18 @@ void setupWebGui()
     String p2p = networkPreferences.getString("p2_pass", "");
     strlcpy(g_hubWifiProfiles[2].ssid, p2.c_str(), sizeof(g_hubWifiProfiles[2].ssid));
     strlcpy(g_hubWifiProfiles[2].pass, p2p.c_str(), sizeof(g_hubWifiProfiles[2].pass));
+    // [WIFI-STATIC] je Profil: ipm (0=DHCP/1=Static) + ip/gw/mask
+    for (uint8_t slot = 1; slot <= 2; slot++) {
+      char kIpm[8], kIp[8], kGw[8], kMask[8];
+      snprintf(kIpm, sizeof(kIpm), "p%u_ipm", slot);
+      snprintf(kIp, sizeof(kIp), "p%u_ip", slot);
+      snprintf(kGw, sizeof(kGw), "p%u_gw", slot);
+      snprintf(kMask, sizeof(kMask), "p%u_mask", slot);
+      g_hubWifiProfiles[slot].ipMode = networkPreferences.getUChar(kIpm, 0);
+      strlcpy(g_hubWifiProfiles[slot].ip, networkPreferences.getString(kIp, "").c_str(), sizeof(g_hubWifiProfiles[slot].ip));
+      strlcpy(g_hubWifiProfiles[slot].gw, networkPreferences.getString(kGw, "").c_str(), sizeof(g_hubWifiProfiles[slot].gw));
+      strlcpy(g_hubWifiProfiles[slot].mask, networkPreferences.getString(kMask, "255.255.255.0").c_str(), sizeof(g_hubWifiProfiles[slot].mask));
+    }
   }
   hubWifiProfile = networkPreferences.getUChar("wifi_prof", DEFAULT_WIFI_PROFILE);
   if (hubWifiProfile > 2) hubWifiProfile = 0;
@@ -89,6 +101,7 @@ void setupWebGui()
   if (busMode) {
     Serial.println("Home WiFi:   Bus-Modus, nur AP");
   } else if (haveSavedWifi && hubFeatWifi && !vehicleActive()) {   // [VARIANTE-A] Boot-Connect nur im Stand
+    applyStaticIpIfNeeded(hubWifiProfile);   // [WIFI-STATIC] vor WiFi.begin()!
     WiFi.begin(staSsid, staPass);
     homeWifiConnectStartedMs = millis();
     Serial.printf("Home WiFi:   Profil %d '%s' verbindet\n", hubWifiProfile, staSsid);
@@ -579,6 +592,30 @@ void setupWebGui()
     strlcpy(g_hubWifiProfiles[slot].ssid, ssid.c_str(), sizeof(g_hubWifiProfiles[slot].ssid));
     if (pass.length() > 0)
       strlcpy(g_hubWifiProfiles[slot].pass, pass.c_str(), sizeof(g_hubWifiProfiles[slot].pass));
+    // [WIFI-STATIC] ipm=0/1, bei Static muessen ip+gw gueltig sein, sonst DHCP behalten
+    const bool wantStatic = server.arg("ipm").toInt() == 1;
+    String ip = server.arg("ip"); ip.trim();
+    String gw = server.arg("gw"); gw.trim();
+    String mask = server.arg("mask"); mask.trim();
+    if (mask.length() == 0) mask = "255.255.255.0";
+    IPAddress chkIp, chkGw, chkMask;
+    const bool ipOk = wantStatic && chkIp.fromString(ip) && chkGw.fromString(gw) && chkMask.fromString(mask);
+    g_hubWifiProfiles[slot].ipMode = ipOk ? 1 : 0;
+    strlcpy(g_hubWifiProfiles[slot].ip, ip.c_str(), sizeof(g_hubWifiProfiles[slot].ip));
+    strlcpy(g_hubWifiProfiles[slot].gw, gw.c_str(), sizeof(g_hubWifiProfiles[slot].gw));
+    strlcpy(g_hubWifiProfiles[slot].mask, mask.c_str(), sizeof(g_hubWifiProfiles[slot].mask));
+    if (wantStatic && !ipOk) {
+      Serial.printf("WiFi Profil: %d Static-IP unvollstaendig/ungueltig - bleibt DHCP\n", slot);
+    }
+    char kIpm[8], kIp[8], kGw[8], kMask[8];
+    snprintf(kIpm, sizeof(kIpm), "p%d_ipm", slot);
+    snprintf(kIp, sizeof(kIp), "p%d_ip", slot);
+    snprintf(kGw, sizeof(kGw), "p%d_gw", slot);
+    snprintf(kMask, sizeof(kMask), "p%d_mask", slot);
+    networkPreferences.putUChar(kIpm, g_hubWifiProfiles[slot].ipMode);
+    networkPreferences.putString(kIp, ip);
+    networkPreferences.putString(kGw, gw);
+    networkPreferences.putString(kMask, mask);
     if (slot == 1) {
       networkPreferences.putString("p1_ssid", ssid);
       if (pass.length() > 0) networkPreferences.putString("p1_pass", pass);
@@ -586,7 +623,7 @@ void setupWebGui()
       networkPreferences.putString("p2_ssid", ssid);
       if (pass.length() > 0) networkPreferences.putString("p2_pass", pass);
     }
-    Serial.printf("WiFi Profil: %d gespeichert SSID='%s'\n", slot, ssid.c_str());
+    Serial.printf("WiFi Profil: %d gespeichert SSID='%s' ipMode=%u\n", slot, ssid.c_str(), g_hubWifiProfiles[slot].ipMode);
     // Speichern aktiviert das Profil gleich + verbindet (kein extra Modus-Tipp noetig).
     if (strlen(g_hubWifiProfiles[slot].ssid) > 0 && hubFeatWifi) {
       hubWifiProfile = (uint8_t)slot;
