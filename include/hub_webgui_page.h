@@ -361,7 +361,7 @@ input:focus, select:focus { outline: none; border-color: #78ad43; }
 <form action="/log_columns" method="post">
 <label><input type="checkbox" name="spartan" id="colSpartan" value="1"> Spartan Lambda/Temp/Status</label>
 <label><input type="checkbox" name="tune" id="colTune" value="1"> 123 RPM/ADV/MAP/Volt</label>
-<label><input type="checkbox" name="speed" id="colSpeed" value="1"> Speed/Reed</label>
+<label><input type="checkbox" name="speed" id="colSpeed" value="1"> Speed/Reed (+ km gesamt/Trip)</label>
 <label><input type="checkbox" name="heater" id="colHeater" value="1"> Heater Analog</label>
 <label><input type="checkbox" name="hours" id="colHours" value="1"> Betriebsstunden</label>
 <button type="submit">Spalten speichern</button>

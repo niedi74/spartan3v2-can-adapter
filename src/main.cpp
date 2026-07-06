@@ -1602,7 +1602,7 @@ String logHeader()
   String header = "ms;epoch;time";
   if (logCol(kLogColSpartan)) header += ";source;lambda_valid;lambda;spartan_temp_c;spartan_status";
   if (logCol(kLogColTune)) header += ";rpm;advance;map;tune_volt;tune_temp;tune_amp;tune_mode;tune_offset";
-  if (logCol(kLogColSpeed)) header += ";speed_kmh;speed_hz;speed_pulses";
+  if (logCol(kLogColSpeed)) header += ";speed_kmh;speed_hz;speed_pulses;odo_km;trip_km";
   if (logCol(kLogColHeater)) header += ";heater_v";
   if (logCol(kLogColHours)) header += ";device_h;engine_h;sensor_h";
   return header;
@@ -1971,6 +1971,11 @@ void appendLiveCsv()
 #else
     f.print(";0.0;0.00;0");
 #endif
+    // [ODOMETER] Gesamt-/Teilstrecke mitloggen -- bisher nur im Status-JSON sichtbar,
+    // Kurven-/Fahrtvergleiche ueber die CSV brauchen auch die km-Referenz.
+    f.printf(";%.3f;%.3f",
+             static_cast<double>(odoMm) / 1000000.0,
+             static_cast<double>(tripMm) / 1000000.0);
   }
   if (logCol(kLogColHeater)) {
     f.printf(";%.2f", heaterStatusVolts);
