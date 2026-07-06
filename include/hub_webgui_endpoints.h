@@ -403,6 +403,26 @@ void setupWebGui()
     }
     server.send(200, "application/json", "{\"ok\":true}");
   });
+  // [TIME-DISPLAY-RTC] Fallback-Zeitquelle: Cockpit-Display hat einen batteriegepufferten
+  // RTC-Chip und pusht seine Zeit periodisch her. Nur uebernehmen wenn der Hub noch KEINE
+  // gueltige Zeit hat (kein Heimnetz -> kein NTP) -- NTP bleibt immer die bessere Quelle
+  // und wird nie ueberschrieben. epoch=0/unplausibel wird ignoriert statt die Uhr zu zerschiessen.
+  server.on("/api/time_sync", HTTP_POST, []() {
+    if (systemTimeValid()) {
+      server.send(200, "application/json", "{\"ok\":true,\"applied\":false,\"reason\":\"already_synced\"}");
+      return;
+    }
+    const long epoch = server.arg("epoch").toInt();
+    if (epoch < 1700000000L || epoch > 4000000000L) {
+      server.send(400, "application/json", "{\"ok\":false,\"error\":\"epoch unplausibel\"}");
+      return;
+    }
+    struct timeval tv = { static_cast<time_t>(epoch), 0 };
+    settimeofday(&tv, nullptr);
+    logHubEvent("time_sync", "display_rtc");
+    Serial.printf("Time:        von Display-RTC uebernommen (epoch=%ld)\n", epoch);
+    server.send(200, "application/json", "{\"ok\":true,\"applied\":true}");
+  });
   server.on("/log_columns", HTTP_POST, []() {
     uint16_t mask = 0;
     if (server.hasArg("spartan")) mask |= kLogColSpartan;
