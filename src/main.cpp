@@ -1017,6 +1017,121 @@ void displayLine(uint8_t row, const String &text)
 #endif
 }
 
+// ---------------------------------------------------------------------------
+// DS3231 RTC am dedizierten I2C-Bus GPIO4=SDA / GPIO5=SCL.
+// Batteriegepufferte Zeitquelle fuer den sonst RTC-losen Hub: beim Boot ->
+// Systemzeit; das Display zieht die Zeit dann via /api/status (time_epoch).
+// Es wird UTC in den Chip geschrieben/gelesen (System laeuft auf UTC-Epoch,
+// Zeitzone nur zur Anzeige).
+// ---------------------------------------------------------------------------
+static constexpr uint8_t kRtcSdaPin = 4;
+static constexpr uint8_t kRtcSclPin = 5;
+static constexpr uint8_t kRtcAddr   = 0x68;
+bool rtcPresent = false;               // DS3231 auf dem Bus gefunden
+bool rtcTimeValid = false;             // RTC hielt/haelt gueltige Zeit (OSF=0)
+volatile bool rtcWritePending = false; // aus Callback-Kontext angefordert (NTP)
+
+static uint8_t rtcBcd2Dec(uint8_t v) { return (uint8_t)((v >> 4) * 10 + (v & 0x0F)); }
+static uint8_t rtcDec2Bcd(uint8_t v) { return (uint8_t)(((v / 10) << 4) | (v % 10)); }
+
+// UTC-tagegenaue Umrechnung ohne timegm-Abhaengigkeit (Howard Hinnant)
+static long rtcDaysFromCivil(int y, unsigned m, unsigned d)
+{
+  y -= m <= 2;
+  const long era = (y >= 0 ? y : y - 399) / 400;
+  const unsigned yoe = (unsigned)(y - era * 400);
+  const unsigned doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+  const unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+  return era * 146097 + (long)doe - 719468;
+}
+
+// Liest DS3231-Zeit als UTC-Epoch. false wenn nicht da / OSF gesetzt / unplausibel.
+bool rtcReadEpoch(time_t *out, bool *osfOut)
+{
+  Wire.beginTransmission(kRtcAddr);
+  if (Wire.endTransmission() != 0) return false;
+  Wire.beginTransmission(kRtcAddr); Wire.write((uint8_t)0x0F); Wire.endTransmission(false);
+  Wire.requestFrom(kRtcAddr, (uint8_t)1);
+  const uint8_t st = Wire.available() ? Wire.read() : 0x80;
+  const bool osf = (st & 0x80) != 0;
+  if (osfOut) *osfOut = osf;
+  Wire.beginTransmission(kRtcAddr); Wire.write((uint8_t)0x00); Wire.endTransmission(false);
+  Wire.requestFrom(kRtcAddr, (uint8_t)7);
+  uint8_t r[7];
+  for (uint8_t i = 0; i < 7; i++) r[i] = Wire.available() ? Wire.read() : 0;
+  if (osf) return false;
+  const int sec  = rtcBcd2Dec(r[0] & 0x7F);
+  const int minu = rtcBcd2Dec(r[1] & 0x7F);
+  const int hour = rtcBcd2Dec(r[2] & 0x3F);
+  const int mday = rtcBcd2Dec(r[4] & 0x3F);
+  const int mon  = rtcBcd2Dec(r[5] & 0x1F);
+  const int year = 2000 + rtcBcd2Dec(r[6]);
+  if (year < 2024 || mon < 1 || mon > 12 || mday < 1 || mday > 31) return false;
+  const long days = rtcDaysFromCivil(year, (unsigned)mon, (unsigned)mday);
+  const time_t epoch = (time_t)days * 86400 + hour * 3600 + minu * 60 + sec;
+  if (out) *out = epoch;
+  return true;
+}
+
+// Schreibt UTC-Epoch in den DS3231 und loescht das OSF-Bit.
+bool rtcWriteEpoch(time_t epoch)
+{
+  struct tm tmv;
+  gmtime_r(&epoch, &tmv);
+  Wire.beginTransmission(kRtcAddr);
+  Wire.write((uint8_t)0x00);
+  Wire.write(rtcDec2Bcd((uint8_t)tmv.tm_sec));
+  Wire.write(rtcDec2Bcd((uint8_t)tmv.tm_min));
+  Wire.write(rtcDec2Bcd((uint8_t)tmv.tm_hour));            // 24h-Format
+  Wire.write(rtcDec2Bcd((uint8_t)(tmv.tm_wday ? tmv.tm_wday : 7)));
+  Wire.write(rtcDec2Bcd((uint8_t)tmv.tm_mday));
+  Wire.write(rtcDec2Bcd((uint8_t)(tmv.tm_mon + 1)));
+  Wire.write(rtcDec2Bcd((uint8_t)((tmv.tm_year + 1900) % 100)));
+  if (Wire.endTransmission() != 0) return false;
+  Wire.beginTransmission(kRtcAddr); Wire.write((uint8_t)0x0F); Wire.endTransmission(false);
+  Wire.requestFrom(kRtcAddr, (uint8_t)1);
+  uint8_t st = Wire.available() ? Wire.read() : 0;
+  st &= ~0x80;
+  Wire.beginTransmission(kRtcAddr); Wire.write((uint8_t)0x0F); Wire.write(st);
+  return Wire.endTransmission() == 0;
+}
+
+// Systemzeit -> RTC zurueckschreiben (nach NTP/Display-Sync). Nur wenn Zeit gueltig.
+void rtcSyncFromSystem()
+{
+  if (!rtcPresent) return;
+  const time_t now = time(nullptr);
+  if (now < 1700000000L) return;
+  if (rtcWriteEpoch(now)) {
+    rtcTimeValid = true;
+    Serial.println("RTC:         DS3231 aus Systemzeit aktualisiert");
+  }
+}
+
+// Boot: dedizierten I2C-Bus starten, RTC lesen, Systemzeit setzen wenn gueltig.
+void rtcSetup()
+{
+  Wire.begin(kRtcSdaPin, kRtcSclPin);
+  Wire.setClock(100000);
+  Wire.beginTransmission(kRtcAddr);
+  rtcPresent = (Wire.endTransmission() == 0);
+  if (!rtcPresent) {
+    Serial.printf("RTC:         DS3231 nicht gefunden (SDA=%u/SCL=%u)\n", kRtcSdaPin, kRtcSclPin);
+    return;
+  }
+  time_t epoch = 0;
+  bool osf = true;
+  if (rtcReadEpoch(&epoch, &osf)) {
+    struct timeval tv = { epoch, 0 };
+    settimeofday(&tv, nullptr);
+    rtcTimeValid = true;
+    ntpSynced = true;  // Zeit gueltig -> /api/status liefert time_epoch, Display kann ziehen
+    Serial.printf("RTC:         DS3231 -> Systemzeit gesetzt (epoch=%ld UTC)\n", (long)epoch);
+  } else {
+    Serial.printf("RTC:         DS3231 da, Zeit ungueltig (OSF=%d) -> per NTP/Display setzen\n", osf ? 1 : 0);
+  }
+}
+
 void setupDisplay()
 {
 #ifdef USE_M5_DISPLAY
@@ -1028,7 +1143,7 @@ void setupDisplay()
   M5.Display.setTextSize(3);
   M5.Display.clear(BLACK);
 #else
-  Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
+  rtcSetup();  // DS3231 auf GPIO4/5: Bus starten + Systemzeit aus RTC setzen
   Wire.beginTransmission(LCD_I2C_ADDR);
   const uint8_t lcdProbe = Wire.endTransmission();
   if (lcdProbe != 0) {
@@ -1646,6 +1761,7 @@ void onNtpSyncNotification(struct timeval *tv)
   lastNtpSyncMs = millis();
   ntpSynced = true;
   ntpResyncRequested = false;
+  rtcWritePending = true;  // frische NTP-Zeit in den DS3231 zurueckschreiben (im Loop)
   Serial.println("Time:        NTP synchronized");
 }
 
@@ -1703,6 +1819,10 @@ void saveTimezone(uint8_t idx)
 
 void updateNtp(uint32_t now)
 {
+  if (rtcWritePending && systemTimeValid()) {
+    rtcWritePending = false;
+    rtcSyncFromSystem();  // I2C nur aus Loop-Kontext, nicht aus dem SNTP-Callback
+  }
   if (WiFi.status() != WL_CONNECTED) return;
   startNtpIfNeeded();
   if (!ntpStarted) return;
