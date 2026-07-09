@@ -475,9 +475,33 @@ void setupWebGui()
     }
     struct timeval tv = { static_cast<time_t>(epoch), 0 };
     settimeofday(&tv, nullptr);
+    ntpSynced = true;        // Zeit gueltig -> /api/status liefert time_epoch
+    rtcSyncFromSystem();     // in den DS3231 zurueckschreiben (bootstrappt OSF)
     logHubEvent("time_sync", "display_rtc");
     Serial.printf("Time:        von Display-RTC uebernommen (epoch=%ld)\n", epoch);
     server.send(200, "application/json", "{\"ok\":true,\"applied\":true}");
+  });
+  // Bootstrap/Manuell: DS3231 unbedingt auf uebergebene UTC-Epoch setzen und
+  // Systemzeit uebernehmen (unabhaengig vom already_synced-Zustand).
+  server.on("/api/rtc/set", HTTP_POST, []() {
+    const long epoch = server.arg("epoch").toInt();
+    if (epoch < 1700000000L || epoch > 4000000000L) {
+      server.send(400, "application/json", "{\"ok\":false,\"error\":\"epoch unplausibel\"}");
+      return;
+    }
+    struct timeval tv = { static_cast<time_t>(epoch), 0 };
+    settimeofday(&tv, nullptr);
+    ntpSynced = true;
+    const bool ok = rtcPresent && rtcWriteEpoch(static_cast<time_t>(epoch));
+    if (ok) rtcTimeValid = true;
+    logHubEvent("rtc_set", ok ? "ok" : "no_rtc");
+    Serial.printf("RTC:         manuell gesetzt (epoch=%ld, rtc=%s)\n", epoch, ok ? "ok" : "fehlt");
+    String resp = "{\"ok\":";
+    resp += ok ? "true" : "false";
+    resp += ",\"rtc_present\":";
+    resp += rtcPresent ? "true" : "false";
+    resp += "}";
+    server.send(200, "application/json", resp);
   });
   server.on("/log_columns", HTTP_POST, []() {
     uint16_t mask = 0;

@@ -221,6 +221,10 @@ String statusJson()
   json += "\"";
   json += ",\"ntp_synced\":";
   json += ntpSynced ? "true" : "false";
+  json += ",\"rtc_present\":";
+  json += rtcPresent ? "true" : "false";
+  json += ",\"rtc_valid\":";
+  json += rtcTimeValid ? "true" : "false";
   if (ntpSynced && systemTimeValid()) {
     json += ",\"time_epoch\":";
     json += String(static_cast<unsigned long>(time(nullptr)));
