@@ -11,7 +11,8 @@ static const char kHubIndexHtml[] PROGMEM = R"HTML(
 <title>Spartan 3 v2 Setup</title>
 <style>
 :root { color-scheme: dark; font-family: Arial, sans-serif; }
-body { margin: 0; background: #0b1210; color: #e6ede8; font-size: 16px; }
+html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+body { margin: 0; background: #0b1210; color: #e6ede8; font-size: 16px; -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
 main { max-width: 760px; margin: auto; padding: 18px 14px 30px; }
 h1 { font-size: 1.22rem; color: #9ed85b; margin: 4px 0 14px; }
 .card { padding: 16px; border: 1px solid #26372e; border-radius: 10px; background: #101a15; }
