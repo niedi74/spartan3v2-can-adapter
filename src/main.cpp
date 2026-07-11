@@ -485,19 +485,25 @@ static HubWifiProfile g_hubWifiProfiles[3] = {
   { "", "", "Handy",   0, "", "", "" },   // Slot 2: NVS p2_ssid/p2_pass
 };
 // [WIFI-STATIC] WiFi.config() muss VOR WiFi.begin() laufen. true = statisch angewendet.
+// Setzt bei DHCP/ungueltiger Static-Config explizit auf DHCP zurueck -- sonst haengt eine
+// vorherige statische IP (von einem frueheren Profilwechsel in derselben Boot-Session) am
+// WiFi-Treiber weiter, auch wenn das neue Zielprofil eigentlich DHCP will.
 bool applyStaticIpIfNeeded(uint8_t profileIdx)
 {
-  if (profileIdx < 1 || profileIdx > 2) return false;
-  const HubWifiProfile &p = g_hubWifiProfiles[profileIdx];
-  if (p.ipMode != 1) return false;
-  IPAddress ip, gw, mask;
-  if (!ip.fromString(p.ip) || !gw.fromString(p.gw) || !mask.fromString(p.mask)) {
-    Serial.printf("WiFi Static: Profil %d ungueltige IP/GW/Mask - falle auf DHCP zurueck\n", profileIdx);
-    return false;
+  if (profileIdx >= 1 && profileIdx <= 2) {
+    const HubWifiProfile &p = g_hubWifiProfiles[profileIdx];
+    if (p.ipMode == 1) {
+      IPAddress ip, gw, mask;
+      if (ip.fromString(p.ip) && gw.fromString(p.gw) && mask.fromString(p.mask)) {
+        WiFi.config(ip, gw, mask);
+        Serial.printf("WiFi Static: Profil %d -> %s (GW %s, Mask %s)\n", profileIdx, p.ip, p.gw, p.mask);
+        return true;
+      }
+      Serial.printf("WiFi Static: Profil %d ungueltige IP/GW/Mask - falle auf DHCP zurueck\n", profileIdx);
+    }
   }
-  WiFi.config(ip, gw, mask);
-  Serial.printf("WiFi Static: Profil %d -> %s (GW %s, Mask %s)\n", profileIdx, p.ip, p.gw, p.mask);
-  return true;
+  WiFi.config(INADDR_NONE, INADDR_NONE, INADDR_NONE);   // DHCP-Reset
+  return false;
 }
 
 // [WIFI-MAC-OVR] Manuelle STA-MAC statt Werks-eFuse. Hintergrund: billige ESP32-Klone
@@ -567,11 +573,13 @@ const char *kNtpServerPrimary = "pool.ntp.org";
 const char *kNtpServerSecondary = "time.nist.gov";
 const char *kNtpServerTertiary = "de.pool.ntp.org";
 constexpr uint32_t kNtpResyncIntervalMs = 15UL * 60UL * 1000UL;
+constexpr uint32_t kNtpResyncTimeoutMs = 30UL * 1000UL;  // Sperre gegen sntp_restart()-Spam
 uint8_t timezoneIdx = kTimezoneDefault;
 bool ntpStarted = false;
 bool ntpSynced = false;
 bool ntpResyncRequested = false;
 uint32_t lastNtpSyncMs = 0;
+uint32_t ntpResyncFiredMs = 0;
 const char *kLogFile = "/drive.csv";
 const char *kOldLogFile = "/drive_old.csv";
 // [KURVE] bis zu 3 hinterlegte 123-Zuendkurven (.123-XML) als Slots.
@@ -1027,9 +1035,17 @@ void displayLine(uint8_t row, const String &text)
 static constexpr uint8_t kRtcSdaPin = 4;
 static constexpr uint8_t kRtcSclPin = 5;
 static constexpr uint8_t kRtcAddr   = 0x68;
+// [ZEIT-PLAUSI] Eine gemeinsame Untergrenze fuer "ist das eine echte Zeit" ueberall
+// (systemTimeValid, /api/time_sync, /api/rtc/set, rtcReadEpoch-Jahr) -- vorher hatte
+// rtcReadEpoch() mit "Jahr < 2024" eine striktere Schwelle als der Rest (>1700000000,
+// 2023-11-14), sodass ein via Endpoint akzeptierter 2023er-Epoch in den DS3231
+// geschrieben wurde, aber beim naechsten Boot als "ungueltig" verworfen wurde.
+static constexpr time_t kMinValidEpoch = 1735689600L;  // 2025-01-01 00:00:00 UTC
 bool rtcPresent = false;               // DS3231 auf dem Bus gefunden
 bool rtcTimeValid = false;             // RTC hielt/haelt gueltige Zeit (OSF=0)
 volatile bool rtcWritePending = false; // aus Callback-Kontext angefordert (NTP)
+uint32_t rtcWriteRetryMs = 0;
+constexpr uint32_t kRtcWriteRetryIntervalMs = 10000;  // Backoff bei I2C-Fehlschlag
 
 static uint8_t rtcBcd2Dec(uint8_t v) { return (uint8_t)((v >> 4) * 10 + (v & 0x0F)); }
 static uint8_t rtcDec2Bcd(uint8_t v) { return (uint8_t)(((v / 10) << 4) | (v % 10)); }
@@ -1051,14 +1067,14 @@ bool rtcReadEpoch(time_t *out, bool *osfOut)
   Wire.beginTransmission(kRtcAddr);
   if (Wire.endTransmission() != 0) return false;
   Wire.beginTransmission(kRtcAddr); Wire.write((uint8_t)0x0F); Wire.endTransmission(false);
-  Wire.requestFrom(kRtcAddr, (uint8_t)1);
-  const uint8_t st = Wire.available() ? Wire.read() : 0x80;
+  if (Wire.requestFrom(kRtcAddr, (uint8_t)1) != 1) return false;  // I2C-Glitch statt 0 annehmen
+  const uint8_t st = Wire.read();
   const bool osf = (st & 0x80) != 0;
   if (osfOut) *osfOut = osf;
   Wire.beginTransmission(kRtcAddr); Wire.write((uint8_t)0x00); Wire.endTransmission(false);
-  Wire.requestFrom(kRtcAddr, (uint8_t)7);
+  if (Wire.requestFrom(kRtcAddr, (uint8_t)7) != 7) return false;
   uint8_t r[7];
-  for (uint8_t i = 0; i < 7; i++) r[i] = Wire.available() ? Wire.read() : 0;
+  for (uint8_t i = 0; i < 7; i++) r[i] = Wire.read();
   if (osf) return false;
   const int sec  = rtcBcd2Dec(r[0] & 0x7F);
   const int minu = rtcBcd2Dec(r[1] & 0x7F);
@@ -1066,9 +1082,13 @@ bool rtcReadEpoch(time_t *out, bool *osfOut)
   const int mday = rtcBcd2Dec(r[4] & 0x3F);
   const int mon  = rtcBcd2Dec(r[5] & 0x1F);
   const int year = 2000 + rtcBcd2Dec(r[6]);
-  if (year < 2024 || mon < 1 || mon > 12 || mday < 1 || mday > 31) return false;
+  // Datum UND Uhrzeit plausibilisieren -- ein einzelner I2C-Glitch (Unterspannung,
+  // Zuendung startet) soll nicht unbemerkt eine falsche Zeit setzen.
+  if (sec > 59 || minu > 59 || hour > 23) return false;
+  if (mon < 1 || mon > 12 || mday < 1 || mday > 31) return false;  // Jahr: s.u. via epoch/kMinValidEpoch
   const long days = rtcDaysFromCivil(year, (unsigned)mon, (unsigned)mday);
   const time_t epoch = (time_t)days * 86400 + hour * 3600 + minu * 60 + sec;
+  if (epoch < kMinValidEpoch) return false;
   if (out) *out = epoch;
   return true;
 }
@@ -1089,23 +1109,28 @@ bool rtcWriteEpoch(time_t epoch)
   Wire.write(rtcDec2Bcd((uint8_t)((tmv.tm_year + 1900) % 100)));
   if (Wire.endTransmission() != 0) return false;
   Wire.beginTransmission(kRtcAddr); Wire.write((uint8_t)0x0F); Wire.endTransmission(false);
-  Wire.requestFrom(kRtcAddr, (uint8_t)1);
-  uint8_t st = Wire.available() ? Wire.read() : 0;
+  if (Wire.requestFrom(kRtcAddr, (uint8_t)1) != 1) return false;  // Kurz-Read nicht als "st=0" annehmen (loescht sonst blind Alarm/32kHz-Bits)
+  uint8_t st = Wire.read();
   st &= ~0x80;
   Wire.beginTransmission(kRtcAddr); Wire.write((uint8_t)0x0F); Wire.write(st);
   return Wire.endTransmission() == 0;
 }
 
 // Systemzeit -> RTC zurueckschreiben (nach NTP/Display-Sync). Nur wenn Zeit gueltig.
-void rtcSyncFromSystem()
+// Rueckgabewert: Aufrufer (updateNtp) nutzt ihn, um bei I2C-Fehlschlag (Anlasser,
+// Unterspannung) NICHT rtcWritePending zu loeschen, sondern spaeter erneut zu versuchen.
+bool rtcSyncFromSystem()
 {
-  if (!rtcPresent) return;
+  if (!rtcPresent) return false;
   const time_t now = time(nullptr);
-  if (now < 1700000000L) return;
+  if (now < kMinValidEpoch) return false;
   if (rtcWriteEpoch(now)) {
     rtcTimeValid = true;
     Serial.println("RTC:         DS3231 aus Systemzeit aktualisiert");
+    return true;
   }
+  Serial.println("RTC:         Schreiben fehlgeschlagen (I2C) -- naechster Versuch folgt");
+  return false;
 }
 
 // Boot: dedizierten I2C-Bus starten, RTC lesen, Systemzeit setzen wenn gueltig.
@@ -1510,6 +1535,7 @@ void recordWifiHttpPoller()
     deviceId = server.arg("client");
   }
   deviceId.trim();
+  if (deviceId.length() > 96) deviceId = deviceId.substring(0, 96);
 
   String userAgent;
   if (server.hasHeader("User-Agent")) userAgent = server.header("User-Agent");
@@ -1761,6 +1787,7 @@ void onNtpSyncNotification(struct timeval *tv)
   lastNtpSyncMs = millis();
   ntpSynced = true;
   ntpResyncRequested = false;
+  ntpResyncFiredMs = 0;
   rtcWritePending = true;  // frische NTP-Zeit in den DS3231 zurueckschreiben (im Loop)
   Serial.println("Time:        NTP synchronized");
 }
@@ -1819,9 +1846,13 @@ void saveTimezone(uint8_t idx)
 
 void updateNtp(uint32_t now)
 {
-  if (rtcWritePending && systemTimeValid()) {
-    rtcWritePending = false;
-    rtcSyncFromSystem();  // I2C nur aus Loop-Kontext, nicht aus dem SNTP-Callback
+  if (rtcWritePending && systemTimeValid() &&
+      (rtcWriteRetryMs == 0 || (now - rtcWriteRetryMs) >= kRtcWriteRetryIntervalMs)) {
+    // I2C nur aus Loop-Kontext, nicht aus dem SNTP-Callback. Pending bleibt bei
+    // Fehlschlag stehen (Backoff-Retry statt Busy-Spam) statt den fehlgeschlagenen
+    // Schreibversuch stillschweigend fallenzulassen.
+    if (rtcSyncFromSystem()) { rtcWritePending = false; rtcWriteRetryMs = 0; }
+    else { rtcWriteRetryMs = now; }
   }
   if (WiFi.status() != WL_CONNECTED) return;
   startNtpIfNeeded();
@@ -1830,18 +1861,24 @@ void updateNtp(uint32_t now)
   if (systemTimeValid()) {
     if (!ntpSynced) ntpSynced = true;
     if (lastNtpSyncMs == 0) lastNtpSyncMs = now;
-    const bool resyncDue = lastNtpSyncMs != 0 && (now - lastNtpSyncMs) >= kNtpResyncIntervalMs;
-    if ((ntpResyncRequested || resyncDue) && esp_sntp_enabled()) {
-      sntp_restart();
-      if (ntpResyncRequested) Serial.println("Time:        NTP resync in progress");
-    }
+  }
+  // Edge-getriggert: sntp_restart() reisst laufende Requests ab, darf also
+  // nicht bei jedem Loop-Tick erneut feuern (sonst kommt nie eine Antwort
+  // durch). Der periodische Resync laeuft ohnehin intern via
+  // esp_sntp_set_sync_interval(); hier nur der explizite /ntp_sync-Wunsch,
+  // einmalig, mit Nachlauf-Sperre bis eine Antwort kam oder Timeout.
+  if (ntpResyncRequested && esp_sntp_enabled() &&
+      (ntpResyncFiredMs == 0 || (now - ntpResyncFiredMs) >= kNtpResyncTimeoutMs)) {
+    sntp_restart();
+    ntpResyncFiredMs = now;
+    Serial.println("Time:        NTP resync in progress");
   }
 }
 
 bool systemTimeValid()
 {
   time_t now = time(nullptr);
-  return now > 1700000000;
+  return now > kMinValidEpoch;
 }
 
 void logHubEvent(const char *type, const char *detail)

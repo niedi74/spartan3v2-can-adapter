@@ -27,8 +27,16 @@ void setupCan()
   twai_timing_config_t timing = canTimingFromKbps(canBitrateKbps);
   twai_filter_config_t filter = TWAI_FILTER_CONFIG_ACCEPT_ALL();
 
-  if (twai_driver_install(&general, &timing, &filter) != ESP_OK || twai_start() != ESP_OK) {
-    Serial.println("CAN start failed");
+  if (twai_driver_install(&general, &timing, &filter) != ESP_OK) {
+    Serial.println("CAN start failed (install)");
+    return;
+  }
+  if (twai_start() != ESP_OK) {
+    // Treiber ist installiert, aber nicht gestartet -- ohne Uninstall wuerde
+    // ein erneuter setupCan()-Versuch (z.B. nach Pin-Aenderung) auf einen
+    // bereits belegten Treiber treffen statt sauber neu zu installieren.
+    Serial.println("CAN start failed (start) -- Treiber wird deinstalliert");
+    twai_driver_uninstall();
     return;
   }
 
