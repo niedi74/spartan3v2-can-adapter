@@ -528,19 +528,25 @@ static HubWifiProfile g_hubWifiProfiles[3] = {
   { "", "", "Handy",   0, "", "", "" },   // Slot 2: NVS p2_ssid/p2_pass
 };
 // [WIFI-STATIC] WiFi.config() muss VOR WiFi.begin() laufen. true = statisch angewendet.
+// Setzt bei DHCP/ungueltiger Static-Config explizit auf DHCP zurueck -- sonst haengt eine
+// vorherige statische IP (von einem frueheren Profilwechsel in derselben Boot-Session) am
+// WiFi-Treiber weiter, auch wenn das neue Zielprofil eigentlich DHCP will.
 bool applyStaticIpIfNeeded(uint8_t profileIdx)
 {
-  if (profileIdx < 1 || profileIdx > 2) return false;
-  const HubWifiProfile &p = g_hubWifiProfiles[profileIdx];
-  if (p.ipMode != 1) return false;
-  IPAddress ip, gw, mask;
-  if (!ip.fromString(p.ip) || !gw.fromString(p.gw) || !mask.fromString(p.mask)) {
-    Serial.printf("WiFi Static: Profil %d ungueltige IP/GW/Mask - falle auf DHCP zurueck\n", profileIdx);
-    return false;
+  if (profileIdx >= 1 && profileIdx <= 2) {
+    const HubWifiProfile &p = g_hubWifiProfiles[profileIdx];
+    if (p.ipMode == 1) {
+      IPAddress ip, gw, mask;
+      if (ip.fromString(p.ip) && gw.fromString(p.gw) && mask.fromString(p.mask)) {
+        WiFi.config(ip, gw, mask);
+        Serial.printf("WiFi Static: Profil %d -> %s (GW %s, Mask %s)\n", profileIdx, p.ip, p.gw, p.mask);
+        return true;
+      }
+      Serial.printf("WiFi Static: Profil %d ungueltige IP/GW/Mask - falle auf DHCP zurueck\n", profileIdx);
+    }
   }
-  WiFi.config(ip, gw, mask);
-  Serial.printf("WiFi Static: Profil %d -> %s (GW %s, Mask %s)\n", profileIdx, p.ip, p.gw, p.mask);
-  return true;
+  WiFi.config(INADDR_NONE, INADDR_NONE, INADDR_NONE);   // DHCP-Reset
+  return false;
 }
 
 // [WIFI-MAC-OVR] Manuelle STA-MAC statt Werks-eFuse (Verdacht auf nicht-eindeutige
@@ -3561,13 +3567,9 @@ void startEmu123() {
   Serial.println("EMU123:      AN — vollstaendige 123TUNE+ Emulation (NUS+DIS+BAT+TxPwr)");
 }
 
-void stopEmu123() {
-  if (!emu123Started) return;
-  NimBLEDevice::getAdvertising()->stop();
-  emu123Started = false;
-  emu123Tx = nullptr;
-  Serial.println("EMU123:      AUS");
-}
+// [DEAD-CODE] stopEmu123() entfernt: der emu123-Toggle schaltet bewusst per Reboot
+// um (siehe "Emulator <-> Central sauber per Reboot umschalten" im /hub_feat-Handler),
+// ein Laufzeit-Stop-Pfad existierte nie und haette den Sender-Task nicht sauber beendet.
 
 void updateEmu123() {
   if (!emu123Started) { startEmu123(); return; }
