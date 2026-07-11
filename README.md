@@ -1,6 +1,6 @@
 # Spartan 3 v2 Motorraum Display
 
-> **Entwicklungsstand:** [`docs/STATUS_2026-06-13.md`](docs/STATUS_2026-06-13.md) · Branch: **`main`**
+> **Entwicklungsstand:** siehe [Releases](https://github.com/niedi74/spartan3v2-can-adapter/releases) · Branch: **`main`**
 
 Display firmware for a dedicated ESP32 Dev adapter board connected to a 14Point7 Spartan 3 v2. The primary measurement input is CAN. UART is available for Spartan configuration, and the analog output is prepared as an optional fallback.
 
@@ -18,7 +18,7 @@ Display firmware for a dedicated ESP32 Dev adapter board connected to a 14Point7
 - Current bring-up mode: simulated Spartan readings until the CAN module arrives
 - Setup Web GUI: ESP32 access point `Spartan3-Setup`, password `lambda123`
 - Road hotspot default: `Android-AP1` / `REDACTED` (2.4 GHz)
-- Cockpit link: **ESP-NOW broadcast** to M5/Waveshare (BLE display server disabled in `motorraum` build)
+- Cockpit link: **HTTP poll** — cockpit displays/apps poll `GET /api/status` (JSON) over WiFi (ESP-NOW cockpit link was removed)
 - BLE: 123TUNE+ central + optional BM6; setup name `Spartan3-Hub` for diagnostics only
 
 ### M5
@@ -228,18 +228,18 @@ Two-tab layout: **Live** and **Setup**.
 | AP address | `http://192.168.4.1/` |
 | Road hotspot | `Android-AP1` / `REDACTED` |
 
-## Time master (until RTC battery)
+## Time master
 
-Until a backup RTC battery is fitted on the hub board, wall-clock time comes from NTP over the phone hotspot:
+The hub carries a battery-backed **DS3231 RTC** (I2C, GPIO4=SDA/GPIO5=SCL) as its own always-available time source — no phone/NTP needed on the road:
 
-1. Phone joins hub WiFi AP (`Spartan3-Setup`) or hub STA joins phone AP (`Android-AP1`)
-2. Hub runs SNTP and becomes the **time master**
-3. Cockpit displays (Waveshare 2.8, optional M5) poll `GET /api/status` and copy `time_epoch` when `ntp_synced:true`
+1. On boot, the hub reads the DS3231 and sets its system clock (UTC) immediately, independent of WiFi.
+2. If NTP becomes available (hub joins a WiFi network with internet), it resyncs and writes the fresh time back into the DS3231.
+3. Cockpit displays/apps poll `GET /api/status` and copy `time_epoch` whenever `time_valid:true` — the hub is always the time master, the RTC just makes that available without needing a phone hotspot.
+4. Fallback: a cockpit display with its own battery-backed RTC can push a bootstrap time via `POST /api/rtc/set` (`epoch=<unix seconds>`) if the hub's own RTC is ever missing/uninitialized.
 
-`/api/status` fields: `ntp_synced`, `time_epoch` (Unix seconds, only when synced), `ntp_time` (ISO-like local string), `time_valid`, `timezone`.
+`/api/status` fields: `time_valid`, `time_epoch` (Unix seconds), `time_text`/`ntp_time` (local string), `ntp_synced` (true once NTP has confirmed the time at least once), `rtc_present`, `rtc_valid`, `timezone`.
 
-Future: hub RTC battery holds time across power loss; displays may still follow hub time when linked.
-| JSON endpoint | `/state` (also `/api/status`) |
+JSON endpoint: `/state` (also `/api/status`)
 
 ### Live tab
 
