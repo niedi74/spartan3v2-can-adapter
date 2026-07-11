@@ -2,6 +2,39 @@
 // [WEBGUI-ENDPOINTS] setupWebGui(): alle HTTP-Endpoints (server.on) + collectHeaders
 // + DNS/AP-Start. 1:1 aus main.cpp ausgelagert, an Originalstelle included
 // (gleiche TU, im anonymen namespace) -- keine Logikaenderung.
+
+// [PIN-GUARD] Fest verdrahtete Pins, die niemals per Web-Konfig (CAN/UART-Bridge)
+// belegt werden duerfen -- sonst kollidiert die Laufzeit-Peripherie lautlos
+// (z.B. W25Q-Backup verstummt, wenn CAN auf dessen SPI-Pins liegt).
+bool isReservedGpio(int pin)
+{
+  // W25Q-Pins hier fest verdrahtet (13/14/15/18, siehe hub_w25q.h) statt ueber
+  // dessen Makros: hub_webgui_endpoints.h wird in main.cpp VOR hub_w25q.h
+  // included, die Makros W25Q_CS_PIN/... existieren an dieser Stelle noch nicht.
+  const int reserved[] = {
+      13, 14, 15, 18,  // W25Q_CS_PIN/CLK_PIN/DI_PIN/DO_PIN
+      STATUS_LED_PIN, I2C_SDA_PIN, I2C_SCL_PIN,
+      SPARTAN_UART_RX_PIN, SPARTAN_UART_TX_PIN,
+      SPARTAN_ANALOG_PIN, SPARTAN_HEATER_PIN,
+  };
+  for (int r : reserved) {
+    if (pin == r) return true;
+  }
+  return false;
+}
+
+// [OTA-LOCK-BOOTSTRAP] Grenzt den ungesicherten Erst-Setzen-Pfad von
+// /api/ota/token auf Clients ein, die am SoftAP haengen (kennen also das
+// AP-Passwort) statt auf jedes Geraet im (groesseren, weniger vertrauenswuerdigen)
+// Heimnetz, das der Hub als STA betritt.
+bool isRequestFromSoftApSubnet()
+{
+  const IPAddress ap = WiFi.softAPIP();
+  if (ap == IPAddress(0, 0, 0, 0)) return false;
+  const IPAddress client = server.client().remoteIP();
+  return client[0] == ap[0] && client[1] == ap[1] && client[2] == ap[2];
+}
+
 void setupWebGui()
 {
 #if ENABLE_WEB_GUI
@@ -11,6 +44,11 @@ void setupWebGui()
   otaToken = networkPreferences.getString("ota_tok", "");   // [OTA-LOCK] leer = gesperrt
   timezoneIdx = networkPreferences.getUChar("tz_idx", kTimezoneDefault);
   if (timezoneIdx >= kTimezoneCount) timezoneIdx = kTimezoneDefault;
+  // TZ sofort setzen, unabhaengig von WiFi -- sonst rendert localtime_r() (CSV,
+  // /api/status) auf dem Fahrt-Hub ohne Heimnetz in UTC statt Lokalzeit.
+  // configTzTime/SNTP bleiben WiFi-gated (in applyTimezone() via startNtpIfNeeded()).
+  setenv("TZ", timezonePosix(timezoneIdx), 1);
+  tzset();
   logColumnMask = networkPreferences.getUShort("log_cols", kLogColDefault);
   logFsReady = initializeLogFilesystem(false);
   logCurrentBytes = 0;
@@ -125,12 +163,26 @@ void setupWebGui()
   };
   server.on("/state", sendStatus);
   server.on("/api/status", sendStatus);
-  server.on("/uart_config", HTTP_GET, []() {
-    uint8_t rx = (uint8_t)server.arg("rx").toInt();
-    uint8_t tx = (uint8_t)server.arg("tx").toInt();
+  // POST statt GET: eine mutierende+rebootende Aktion darf nicht per <img src=...>
+  // CSRF-auslösbar sein. Reserved-Pin-Check wie /can_config.
+  server.on("/uart_config", HTTP_POST, []() {
+    const int rx = server.arg("rx").toInt();
+    const int tx = server.arg("tx").toInt();
+    if (rx < 0 || rx > 48 || tx < 0 || tx > 48 || rx == tx) {
+      server.send(400, "application/json", "{\"ok\":false,\"error\":\"Pins 0..48, RX != TX\"}");
+      return;
+    }
+    if (isReservedGpio(rx) || isReservedGpio(tx)) {
+      server.send(400, "application/json", "{\"ok\":false,\"error\":\"Pin fest belegt (W25Q/LCD/UART/Analog)\"}");
+      return;
+    }
+    if (hubFeatCan && (rx == canRxPinCfg || rx == canTxPinCfg || tx == canRxPinCfg || tx == canTxPinCfg)) {
+      server.send(400, "application/json", "{\"ok\":false,\"error\":\"Pin kollidiert mit aktiver CAN-Config\"}");
+      return;
+    }
     ensurePreferences();
-    networkPreferences.putUChar("uart_rx", rx);
-    networkPreferences.putUChar("uart_tx", tx);
+    networkPreferences.putUChar("uart_rx", static_cast<uint8_t>(rx));
+    networkPreferences.putUChar("uart_tx", static_cast<uint8_t>(tx));
     Serial.printf("Bridge UART: konfiguriert RX=%d TX=%d -> Reboot\n", rx, tx);
     server.send(200,"application/json","{\"ok\":true,\"rx\":"+String(rx)+",\"tx\":"+String(tx)+"}");
     delay(300); ESP.restart();
@@ -163,6 +215,14 @@ void setupWebGui()
     const int txms = server.hasArg("txms") ? server.arg("txms").toInt() : cockpitCanTxIntervalMsCfg;
     if (rx < 0 || rx > 48 || tx < 0 || tx > 48 || rx == tx) {
       server.send(400, "application/json", "{\"ok\":false,\"error\":\"Pins 0..48, RX != TX\"}");
+      return;
+    }
+    if (isReservedGpio(rx) || isReservedGpio(tx)) {
+      server.send(400, "application/json", "{\"ok\":false,\"error\":\"Pin fest belegt (W25Q/LCD/UART/Analog)\"}");
+      return;
+    }
+    if (bridgeUartRxPin > 0 && (rx == bridgeUartRxPin || rx == bridgeUartTxPin || tx == bridgeUartRxPin || tx == bridgeUartTxPin)) {
+      server.send(400, "application/json", "{\"ok\":false,\"error\":\"Pin kollidiert mit UART-Bridge\"}");
       return;
     }
     if (kbps != 125 && kbps != 250 && kbps != 500 && kbps != 1000) {
@@ -236,8 +296,21 @@ void setupWebGui()
     server.send(ok ? 200 : 409, "application/json", body);
   });
   server.on("/api/ota/token", HTTP_POST, []() {
-    // [OTA-LOCK] Token setzen/aendern (leer = OTA wieder sperren). Hinter dem AP-Passwort;
-    // ein Fremd-/Fehl-Push kennt weder diesen Endpoint noch den Token -> OTA prallt ab.
+    // [OTA-LOCK] Token setzen/aendern (leer = OTA wieder sperren). Der Endpoint selbst
+    // war bisher ungesichert (Luecke: jedes Geraet im Heimnetz-STA konnte den Token neu
+    // setzen und damit /update und /api/tune/live aufsperren). Jetzt zusaetzlich gegated:
+    // - ist bereits ein Token gesetzt, muss der ALTE Token mitgeschickt werden (Aendern/Loeschen);
+    // - ist noch KEIN Token gesetzt (Erstbootstrap), muss der Client am SoftAP haengen
+    //   (kennt also das AP-Passwort) statt nur im STA-Heimnetz zu sein.
+    if (otaToken.length() > 0) {
+      if (!server.hasHeader("X-OTA-Token") || server.header("X-OTA-Token") != otaToken) {
+        server.send(403, "application/json", "{\"ok\":false,\"error\":\"alter Token noetig\"}");
+        return;
+      }
+    } else if (!isRequestFromSoftApSubnet()) {
+      server.send(403, "application/json", "{\"ok\":false,\"error\":\"Erstsetzen nur ueber den SoftAP\"}");
+      return;
+    }
     String t = server.arg("token");
     t.trim();
     ensurePreferences();
@@ -469,7 +542,7 @@ void setupWebGui()
       return;
     }
     const long epoch = server.arg("epoch").toInt();
-    if (epoch < 1700000000L || epoch > 4000000000L) {
+    if (epoch < kMinValidEpoch || epoch > 4000000000L) {
       server.send(400, "application/json", "{\"ok\":false,\"error\":\"epoch unplausibel\"}");
       return;
     }
@@ -485,7 +558,7 @@ void setupWebGui()
   // Systemzeit uebernehmen (unabhaengig vom already_synced-Zustand).
   server.on("/api/rtc/set", HTTP_POST, []() {
     const long epoch = server.arg("epoch").toInt();
-    if (epoch < 1700000000L || epoch > 4000000000L) {
+    if (epoch < kMinValidEpoch || epoch > 4000000000L) {
       server.send(400, "application/json", "{\"ok\":false,\"error\":\"epoch unplausibel\"}");
       return;
     }
@@ -789,7 +862,26 @@ void setupWebGui()
 #endif
   });
   server.on("/uart_cmd", HTTP_POST, []() {
-    sendSpartanUartCommand(server.arg("cmd"));
+    // [UART-CMD-GUARD] Lesebefehle (GET*-Prefix, z.B. GETFW/GETHW/GETCANID) bleiben
+    // frei fuer schnelle Diagnose. Alles andere (insbesondere das freie "Expertenbefehl"-
+    // Feld mit SET*-Kommandos direkt an die Zuendungseinheit) braucht denselben
+    // OTA-Token wie /api/tune/live -- und anders als dort gilt ein leerer Token hier
+    // als "SET* gesperrt", nicht als "offen", damit ungesetzter Token nicht heimlich
+    // freie Zuendungs-Kommandos erlaubt.
+    String cmd = server.arg("cmd");
+    cmd.trim();
+    String upper = cmd; upper.toUpperCase();
+    const bool readOnly = upper.startsWith("GET");
+    if (!readOnly) {
+      const bool tokOk = otaToken.length() > 0 &&
+                         server.hasHeader("X-OTA-Token") &&
+                         server.header("X-OTA-Token") == otaToken;
+      if (!tokOk) {
+        server.send(403, "application/json", "{\"ok\":false,\"error\":\"token\"}");
+        return;
+      }
+    }
+    sendSpartanUartCommand(cmd);
     server.sendHeader("Location", "/", true);
     server.send(303, "text/plain", "");
   });

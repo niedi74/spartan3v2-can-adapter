@@ -165,14 +165,14 @@ String statusJson()
   json += ",\"wifi_saved\":";
   json += haveSavedWifi ? "true" : "false";
   json += ",\"wifi_saved_ssid\":\"";
-  json += savedWifiSsid;
+  json += jsonEscape(savedWifiSsid);
   json += "\"";
   json += ",\"wifi_prof\":";
   json += String(hubWifiProfile);
   json += ",\"wifi_prof_labels\":[\"Hub-AP\",\"Zuhause\",\"S24\"]";
   json += ",\"wifi_prof_ssids\":[\"\"";
-  json += ",\"" + String(g_hubWifiProfiles[1].ssid) + "\"";
-  json += ",\"" + String(g_hubWifiProfiles[2].ssid) + "\"]";
+  json += ",\"" + jsonEscape(String(g_hubWifiProfiles[1].ssid)) + "\"";
+  json += ",\"" + jsonEscape(String(g_hubWifiProfiles[2].ssid)) + "\"]";
   json += ",\"wifi_connected\":";
   json += WiFi.status() == WL_CONNECTED ? "true" : "false";
   json += ",\"wifi_sta_reason\":";
@@ -182,7 +182,7 @@ String statusJson()
   json += ",\"wifi_status\":";
   json += String((int)WiFi.status());
   json += ",\"wifi_ssid\":\"";
-  json += WiFi.status() == WL_CONNECTED ? WiFi.SSID() : "";
+  json += WiFi.status() == WL_CONNECTED ? jsonEscape(WiFi.SSID()) : "";
   json += "\",\"wifi_ip\":\"";
   json += WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : "";
   json += "\",\"wifi_mac\":\"";       // [WIFI-MAC-OVR] effektive STA-MAC (Werk oder Override)

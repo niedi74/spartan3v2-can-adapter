@@ -40,15 +40,21 @@ void detectW25Q()
 }
 
 // --- W25Q Roh-Zugriff fuer Config-Backup (fester Sektor 0, kein Dateisystem) ---
-static void w25qBusyWait()
+// Rueckgabe false = WIP-Bit war nach 600ms Timeout immer noch gesetzt (Chip
+// haengt/antwortet nicht) -- Aufrufer darf dann NICHT weiterschreiben/committen.
+static bool w25qBusyWait()
 {
   w25qSpi.beginTransaction(SPISettings(8000000, MSBFIRST, SPI_MODE0));
   digitalWrite(W25Q_CS_PIN, LOW);
   w25qSpi.transfer(0x05);                       // Read Status Register-1
   const uint32_t t0 = millis();
-  while ((w25qSpi.transfer(0x00) & 0x01) && (millis() - t0 < 600)) { /* WIP */ }
+  uint8_t status;
+  do {
+    status = w25qSpi.transfer(0x00);
+  } while ((status & 0x01) && (millis() - t0 < 600));
   digitalWrite(W25Q_CS_PIN, HIGH);
   w25qSpi.endTransaction();
+  return (status & 0x01) == 0;
 }
 static void w25qSimpleCmd(uint8_t cmd)          // z.B. WREN 0x06
 {
@@ -70,7 +76,7 @@ static void w25qReadData(uint32_t addr, uint8_t *buf, size_t len)
   digitalWrite(W25Q_CS_PIN, HIGH);
   w25qSpi.endTransaction();
 }
-static void w25qSectorErase(uint32_t addr)       // 4 KB
+static bool w25qSectorErase(uint32_t addr)       // 4 KB
 {
   w25qSimpleCmd(0x06);                           // WREN
   w25qSpi.beginTransaction(SPISettings(8000000, MSBFIRST, SPI_MODE0));
@@ -81,9 +87,9 @@ static void w25qSectorErase(uint32_t addr)       // 4 KB
   w25qSpi.transfer(addr & 0xFF);
   digitalWrite(W25Q_CS_PIN, HIGH);
   w25qSpi.endTransaction();
-  w25qBusyWait();
+  return w25qBusyWait();
 }
-static void w25qPageProgram(uint32_t addr, const uint8_t *buf, size_t len)
+static bool w25qPageProgram(uint32_t addr, const uint8_t *buf, size_t len)
 {
   w25qSimpleCmd(0x06);                           // WREN
   w25qSpi.beginTransaction(SPISettings(8000000, MSBFIRST, SPI_MODE0));
@@ -95,18 +101,19 @@ static void w25qPageProgram(uint32_t addr, const uint8_t *buf, size_t len)
   for (size_t i = 0; i < len; i++) w25qSpi.transfer(buf[i]);
   digitalWrite(W25Q_CS_PIN, HIGH);
   w25qSpi.endTransaction();
-  w25qBusyWait();
+  return w25qBusyWait();
 }
-static void w25qWriteData(uint32_t addr, const uint8_t *buf, size_t len)
+static bool w25qWriteData(uint32_t addr, const uint8_t *buf, size_t len)
 {
   size_t off = 0;                                // an 256-Byte-Page-Grenzen splitten
   while (off < len) {
     const uint32_t a = addr + off;
     const size_t pageRem = 256 - (a & 0xFF);
     const size_t chunk = (len - off < pageRem) ? (len - off) : pageRem;
-    w25qPageProgram(a, buf + off, chunk);
+    if (!w25qPageProgram(a, buf + off, chunk)) return false;  // Chip haengt -> Rest nicht draufschreiben
     off += chunk;
   }
+  return true;
 }
 static uint32_t hubCfgCrc32(const uint8_t *data, size_t len)
 {
@@ -119,7 +126,7 @@ static uint32_t hubCfgCrc32(const uint8_t *data, size_t len)
 }
 
 #define HUB_CFG_MAGIC   0x48424346UL   // 'HBCF'
-#define HUB_CFG_VERSION 3              // v3: + Betriebsstunden/Odometer (v2: effektive Globals)
+#define HUB_CFG_VERSION 4              // v4: + CAN-Runtime-Config (v3: + Betriebsstunden/Odometer)
 #define HUB_CFG_ADDR    0x000000UL     // Sektor 0 des W25Q
 
 #pragma pack(push, 1)
@@ -138,6 +145,11 @@ struct HubConfigBlob {
   // Stand vom letzten Backup-Trigger (manuelles Setzen/Config-Aenderung), kein Zyklus-Write.
   uint64_t dev_sec; uint64_t eng_sec; uint64_t sns_sec;
   uint64_t odo_mm;  uint64_t trip_mm;
+  // [v4] CAN-Laufzeit-Config (saveCanConfig() schrieb das bisher NUR ins NVS,
+  // nie in dieses Backup -- ein erase_flash liess den Dev-Tab wieder auf die
+  // Build-Default-Pins zurueckfallen, obwohl das Backup sonst alles restauriert).
+  uint8_t  can_rx; uint8_t can_tx;
+  uint16_t can_kbps; uint16_t can_sid; uint16_t can_cid; uint16_t can_txms;
   uint32_t crc32;
 };
 #pragma pack(pop)
@@ -167,9 +179,16 @@ void saveConfigToW25Q()
   strlcpy(b.mdns_host, hubHostname.c_str(), sizeof(b.mdns_host));
   b.dev_sec = deviceSeconds; b.eng_sec = engineSeconds; b.sns_sec = sensorSeconds;  // [v3]
   b.odo_mm = odoMm; b.trip_mm = tripMm;
+  b.can_rx = canRxPinCfg; b.can_tx = canTxPinCfg; b.can_kbps = canBitrateKbps;      // [v4]
+  b.can_sid = spartanCanIdCfg; b.can_cid = cockpitCanIdCfg; b.can_txms = cockpitCanTxIntervalMsCfg;
   b.crc32 = hubCfgCrc32(reinterpret_cast<const uint8_t *>(&b), sizeof(b) - sizeof(b.crc32));
-  w25qSectorErase(HUB_CFG_ADDR);
-  w25qWriteData(HUB_CFG_ADDR, reinterpret_cast<const uint8_t *>(&b), sizeof(b));
+  if (!w25qSectorErase(HUB_CFG_ADDR) ||
+      !w25qWriteData(HUB_CFG_ADDR, reinterpret_cast<const uint8_t *>(&b), sizeof(b))) {
+    // Chip antwortet nicht (WIP-Timeout) -- NICHT als initialisiert markieren,
+    // sonst haelt restoreConfigFromW25Q() spaeter ein halbfertiges/korruptes Backup fuer gueltig.
+    Serial.println("Config:      W25Q-Backup FEHLGESCHLAGEN (Chip haengt) -- NVS-Marker nicht gesetzt");
+    return;
+  }
   networkPreferences.putUChar("cfg_w25q", HUB_CFG_VERSION);   // NVS gilt jetzt als initialisiert
   Serial.printf("Config:      Backup auf W25Q geschrieben (Profil %d, SSID1 '%s')\n",
                 b.wifi_prof, b.p1_ssid);
@@ -209,6 +228,13 @@ void restoreConfigFromW25Q()
   networkPreferences.putULong64("sns_sec", b.sns_sec);
   networkPreferences.putULong64("odo_mm", b.odo_mm);
   networkPreferences.putULong64("trip_mm", b.trip_mm);
+  // [v4] CAN-Runtime-Config zurueck ins NVS (loadHubFeatures() liest can_* beim naechsten Boot)
+  networkPreferences.putUChar("can_rx", b.can_rx);
+  networkPreferences.putUChar("can_tx", b.can_tx);
+  networkPreferences.putUShort("can_kbps", b.can_kbps);
+  networkPreferences.putUShort("can_sid", b.can_sid);
+  networkPreferences.putUShort("can_cid", b.can_cid);
+  networkPreferences.putUShort("can_txms", b.can_txms);
   networkPreferences.putUChar("cfg_w25q", HUB_CFG_VERSION);
   Serial.printf("Config:      aus W25Q-Backup wiederhergestellt (Profil %d, SSID1 '%s', %.1f Geraete-h, %.1f km)\n",
                 b.wifi_prof, b.p1_ssid,
@@ -230,10 +256,16 @@ struct HubCurveHdr { uint32_t magic; uint16_t len; uint16_t rsvd; uint32_t crc32
 // Slot 1..3 (wie curveFile()). Fehlende/geloeschte SPIFFS-Datei -> Chip-Kopie leeren.
 void saveCurveToW25Q(int slot)
 {
-  if (!w25qDetected || slot < 1 || slot > 3) return;
+  if (!w25qDetected) return;
+  // Denselben Klemm-Standard wie curveFile() anwenden statt bei ungueltigem
+  // Slot no-op zu bleiben -- sonst landen SPIFFS (klemmt auf 1) und W25Q-Mirror
+  // (verwarf bisher) bei einem ungueltigen Slot-Wert in unterschiedlichen Slots.
+  if (slot < 1 || slot > 3) slot = 1;
   const uint32_t addr = HUB_CURVE_BASE + (uint32_t)(slot - 1) * HUB_CURVE_SLOT_BYTES;
-  w25qSectorErase(addr);
-  w25qSectorErase(addr + 0x1000);
+  if (!w25qSectorErase(addr) || !w25qSectorErase(addr + 0x1000)) {
+    Serial.printf("Kurve W25Q:  Slot %d Erase FEHLGESCHLAGEN (Chip haengt)\n", slot);
+    return;
+  }
   if (!logFsReady || !SPIFFS.exists(curveFile(slot))) {
     Serial.printf("Kurve W25Q:  Slot %d geleert\n", slot);   // 0xFF = kein Magic = leer
     return;
@@ -254,9 +286,13 @@ void saveCurveToW25Q(int slot)
   HubCurveHdr h;
   h.magic = HUB_CURVE_MAGIC; h.len = (uint16_t)len; h.rsvd = 0;
   h.crc32 = hubCfgCrc32(buf, len);
-  w25qWriteData(addr, reinterpret_cast<const uint8_t *>(&h), sizeof(h));
-  w25qWriteData(addr + sizeof(h), buf, len);
+  const bool ok = w25qWriteData(addr, reinterpret_cast<const uint8_t *>(&h), sizeof(h)) &&
+                  w25qWriteData(addr + sizeof(h), buf, len);
   free(buf);
+  if (!ok) {
+    Serial.printf("Kurve W25Q:  Slot %d Schreiben FEHLGESCHLAGEN (Chip haengt)\n", slot);
+    return;
+  }
   Serial.printf("Kurve W25Q:  Slot %d gesichert (%u B)\n", slot, (unsigned)len);
 }
 

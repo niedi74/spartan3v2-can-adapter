@@ -170,6 +170,17 @@ void abortCurveRead(const char *why)
   logHubEvent("curve_read", "abort");
 }
 
+// [BLE-RACE] Atomarer Schnappschuss statt Check-dann-Benutz auf dem rohen
+// Zeiger: onDisconnect() (NimBLE-Host-Task) nullt tuneNusRx unter demselben
+// stateMux, siehe dort.
+NimBLERemoteCharacteristic *tuneNusRxSnapshot()
+{
+  portENTER_CRITICAL(&stateMux);
+  NimBLERemoteCharacteristic *p = tuneNusRx;
+  portEXIT_CRITICAL(&stateMux);
+  return p;
+}
+
 void resetTuneClient()
 {
   if (tuneClient == nullptr) return;
@@ -190,9 +201,15 @@ class TuneClientCallbacks : public NimBLEClientCallbacks {
  public:
   void onDisconnect(NimBLEClient *, int reason) override
   {
+    // [BLE-RACE] Laeuft im NimBLE-Host-Task, potenziell auf dem anderen Core
+    // parallel zu sendTuneRaw/-Ping/-Command im loop()-Task. tuneNusRx unter
+    // stateMux nullen, damit ein zeitgleicher Check-dann-Schreib-Zugriff dort
+    // (siehe tuneNusRxSnapshot()) nie einen halb-ungueltigen Zeiger sieht.
+    portENTER_CRITICAL(&stateMux);
     tuneConnected = false;
     tuneNusRx = nullptr;
     tuneModeActive = false; tuneAdvSteps = 0;  // [TUNE-LIVE] Offset verfaellt bei Trennung
+    portEXIT_CRITICAL(&stateMux);
     abortCurveRead("disconnect");              // [KURVE-READ] sonst blockiert das Lesefenster den Reconnect
     char detail[24];
     snprintf(detail, sizeof(detail), "disconnect|r%d", reason);
@@ -437,7 +454,9 @@ void connectTune()
 
 void sendTunePing()
 {
-  if (!tuneConnected || tuneClient == nullptr || !tuneClient->isConnected() || tuneNusRx == nullptr) return;
+  if (!tuneConnected || tuneClient == nullptr || !tuneClient->isConnected()) return;
+  NimBLERemoteCharacteristic *nusRx = tuneNusRxSnapshot();
+  if (nusRx == nullptr) return;
   const uint32_t now = millis();
   if (now - tuneLastPingMs < kTunePingIntervalMs) return;
   tuneLastPingMs = now;
@@ -446,20 +465,25 @@ void sendTunePing()
   // Write OHNE Response (false): unter Notify-Flut (Motor laeuft) kollidiert ein
   // Write-MIT-Response mit dem Notify-Strom -> GATT-Prozedurfehler -> lokale
   // Terminierung (reason 534). Die 123-RX unterstuetzt WRITE_NO_RESPONSE.
-  const bool ok = tuneNusRx->writeValue(&ping, 1, false);
+  const bool ok = nusRx->writeValue(&ping, 1, false);
   Serial.printf("123TUNE BLE: ping -> %s\n", ok ? "OK" : "FAIL");
 }
 
 bool sendTuneCommand(const char *command)
 {
-  if (!tuneConnected || tuneClient == nullptr || !tuneClient->isConnected() || tuneNusRx == nullptr) {
+  if (!tuneConnected || tuneClient == nullptr || !tuneClient->isConnected()) {
+    Serial.println("123TUNE BLE: command blocked, not connected");
+    return false;
+  }
+  NimBLERemoteCharacteristic *nusRx = tuneNusRxSnapshot();
+  if (nusRx == nullptr) {
     Serial.println("123TUNE BLE: command blocked, not connected");
     return false;
   }
 
   char buffer[24];
   snprintf(buffer, sizeof(buffer), "%s\r$", command);
-  const bool ok = tuneNusRx->writeValue(reinterpret_cast<uint8_t *>(buffer), strlen(buffer), true);
+  const bool ok = nusRx->writeValue(reinterpret_cast<uint8_t *>(buffer), strlen(buffer), true);
   Serial.printf("123TUNE BLE: cmd '%s\\r$' -> %s\n", command, ok ? "OK" : "FAIL");
   tuneLastPingMs = millis();
   return ok;
@@ -472,7 +496,7 @@ bool sendTuneCommand(const char *command)
 bool tuneStreaming()
 {
   return tuneConnected && tuneClient != nullptr && tuneClient->isConnected() &&
-         tuneNusRx != nullptr && tuneLinkState == TuneLinkState::Streaming;
+         tuneNusRxSnapshot() != nullptr && tuneLinkState == TuneLinkState::Streaming;
 }
 
 bool sendTuneRaw(char c)
@@ -481,8 +505,13 @@ bool sendTuneRaw(char c)
     Serial.printf("123TUNE BLE: tune-cmd '%c' blockiert (kein streaming)\n", c);
     return false;
   }
+  NimBLERemoteCharacteristic *nusRx = tuneNusRxSnapshot();
+  if (nusRx == nullptr) {
+    Serial.printf("123TUNE BLE: tune-cmd '%c' blockiert (disconnect)\n", c);
+    return false;
+  }
   const uint8_t b = static_cast<uint8_t>(c);
-  const bool ok = tuneNusRx->writeValue(&b, 1, false);
+  const bool ok = nusRx->writeValue(&b, 1, false);
   Serial.printf("123TUNE BLE: tune-cmd '%c' -> %s\n", c, ok ? "OK" : "FAIL");
   return ok;
 }
