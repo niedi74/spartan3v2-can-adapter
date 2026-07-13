@@ -296,6 +296,7 @@ enum class LambdaTestMode : uint8_t {
 
 LambdaTestMode lambdaTestMode = LambdaTestMode::Off;
 uint32_t lastLambdaTestMs = 0;
+uint32_t lambdaTestStartMs = 0;   // [LAMBDA-TEST-WARMUP] Aktivierungszeitpunkt fuer WAIT/HEAT/OK-Simulation
 
 struct TuneSnapshot {
   float rpm = 0.0f;
@@ -1251,6 +1252,9 @@ bool setLambdaTestMode(const String &requested)
 
   lambdaTestMode = next;
   lastLambdaTestMs = 0;
+  if (next != LambdaTestMode::Off) {
+    lambdaTestStartMs = millis();   // [LAMBDA-TEST-WARMUP] jede (Neu-)Aktivierung startet WAIT/HEAT/OK von vorn
+  }
 #if ENABLE_WEB_GUI
   ensurePreferences();
   networkPreferences.putUChar("lambda_test", static_cast<uint8_t>(lambdaTestMode));
@@ -2579,6 +2583,13 @@ void updateDemo()
 #endif
 }
 
+// [LAMBDA-TEST-WARMUP] Simuliert die reale Sonden-Aufwaermsequenz (WAIT -> HEAT ->
+// OK, siehe docs/lambda-status-logik.md), damit sich status/status_code auch am
+// Schreibtisch ohne echten Spartan am CAN-Bus beobachten lassen -- vorher sprang
+// der Testmodus sofort auf OK, testete also nie die WAIT/HEAT-Uebergaenge.
+constexpr uint32_t kLambdaTestWaitMs = 3000;   // 0-3s:  WAIT (Sonde noch kalt)
+constexpr uint32_t kLambdaTestHeatMs = 10000;  // 3-10s: HEAT (Sonde heizt auf)
+
 void updateLambdaTest()
 {
   if (lambdaTestMode == LambdaTestMode::Off) return;
@@ -2586,18 +2597,29 @@ void updateLambdaTest()
   if (now - lastLambdaTestMs < 100) return;
   lastLambdaTestMs = now;
 
+  const uint32_t warmupMs = now - lambdaTestStartMs;
+
   SpartanReading fresh;
   fresh.lambda = 1.000f;
-  if (lambdaTestMode == LambdaTestMode::Sweep) {
-    const uint32_t halfCycleMs = 10000;
-    const uint32_t phaseMs = now % (halfCycleMs * 2UL);
-    const float phase = static_cast<float>(phaseMs <= halfCycleMs
-        ? phaseMs
-        : (halfCycleMs * 2UL - phaseMs)) / static_cast<float>(halfCycleMs);
-    fresh.lambda = 0.85f + phase * 0.30f;
+  if (warmupMs < kLambdaTestWaitMs) {
+    fresh.status = 1;                                 // WAIT
+    fresh.temperatureC = static_cast<uint16_t>(warmupMs / 15);   // kalt, langsam steigend
+  } else if (warmupMs < kLambdaTestHeatMs) {
+    fresh.status = 2;                                 // HEAT
+    const uint32_t heatMs = warmupMs - kLambdaTestWaitMs;
+    fresh.temperatureC = static_cast<uint16_t>(200 + heatMs / 12);  // Richtung Betriebstemperatur
+  } else {
+    fresh.status = 3;                                 // OK
+    fresh.temperatureC = 780;
+    if (lambdaTestMode == LambdaTestMode::Sweep) {
+      const uint32_t halfCycleMs = 10000;
+      const uint32_t phaseMs = now % (halfCycleMs * 2UL);
+      const float phase = static_cast<float>(phaseMs <= halfCycleMs
+          ? phaseMs
+          : (halfCycleMs * 2UL - phaseMs)) / static_cast<float>(halfCycleMs);
+      fresh.lambda = 0.85f + phase * 0.30f;
+    }
   }
-  fresh.temperatureC = 780;
-  fresh.status = 3;
   fresh.receivedMs = now;
   fresh.valid = true;
   fresh.fromCan = false;
