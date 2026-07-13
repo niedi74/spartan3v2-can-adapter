@@ -87,6 +87,41 @@ verfolgen.
 Meldet ebenfalls **immer `OK`** (`status = 3`) — die Analogspannung liefert
 keine eigene Statusinformation, nur den Lambdawert selbst.
 
+## CAN-Cockpit-Frame (0x510) — eigener Wire-Weg zu Displays
+
+Displays, die **direkt am CAN-Bus** hängen (statt per HTTP `/api/status` zu
+pollen), bekommen den Status über den 0x510-Cockpit-Frame, den der Hub sendet
+(`cockpitCanIdCfg`, ~10 Hz). Das ist ein **eigenes, schlankes 8-Byte-Format**
+(NICHT das reichhaltigere `SpartanCockpitFrame` aus
+[`include/spartan_cockpit_frame.h`](../include/spartan_cockpit_frame.h) — das
+ist 17 Byte, passt nicht in einen einzelnen klassischen CAN-Frame mit DLC=8,
+und wird im Hub-Code aktuell nirgends aufgerufen).
+
+**Bug gefunden + gefixt (2026-07-13):** `flags & 0x01` (`kCockpitFlagLambdaValid`)
+bedeutete bisher nur "irgendein Lambda-Wert kam an" — das ist während
+`WAIT`/`HEAT` genauso `true` wie bei `OK`, weil `SpartanReading.valid` in
+jedem Lesepfad (CAN/Demo/Test/ADC) unconditional gesetzt wird. Ein Display,
+das nur `flags & 0x01` prüft, konnte die Sonden-Aufwärmphase über CAN also
+**nicht** erkennen — anders als über HTTP, wo `status`/`status_code` immer
+den echten Wert trägt.
+
+**Fix:** `status_code` (0–3) wird jetzt zusätzlich in **Bits 2-3** des
+`flags`-Bytes gepackt (Byte 7 des Frames), rückwärtskompatibel (Bit 0/1
+unverändert):
+
+```
+Byte 7 (flags):  Bit0=LambdaValid  Bit1=TuneFresh  Bits2-3=status_code  Bits4-7=reserviert
+```
+
+Display-seitig zum Auswerten:
+```
+status_code = (flags >> 2) & 0x03;   // 0=ERR 1=WAIT 2=HEAT 3=OK
+bereit      = status_code == 3;      // entspricht dem HTTP-Feld status=="OK"
+```
+
+Komplettes Byte-Layout: siehe Kommentar am Kopf von
+[`include/hub_can.h`](../include/hub_can.h).
+
 ## Wichtig: nicht verwechseln mit `heater_status_code`
 
 Es gibt ein **zweites, unabhängiges** Statusfeld: `heater_status_code`
