@@ -3,6 +3,20 @@
 // gemeinsamen TWAI-Controller. 1:1 aus main.cpp, an Originalstelle included.
 // [CAN-DEV] Pins/Bitrate/IDs kommen aus den *Cfg-Laufzeitvariablen (NVS, Default =
 // Build-Flags) -- Aenderung braucht Neustart, siehe loadHubFeatures()/canConfigChanged.
+//
+// [COCKPIT-WIRE-FORMAT] Der 0x510-Cockpit-Frame ist ein eigenes, schlankes 8-Byte-
+// Format (NICHT das reichhaltigere SpartanCockpitFrame aus spartan_cockpit_frame.h --
+// das ist 17 Byte und passt nicht in einen einzelnen klassischen CAN-Frame mit
+// DLC=8; es wird aktuell nirgends aufgerufen). Byte-Layout, big-endian:
+//   [0-1] lambda_x1000 (uint16, 0 wenn keine Sonde)   [2-3] rpm (uint16)
+//   [4-5] advance_x10 (int16)                          [6]   map (uint8, kPa)
+//   [7]   flags: Bit0=kCockpitFlagLambdaValid, Bit1=kCockpitFlagTuneFresh,
+//                Bits2-3=status_code (0=ERR/1=WAIT/2=HEAT/3=OK, siehe
+//                docs/lambda-status-logik.md), Bits4-7 reserviert/0.
+constexpr uint8_t kCockpitFlagLambdaValid = 0x01;
+constexpr uint8_t kCockpitFlagTuneFresh   = 0x02;
+constexpr uint8_t kCockpitStatusBitShift  = 2;
+constexpr uint8_t kCockpitStatusBitMask   = 0x03;  // << kCockpitStatusBitShift
 static twai_timing_config_t canTimingFromKbps(uint16_t kbps)
 {
   switch (kbps) {
@@ -129,9 +143,16 @@ void updateCan()
     }
     const uint16_t lambdaX1000 = snap.valid ? static_cast<uint16_t>(snap.lambda * 1000.0f + 0.5f) : 0;
     const int16_t  advX10      = static_cast<int16_t>(advance * 10.0f + (advance >= 0 ? 0.5f : -0.5f));
+    // [COCKPIT-STATUS] flags&0x01 heisst nur "irgendein Lambda-Wert kam an" -- das
+    // ist WAEHREND WAIT/HEAT genauso true wie bei OK (snap.valid wird in jedem
+    // Lesepfad unconditional gesetzt, siehe docs/lambda-status-logik.md). Displays
+    // ueber CAN konnten die Sonden-Aufwaermphase damit nicht erkennen. status_code
+    // (0..3, siehe statusTextC()) jetzt zusaetzlich in Bits 2-3 gepackt -- bestehende
+    // flags&0x01/0x02-Konsumenten bleiben unveraendert kompatibel.
     uint8_t flags = 0;
-    if (snap.valid) flags |= 0x01;   // Lambda gueltig
-    if (tuneFresh)  flags |= 0x02;   // 123-Daten frisch (rpm/adv/map gueltig)
+    if (snap.valid) flags |= kCockpitFlagLambdaValid;   // Frame kam an, sagt NICHTS ueber status_code
+    if (tuneFresh)  flags |= kCockpitFlagTuneFresh;
+    flags |= static_cast<uint8_t>((snap.status & kCockpitStatusBitMask) << kCockpitStatusBitShift);
 
     twai_message_t tx = {};
     tx.identifier        = cockpitCanIdCfg;
