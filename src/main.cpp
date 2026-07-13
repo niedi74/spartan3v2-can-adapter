@@ -2072,22 +2072,37 @@ void rotateLogIfNeeded()
   ensureLogHeader();
 }
 
+// [STALE-RPM-FIX] tuneRpm wird nach einem BLE-Disconnect NIE auf 0 zurueckgesetzt --
+// ohne Frische-Check haelt ein einzelner alter RPM-Wert (Minuten/Stunden her)
+// vehicleActive()/shouldLogCsv() faelschlich auf "Motor laeuft" fest, obwohl 123TUNE+
+// laengst weg ist. tuneFresh nutzt dasselbe 3000ms-Fenster wie der CAN-Cockpit-Frame
+// (siehe hub_can.h, tuneFresh-Berechnung dort).
+bool tuneRpmFresh(const TuneSnapshot &tune, uint16_t *rpmOut)
+{
+  const bool fresh = tune.lastRxMs != 0 && (millis() - tune.lastRxMs) <= 3000;
+  if (rpmOut) *rpmOut = fresh ? static_cast<uint16_t>(tune.rpm) : 0;
+  return fresh;
+}
+
 bool shouldLogCsv(const SpartanReading &spartan, const TuneSnapshot &tune)
 {
-  if (tune.rpm > ENGINE_RUNNING_RPM_THRESHOLD) return true;
+  uint16_t rpm = 0;
+  if (tuneRpmFresh(tune, &rpm) && rpm > ENGINE_RUNNING_RPM_THRESHOLD) return true;
 #if SPEED_REED_PIN >= 0
   if (speedKmh > 0.5f) return true;
 #endif
   return spartan.valid;
 }
 
-// [VARIANTE-A] Fahrzeug aktiv = Motor laeuft (RPM ueber Schwelle) ODER faehrt (Reed).
-// Waehrenddessen blockiert der Hub jede Heim-/S24-STA-Aktivitaet (kein Connect, kein
-// Auto-Reconnect, kein Scan/Kanalwechsel) -> der Hub-AP bleibt fuer die Displays stabil.
+// [VARIANTE-A] Fahrzeug aktiv = Motor laeuft (RPM ueber Schwelle, NUR wenn frisch) ODER
+// faehrt (Reed). Waehrenddessen blockiert der Hub jede Heim-/S24-STA-Aktivitaet (kein
+// Connect, kein Auto-Reconnect, kein Scan/Kanalwechsel) -> der Hub-AP bleibt fuer die
+// Displays stabil.
 bool vehicleActive()
 {
 #if ENABLE_BLE_HUB
-  if (tuneSnapshot().rpm > ENGINE_RUNNING_RPM_THRESHOLD) return true;
+  uint16_t rpm = 0;
+  if (tuneRpmFresh(tuneSnapshot(), &rpm) && rpm > ENGINE_RUNNING_RPM_THRESHOLD) return true;
 #endif
 #if SPEED_REED_PIN >= 0
   if (speedKmh > 0.5f) return true;
@@ -2244,8 +2259,8 @@ void updateHourmeters()
 
   const SpartanReading snapshot = readingSnapshot();
 #if ENABLE_BLE_HUB
-  const TuneSnapshot tune = tuneSnapshot();
-  const bool rpmRunning = tune.rpm > ENGINE_RUNNING_RPM_THRESHOLD;
+  uint16_t tuneRpmNow = 0;
+  const bool rpmRunning = tuneRpmFresh(tuneSnapshot(), &tuneRpmNow) && tuneRpmNow > ENGINE_RUNNING_RPM_THRESHOLD;
 #else
   const bool rpmRunning = false;
 #endif
