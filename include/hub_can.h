@@ -12,11 +12,20 @@
 //   [4-5] advance_x10 (int16)                          [6]   map (uint8, kPa)
 //   [7]   flags: Bit0=kCockpitFlagLambdaValid, Bit1=kCockpitFlagTuneFresh,
 //                Bits2-3=status_code (0=ERR/1=WAIT/2=HEAT/3=OK, siehe
-//                docs/lambda-status-logik.md), Bits4-7 reserviert/0.
+//                docs/lambda-status-logik.md), Bit4=kCockpitFlagRealCan,
+//                Bits5-7 reserviert/0.
 constexpr uint8_t kCockpitFlagLambdaValid = 0x01;
 constexpr uint8_t kCockpitFlagTuneFresh   = 0x02;
 constexpr uint8_t kCockpitStatusBitShift  = 2;
 constexpr uint8_t kCockpitStatusBitMask   = 0x03;  // << kCockpitStatusBitShift
+// [SICHERHEIT] Bit4 = 1 NUR wenn der Lambda-Wert wirklich von einem echten
+// Spartan-Frame ueber CAN kommt (SpartanReading.fromCan). 0 heisst: Demo-Modus,
+// Lambda-Testmodus, oder ADC-Fallback -- der Wert ist SIMULIERT/ERSATZ, keine
+// reale Messung. Ohne dieses Bit konnte ein Display, das nur den CAN-Cockpit-
+// Frame liest (nicht /api/status), Demo-Daten nicht von echten unterscheiden --
+// das hat am 2026-07-14 dazu gefuehrt, dass der Vergaser anhand simulierter
+// Werte verstellt wurde, waehrend CAN zum Spartan zeitweise ausgefallen war.
+constexpr uint8_t kCockpitFlagRealCan     = 0x10;
 static twai_timing_config_t canTimingFromKbps(uint16_t kbps)
 {
   switch (kbps) {
@@ -153,6 +162,7 @@ void updateCan()
     if (snap.valid) flags |= kCockpitFlagLambdaValid;   // Frame kam an, sagt NICHTS ueber status_code
     if (tuneFresh)  flags |= kCockpitFlagTuneFresh;
     flags |= static_cast<uint8_t>((snap.status & kCockpitStatusBitMask) << kCockpitStatusBitShift);
+    if (snap.fromCan) flags |= kCockpitFlagRealCan;   // 0 = Demo/Test/ADC -- simulierter Wert, keine echte Messung
 
     twai_message_t tx = {};
     tx.identifier        = cockpitCanIdCfg;
