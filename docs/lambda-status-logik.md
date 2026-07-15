@@ -110,7 +110,7 @@ den echten Wert trägt.
 unverändert):
 
 ```
-Byte 7 (flags):  Bit0=LambdaValid  Bit1=TuneFresh  Bits2-3=status_code  Bits4-7=reserviert
+Byte 7 (flags):  Bit0=LambdaValid  Bit1=TuneFresh  Bits2-3=status_code  Bit4=RealCan  Bits5-7=reserviert
 ```
 
 Display-seitig zum Auswerten:
@@ -118,6 +118,47 @@ Display-seitig zum Auswerten:
 status_code = (flags >> 2) & 0x03;   // 0=ERR 1=WAIT 2=HEAT 3=OK
 bereit      = status_code == 3;      // entspricht dem HTTP-Feld status=="OK"
 ```
+
+## ⚠️ Sicherheitsbug gefunden + gefixt (2026-07-14): Demo/Test-Daten nicht von echten unterscheidbar
+
+**Vorfall:** Am 2026-07-14 fiel während der Fahrt CAN zum Spartan zeitweise
+aus. Der Hub fiel automatisch auf den DEMO-Modus zurück (simulierte, feste
+Werte) — aber **weder das Display noch der CAN-Cockpit-Frame zeigten das
+an**. Der Fahrer hielt die simulierten Werte für echte Messwerte und **hat
+danach den Vergaser real verstellt** — auf Basis von Fake-Daten. Kein
+Personenschaden, aber ein reales Fehlbedienungsrisiko.
+
+**Root Cause:** `flags & 0x01` (Bit0, `LambdaValid`) sagt nur "irgendein
+Lambda-Wert kam an" — das ist bei DEMO/TEST/ADC-Fallback genauso `true` wie
+bei echtem CAN (`SpartanReading.valid` wird in **jedem** Lesepfad gesetzt,
+nicht nur bei echten CAN-Frames). Über HTTP existierte das `source`-Feld
+(`"CAN"`/`"DEMO"`/`"TEST"`/`"ADC"`/`"NONE"`) bereits lange und macht das
+korrekt sichtbar — **aber der CAN-Cockpit-Frame hatte kein äquivalentes Bit**,
+und offenbar wertete auch das Display das vorhandene `source`-Feld nicht
+sichtbar genug (oder gar nicht) aus.
+
+**Fix:** neues **Bit 4** (`kCockpitFlagRealCan`) im `flags`-Byte — `1` **nur**
+wenn der Wert wirklich aus einem echten Spartan-CAN-Frame stammt
+(`SpartanReading.fromCan`), `0` bei DEMO/TEST/ADC-Fallback:
+
+```
+Byte 7 (flags):  ... Bit4=RealCan (1=echtes CAN, 0=SIMULIERT/Ersatzwert -- NICHT vertrauen!)
+```
+
+**Display-seitig zwingend zu prüfen (beide Wege, je nachdem was das Display nutzt):**
+```
+// Über HTTP /api/status:
+istEcht = (source === "CAN");
+
+// Über CAN-Cockpit-Frame 0x510, Byte 7:
+istEcht = (flags & 0x10) !== 0;
+```
+
+**Wenn `istEcht == false`: das Display MUSS das deutlich sichtbar machen**
+(z. B. "SIMULIERT"/"DEMO" statt der Lambda-Zahl, oder ein auffälliges
+Warnsymbol) — niemals stillschweigend Zahlen anzeigen, die nicht von der
+echten Sonde kommen. Genau das Fehlen dieser Anzeige hat den Vorfall
+verursacht.
 
 Komplettes Byte-Layout: siehe Kommentar am Kopf von
 [`include/hub_can.h`](../include/hub_can.h).
