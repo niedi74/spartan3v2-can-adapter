@@ -13,8 +13,13 @@ String statusJson()
   const uint32_t now = millis();
   String json;
   json.reserve(3600);  // verhindert wiederholte Heap-Reallokationen
+  // [STALE-LAMBDA-FIX] valid nur melden, wenn der Wert auch FRISCH ist -- sonst
+  // liefert ein toter CAN-Link (ohne Demo/ADC-Fallback) den letzten Lambda-Wert
+  // fuer immer als "valid" und Anzeigen halten Alt-Daten fuer aktuelle Messwerte.
+  const bool snapshotFresh =
+      snapshot.valid && (now - snapshot.receivedMs) <= kLambdaFreshMs;
   json += "{\"valid\":";
-  json += snapshot.valid ? "true" : "false";
+  json += snapshotFresh ? "true" : "false";
   json += ",\"lambda\":";
   json += String(snapshot.lambda, 3);
   json += ",\"temperature\":";
@@ -145,18 +150,26 @@ String statusJson()
     json += "}";
   }
   json += "],\"ble_scan\":[";
-  for (uint8_t i = 0; i < bleScanDeviceCount; i++) {
+  // [BLE-STRING-RACE-FIX] Scan-Liste unter stateMux in lokale Kopie ziehen --
+  // der NimBLE-Host-Task schreibt sie gleichzeitig (recordBleScanDevice).
+  BleScanDevice scanCopy[kBleScanDeviceMax];
+  uint8_t scanCount;
+  portENTER_CRITICAL(&stateMux);
+  scanCount = bleScanDeviceCount;
+  for (uint8_t i = 0; i < scanCount; i++) scanCopy[i] = bleScanDevices[i];
+  portEXIT_CRITICAL(&stateMux);
+  for (uint8_t i = 0; i < scanCount; i++) {
     if (i > 0) json += ",";
     json += "{\"addr\":\"";
-    json += bleScanDevices[i].address;
+    json += scanCopy[i].address;
     json += "\",\"name\":\"";
-    json += jsonEscape(bleScanDevices[i].name);
+    json += jsonEscape(scanCopy[i].name);
     json += "\",\"rssi\":";
-    json += String(bleScanDevices[i].rssi);
+    json += String(scanCopy[i].rssi);
     json += ",\"age_ms\":";
-    json += String(now - bleScanDevices[i].seenMs);
+    json += String(now - scanCopy[i].seenMs);
     json += ",\"tune\":";
-    json += bleScanDevices[i].tuneLike ? "true" : "false";
+    json += scanCopy[i].tuneLike ? "true" : "false";
     json += "}";
   }
   json += "]";
@@ -334,7 +347,11 @@ String statusJson()
   json += ",\"tune_unknown_opcode\":";
   json += String(tune.unknownOpcodeCount);
   json += ",\"tune_saved_address\":\"";
-  json += tuneSavedAddress;
+  {
+    char savedMac[18];
+    copyTuneSavedAddress(savedMac);  // [BLE-STRING-RACE-FIX] Kopie unter stateMux
+    json += savedMac;
+  }
   json += "\"";
   json += ",\"rpm\":";
   json += String(static_cast<int>(tune.rpm));

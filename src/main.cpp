@@ -241,6 +241,13 @@ bool lcdReady = false;
 constexpr uint32_t kDisplayIntervalMs = 200;
 constexpr uint32_t kBleNotifyIntervalMs = 250;
 constexpr uint32_t kCanStaleMs = 500;
+// [STALE-LAMBDA-FIX] SpartanReading.valid wird beim Schreiben gesetzt, aber nie
+// wieder geloescht -- stirbt die Quelle (z.B. CAN faellt aus und Demo/ADC-Fallback
+// ist deaktiviert), meldeten /api/status und der 0x510-Cockpit-Frame den letzten
+// Wert fuer immer als "valid". Konsumenten pruefen deshalb zusaetzlich das Alter
+// (receivedMs); alle simulierten Quellen (Demo/Test/ADC) schreiben ohnehin im
+// Sub-Sekunden-Takt und bleiben damit immer frisch.
+constexpr uint32_t kLambdaFreshMs = 3000;
 // BLE-Bridge UART: optionaler zweiter ESP32 liefert 123-Daten per UART.
 // Pin-Belegung wird zur Laufzeit per Dev-Tab gesetzt und in NVS gespeichert.
 // RX-Pin 0 = UART-Bridge deaktiviert (Default nach Erase).
@@ -440,17 +447,40 @@ uint32_t curveReadStartMs = 0;
 uint8_t  curveReadPhase = 0;   // 1..4 = naechster zu sendender Block, 0 = idle
 uint32_t tuneScanSeen = 0;
 uint32_t tuneScanCandidates = 0;
-String tuneSavedAddress = "";
+// [BLE-STRING-RACE-FIX] tuneSavedAddress und bleScanDevices[] werden vom NimBLE-
+// Host-Task (Scan-Callbacks) beschrieben und vom loop()-Task (statusJson, WebGUI)
+// gelesen. Arduino-Strings reallozieren beim Zuweisen ihren Heap-Puffer -- ein
+// gleichzeitiger Leser dereferenziert dann freigegebenen Speicher (Use-after-free,
+// korruptes JSON oder Absturz waehrend der Fahrt). Deshalb feste char-Puffer, alle
+// Zugriffe unter stateMux (memcpy/strcmp sind critical-section-tauglich, String-
+// Heap-Operationen nicht).
+char tuneSavedAddress[18] = "";           // MAC-Text, Zugriff nur ueber Helfer unten
+volatile bool tuneSavedAddressDirty = false;  // NVS-Write im loop()-Task nachziehen
+void setTuneSavedAddressLocked(const char *mac)
+{
+  char buf[18];
+  strlcpy(buf, mac, sizeof(buf));
+  for (char *p = buf; *p; ++p) *p = static_cast<char>(tolower(*p));
+  portENTER_CRITICAL(&stateMux);
+  memcpy(tuneSavedAddress, buf, sizeof(tuneSavedAddress));
+  portEXIT_CRITICAL(&stateMux);
+}
+void copyTuneSavedAddress(char out[18])
+{
+  portENTER_CRITICAL(&stateMux);
+  memcpy(out, tuneSavedAddress, 18);
+  portEXIT_CRITICAL(&stateMux);
+}
 uint32_t tuneConnStartMs = 0;  // Start der aktuellen 123-Verbindung (für Stale-Bezug)
 struct BleScanDevice {
-  String address;
-  String name;
+  char address[18] = "";
+  char name[25] = "";   // BLE-Kurzname, laengere werden abgeschnitten
   int rssi = 0;
   bool tuneLike = false;
   uint32_t seenMs = 0;
 };
 constexpr uint8_t kBleScanDeviceMax = 12;
-BleScanDevice bleScanDevices[kBleScanDeviceMax];
+BleScanDevice bleScanDevices[kBleScanDeviceMax];  // Zugriff nur unter stateMux
 uint8_t bleScanDeviceCount = 0;
 #endif
 #if ENABLE_WEB_GUI
@@ -951,27 +981,35 @@ void recordBleScanDevice(const NimBLEAdvertisedDevice *device, bool tuneLike)
                 address.c_str(), rssi, name.length() ? name.c_str() : "---",
                 mfg.c_str(), tuneLike ? 1 : 0);
 
+  // [BLE-STRING-RACE-FIX] Suche+Schreiben atomar unter stateMux (nur strcmp/strlcpy,
+  // keine Heap-Operationen); Count erst NACH dem Befuellen erhoehen, damit der
+  // JSON-Leser nie einen halb geschriebenen Slot sieht.
+  portENTER_CRITICAL(&stateMux);
   uint8_t slot = bleScanDeviceCount;
   for (uint8_t i = 0; i < bleScanDeviceCount; i++) {
-    if (bleScanDevices[i].address == address) {
+    if (strcmp(bleScanDevices[i].address, address.c_str()) == 0) {
       slot = i;
       break;
     }
   }
+  bool isNew = false;
   if (slot >= kBleScanDeviceMax) {
     slot = 0;
     for (uint8_t i = 1; i < bleScanDeviceCount; i++) {
       if (bleScanDevices[i].seenMs < bleScanDevices[slot].seenMs) slot = i;
     }
+    bleScanDevices[slot].tuneLike = false;  // LRU-Slot recycelt: altes Flag verwerfen
   } else if (slot == bleScanDeviceCount) {
-    bleScanDeviceCount++;
+    isNew = true;
   }
 
-  bleScanDevices[slot].address = address;
-  bleScanDevices[slot].name = name;
+  strlcpy(bleScanDevices[slot].address, address.c_str(), sizeof(bleScanDevices[slot].address));
+  strlcpy(bleScanDevices[slot].name, name.c_str(), sizeof(bleScanDevices[slot].name));
   bleScanDevices[slot].rssi = rssi;
   bleScanDevices[slot].tuneLike = bleScanDevices[slot].tuneLike || tuneLike;
   bleScanDevices[slot].seenMs = now;
+  if (isNew) bleScanDeviceCount++;
+  portEXIT_CRITICAL(&stateMux);
 }
 #endif
 
@@ -1329,8 +1367,15 @@ const char *tuneLinkStateText(TuneLinkState state)
 
 void setTuneLinkState(TuneLinkState state, const char *detail)
 {
-  if (tuneLinkState == state) return;
-  tuneLinkState = state;
+  // [TUNE-STATE-RACE-FIX] Wird aus loop()-Task UND NimBLE-Host-Task aufgerufen;
+  // Check-then-Set ohne Lock konnte eine Transition verlieren (z.B. Idle nach
+  // resetTuneClient ueberschrieben von spaetem Streaming) und damit Advertising/
+  // Scan-Gates dauerhaft blockieren.
+  portENTER_CRITICAL(&stateMux);
+  const bool changed = (tuneLinkState != state);
+  if (changed) tuneLinkState = state;
+  portEXIT_CRITICAL(&stateMux);
+  if (!changed) return;
   char buf[96];
   if (detail != nullptr && detail[0] != '\0') {
     snprintf(buf, sizeof(buf), "%s|%s", tuneLinkStateText(state), detail);
@@ -1487,9 +1532,15 @@ String apStationIpFromMac(const uint8_t mac[6])
 
 void refreshWifiApStations()
 {
+  // [POLL-PERF] Wird pro /api/status-Poll doppelt erreicht (recordWifiHttpPoller +
+  // statusJson) und von mehreren Clients mit 5-10 Hz -- der WiFi-Treiber-Call plus
+  // String-Formatierung pro Station braucht nicht oefter als 2x/s zu laufen.
+  static uint32_t lastRefreshMs = 0;
+  const uint32_t now = millis();
+  if (lastRefreshMs != 0 && now - lastRefreshMs < 500) return;
+  lastRefreshMs = now;
   wifi_sta_list_t list = {};
   if (esp_wifi_ap_get_sta_list(&list) != ESP_OK) return;
-  const uint32_t now = millis();
   bool seen[kWifiApStationMax] = {};
 
   for (int i = 0; i < list.num && i < kWifiApStationMax; i++) {
@@ -2020,9 +2071,15 @@ bool initializeLogFilesystem(bool forceFormat = false)
   return true;
 }
 
+// [LOG-PERF] Header nur einmal pro Boot/Rotation pruefen statt bei jedem 500ms-
+// Append die Datei zu oeffnen und die erste Zeile zu vergleichen (3 SPIFFS-Opens
+// pro CSV-Zeile summieren sich bei wochenlangem Betrieb zu spuerbarer loop()-Latenz).
+bool logHeaderVerified = false;
+
 void ensureLogHeader()
 {
   if (!logFsReady) return;
+  if (logHeaderVerified && logCurrentBytes > 0) return;
   const String expectedHeader = logHeader();
   bool needsHeader = logCurrentBytes == 0;
   if (!needsHeader) {
@@ -2040,7 +2097,10 @@ void ensureLogHeader()
     }
     if (existing) existing.close();
   }
-  if (!needsHeader) return;
+  if (!needsHeader) {
+    logHeaderVerified = true;
+    return;
+  }
   File f = SPIFFS.open(kLogFile, FILE_WRITE);
   if (!f) {
     // Do NOT call SPIFFS.format() here — this is called from appendLiveCsv()
@@ -2056,19 +2116,20 @@ void ensureLogHeader()
   f.println(expectedHeader);
   logCurrentBytes = f.size();
   f.close();
+  logHeaderVerified = true;
 }
 
 void rotateLogIfNeeded()
 {
   if (!logFsReady || logCurrentBytes == 0) return;
-  File f = SPIFFS.open(kLogFile, FILE_READ);
-  const size_t size = f ? f.size() : 0;
-  if (f) f.close();
-  if (size < kMaxLogBytes) return;
+  // [LOG-PERF] Groesse aus dem gepflegten Zaehler statt extra SPIFFS-Open pro Append
+  // (logCurrentBytes wird nach jedem Write und in ensureLogHeader aktualisiert).
+  if (logCurrentBytes < kMaxLogBytes) return;
   SPIFFS.remove(kOldLogFile);
   SPIFFS.rename(kLogFile, kOldLogFile);
-  logOldBytes = size;
+  logOldBytes = logCurrentBytes;
   logCurrentBytes = 0;
+  logHeaderVerified = false;
   ensureLogHeader();
 }
 
@@ -3044,22 +3105,21 @@ void setup()
   // MAC aus NVS laden (vom letzten Setup-Scan), sonst Compile-Default
   ensurePreferences();
   if (networkPreferences.isKey("tune_mac")) {
-    tuneSavedAddress = networkPreferences.getString("tune_mac", kTuneTargetAddress);
+    setTuneSavedAddressLocked(networkPreferences.getString("tune_mac", kTuneTargetAddress).c_str());
   } else {
-    tuneSavedAddress = kTuneTargetAddress;  // ef:a8:b2:de:e0:9e (Default-Emu/echte 123)
+    setTuneSavedAddressLocked(kTuneTargetAddress);  // ef:a8:b2:de:e0:9e (Default-Emu/echte 123)
     Serial.printf("Bridge:      kein MAC gespeichert, nutze Default %s\n", kTuneTargetAddress);
   }
-  tuneSavedAddress.toLowerCase();
-  Serial.printf("Bridge:      Ziel-MAC = %s\n", tuneSavedAddress.c_str());
+  Serial.printf("Bridge:      Ziel-MAC = %s\n", tuneSavedAddress);
   // UART zum S3: TX=GPIO4, RX=GPIO5 (C6: freie Pins, kein Strapping/DAC)
   Serial1.begin(115200, SERIAL_8N1, 5, 4);  // RX=GPIO5, TX=GPIO4
   // MAC als Zieladresse setzen — direkt verbinden ohne Scan.
   // scheduleTuneScan(true) plant einen schnellen Connect-Versuch (500ms), der über
   // connectTune() direkt auf tuneTargetAddress geht (kein Scan da addrMatch=1).
-  tuneTargetAddress = NimBLEAddress(std::string(tuneSavedAddress.c_str()), BLE_ADDR_RANDOM);
+  tuneTargetAddress = NimBLEAddress(std::string(tuneSavedAddress), BLE_ADDR_RANDOM);
   scheduleTuneScan(true);  // startet schnellen Connect (500ms Delay)
   Serial.printf("Bridge:      Verbinde direkt auf %s (kein Hintergrund-Scan)\n",
-                tuneSavedAddress.c_str());
+                tuneSavedAddress);
   return;
 #endif
 

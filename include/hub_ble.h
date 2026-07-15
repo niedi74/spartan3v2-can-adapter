@@ -150,7 +150,12 @@ void scheduleTuneScan(bool fastRetry = false)
     delayMs = kTuneReconnectDelayMs * min((uint32_t)tuneFailStreak, 2UL); // max 2× = 10s
     if (delayMs > 5000UL) delayMs = 5000UL;  // niemals länger als 5s
   }
+  // [TUNE-SCAN-RACE-FIX] tuneNextScanMs wird von loop()- UND NimBLE-Host-Task
+  // beschrieben; Schreiben unter stateMux, damit ein Reschedule nicht vom
+  // gleichzeitigen Check-then-Clear in updateTuneBle() verschluckt wird.
+  portENTER_CRITICAL(&stateMux);
   tuneNextScanMs = millis() + delayMs;
+  portEXIT_CRITICAL(&stateMux);
   setTuneLinkState(TuneLinkState::Idle, fastRetry ? "retry_fast" : "retry_scheduled");
 }
 
@@ -218,8 +223,10 @@ class TuneClientCallbacks : public NimBLEClientCallbacks {
     tuneFailStreak = 0;
 #if BLE_BRIDGE
     // Bridge: kein Scan nach Disconnect — direkt auf bekannte MAC reconnecten.
-    if (tuneSavedAddress.length() == 17) {
-      tuneTargetAddress = NimBLEAddress(std::string(tuneSavedAddress.c_str()), BLE_ADDR_RANDOM);
+    char savedMac[18];
+    copyTuneSavedAddress(savedMac);
+    if (strlen(savedMac) == 17) {
+      tuneTargetAddress = NimBLEAddress(std::string(savedMac), BLE_ADDR_RANDOM);
       tuneDoConnect = true;
       Serial.println("123TUNE BLE: Bridge -> direkt reconnect (kein Scan)");
     } else {
@@ -279,7 +286,9 @@ class TuneScanCallbacks : public NimBLEScanCallbacks {
     String name = device->getName().c_str();
     name.toLowerCase();
     const bool addressMatches = address == kTuneTargetAddress;
-    const bool savedAddressMatches = tuneSavedAddress.length() > 0 && address == tuneSavedAddress;
+    char savedMac[18];
+    copyTuneSavedAddress(savedMac);
+    const bool savedAddressMatches = savedMac[0] != '\0' && address == savedMac;
     const bool advertisesNus = device->isAdvertisingService(NimBLEUUID(kTuneNusServiceUuid));
     const bool nameLooksLikeTune = name.indexOf("123") >= 0 || name.indexOf("tune") >= 0 || name.indexOf("raytac") >= 0;
     recordBleScanDevice(device, advertisesNus || nameLooksLikeTune || addressMatches || savedAddressMatches);
@@ -288,16 +297,17 @@ class TuneScanCallbacks : public NimBLEScanCallbacks {
     }
 
     tuneTargetAddress = device->getAddress();
-    if (tuneSavedAddress != address) {
-      tuneSavedAddress = address;
-#if ENABLE_WEB_GUI
-      ensurePreferences();
-      networkPreferences.putString("tune_mac", tuneSavedAddress);
-#endif
-      Serial.printf("123TUNE BLE: saved address %s\n", tuneSavedAddress.c_str());
+    if (address != savedMac) {
+      setTuneSavedAddressLocked(address.c_str());
+      // [BLE-STRING-RACE-FIX] NVS-Write (blockierender Flash-Commit) NICHT im
+      // NimBLE-Host-Task -- Flag setzen, updateTuneBle() im loop() persistiert.
+      tuneSavedAddressDirty = true;
+      Serial.printf("123TUNE BLE: saved address %s\n", address.c_str());
     }
     tuneDoConnect = true;
+    portENTER_CRITICAL(&stateMux);
     tuneNextScanMs = 0;
+    portEXIT_CRITICAL(&stateMux);
     tuneScanCandidates++;
     NimBLEDevice::getScan()->stop();
     markBleCentralScanEnded();
@@ -628,6 +638,18 @@ void runTuneReadDump()
 void updateTuneBle()
 {
   const uint32_t now = millis();
+  // [BLE-STRING-RACE-FIX] Vom Scan-Callback (NimBLE-Host-Task) gemerkte neue
+  // Ziel-MAC hier im loop()-Task nach NVS schreiben (blockierender Flash-Commit
+  // gehoert nicht in den BLE-Callback).
+  if (tuneSavedAddressDirty) {
+    tuneSavedAddressDirty = false;
+    char savedMac[18];
+    copyTuneSavedAddress(savedMac);
+#if ENABLE_WEB_GUI
+    ensurePreferences();
+    networkPreferences.putString("tune_mac", savedMac);
+#endif
+  }
   // [TUNE-SAFE] Dead-Man: verliert die GUI den Hub (Handy-WLAN weg), darf der
   // Zuend-Offset nicht am laufenden Motor stehen bleiben. Ohne Tune-API-Aktivitaet
   // (Steps/Ping der GUI) fuer 60 s -> Modus verlassen; die 123 verwirft den Offset
@@ -681,15 +703,25 @@ void updateTuneBle()
     }
     return;
   }
-  if (tuneNextScanMs != 0 && static_cast<int32_t>(now - tuneNextScanMs) >= 0) {
+  // [TUNE-SCAN-RACE-FIX] Deadline unter stateMux lesen und nur loeschen, wenn sie
+  // unveraendert ist -- ein gleichzeitiges Reschedule vom NimBLE-Host-Task
+  // (onScanEnd/onDisconnect) darf nicht verschluckt werden.
+  portENTER_CRITICAL(&stateMux);
+  const uint32_t scanDue = tuneNextScanMs;
+  portEXIT_CRITICAL(&stateMux);
+  if (scanDue != 0 && static_cast<int32_t>(now - scanDue) >= 0) {
     if (!bleCentralScanActive && !tuneDoConnect) {
-      tuneNextScanMs = 0;
+      portENTER_CRITICAL(&stateMux);
+      if (tuneNextScanMs == scanDue) tuneNextScanMs = 0;
+      portEXIT_CRITICAL(&stateMux);
       startTuneScan();
     } else {
       // Funk gerade anderweitig belegt (nur EIN zentraler Scanner). Timer NICHT
       // löschen, sonst bleibt die 123 dauerhaft ohne Rescan hängen. Kurz erneut
       // versuchen — 123 hat Vorrang und greift sich den Scanner, sobald frei.
-      tuneNextScanMs = now + 300;
+      portENTER_CRITICAL(&stateMux);
+      if (tuneNextScanMs == scanDue) tuneNextScanMs = now + 300;
+      portEXIT_CRITICAL(&stateMux);
     }
   }
 }
@@ -754,12 +786,11 @@ void setupBleHub()
 #endif
 #if ENABLE_WEB_GUI
   ensurePreferences();
-  tuneSavedAddress = networkPreferences.isKey("tune_mac")
-      ? networkPreferences.getString("tune_mac", kTuneTargetAddress)
-      : String(kTuneTargetAddress);
-  tuneSavedAddress.toLowerCase();
+  setTuneSavedAddressLocked(networkPreferences.isKey("tune_mac")
+      ? networkPreferences.getString("tune_mac", kTuneTargetAddress).c_str()
+      : kTuneTargetAddress);
 #else
-  tuneSavedAddress = kTuneTargetAddress;
+  setTuneSavedAddressLocked(kTuneTargetAddress);
 #endif
 
 #if ENABLE_BLE_DISPLAY
@@ -789,7 +820,7 @@ void setupBleHub()
   Serial.printf("BLE hub:     service=%s\n", kBleServiceUuid);
   Serial.println("BLE hub:     advertising waits for 123TUNE or 30s fallback");
 #endif
-  Serial.printf("123TUNE BLE: target %s\n", tuneSavedAddress.c_str());
+  Serial.printf("123TUNE BLE: target %s\n", tuneSavedAddress);
   logHubEvent("tune_state", "boot|target_saved");
   if (hubFeatBle123) {
     startTuneScan();

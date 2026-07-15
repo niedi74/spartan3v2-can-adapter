@@ -150,7 +150,12 @@ void updateCan()
       advance   = tune.advance;
       mapKpa    = static_cast<uint8_t>(tune.map);
     }
-    const uint16_t lambdaX1000 = snap.valid ? static_cast<uint16_t>(snap.lambda * 1000.0f + 0.5f) : 0;
+    // [STALE-LAMBDA-FIX] valid allein reicht nicht: stirbt die Quelle (CAN weg,
+    // kein Fallback aktiv), bliebe der letzte Wert sonst fuer immer "gueltig" im
+    // Frame. Simulierte Quellen (Demo/Test/ADC) schreiben sub-sekuendlich und
+    // bleiben dadurch immer frisch.
+    const bool lambdaFreshNow = snap.valid && (now - snap.receivedMs) <= kLambdaFreshMs;
+    const uint16_t lambdaX1000 = lambdaFreshNow ? static_cast<uint16_t>(snap.lambda * 1000.0f + 0.5f) : 0;
     const int16_t  advX10      = static_cast<int16_t>(advance * 10.0f + (advance >= 0 ? 0.5f : -0.5f));
     // [COCKPIT-STATUS] flags&0x01 heisst nur "irgendein Lambda-Wert kam an" -- das
     // ist WAEHREND WAIT/HEAT genauso true wie bei OK (snap.valid wird in jedem
@@ -159,10 +164,12 @@ void updateCan()
     // (0..3, siehe statusTextC()) jetzt zusaetzlich in Bits 2-3 gepackt -- bestehende
     // flags&0x01/0x02-Konsumenten bleiben unveraendert kompatibel.
     uint8_t flags = 0;
-    if (snap.valid) flags |= kCockpitFlagLambdaValid;   // Frame kam an, sagt NICHTS ueber status_code
-    if (tuneFresh)  flags |= kCockpitFlagTuneFresh;
+    if (lambdaFreshNow) flags |= kCockpitFlagLambdaValid;   // Wert kam an UND ist frisch; sagt NICHTS ueber status_code
+    if (tuneFresh)      flags |= kCockpitFlagTuneFresh;
     flags |= static_cast<uint8_t>((snap.status & kCockpitStatusBitMask) << kCockpitStatusBitShift);
-    if (snap.fromCan) flags |= kCockpitFlagRealCan;   // 0 = Demo/Test/ADC -- simulierter Wert, keine echte Messung
+    // 0 = Demo/Test/ADC ODER veralteter CAN-Wert -- in beiden Faellen NICHT als
+    // echte aktuelle Messung vertrauen.
+    if (snap.fromCan && lambdaFreshNow) flags |= kCockpitFlagRealCan;
 
     twai_message_t tx = {};
     tx.identifier        = cockpitCanIdCfg;
