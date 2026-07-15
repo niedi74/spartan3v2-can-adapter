@@ -449,7 +449,9 @@ void setupWebGui()
                 ok ? "{\"ok\":true}" : "{\"ok\":false,\"error\":\"123 nicht streaming\"}");
   });
   server.on("/api/curve_read", HTTP_GET, []() {
-    String j = "{\"active\":"; j += curveReadActive ? "true" : "false";
+    String j;
+    j.reserve(96 + 2u * sizeof(curveReadBuf));  // eine Allokation statt O(n) Realloc pro Poll
+    j += "{\"active\":"; j += curveReadActive ? "true" : "false";
     j += ",\"len\":"; j += String(static_cast<unsigned>(curveReadLen));
     j += ",\"raw\":\"";
     static const char *H = "0123456789abcdef";
@@ -849,12 +851,12 @@ void setupWebGui()
       return;
     }
     ensurePreferences();
-    tuneSavedAddress = mac;
-    networkPreferences.putString("tune_mac", tuneSavedAddress);
+    setTuneSavedAddressLocked(mac.c_str());  // [BLE-STRING-RACE-FIX]
+    networkPreferences.putString("tune_mac", mac);
     resetTuneClient();
     tuneDoConnect = false;
     scheduleTuneScan();
-    Serial.printf("123TUNE BLE: target override %s\n", tuneSavedAddress.c_str());
+    Serial.printf("123TUNE BLE: target override %s\n", mac.c_str());
     server.sendHeader("Location", "/", true);
     server.send(303, "text/plain", "");
 #else

@@ -51,6 +51,10 @@ static bool w25qBusyWait()
   uint8_t status;
   do {
     status = w25qSpi.transfer(0x00);
+    // [W25Q-YIELD] Sektor-Erase dauert typ. 45-400ms -- ohne yield haengt der
+    // loop()-Task solange im SPI-Spin (Idle-Task/WDT/WiFi hungern). delay(1)
+    // gibt den Kern frei; CS bleibt aktiv, das Status-Polling ist davon unberuehrt.
+    if ((status & 0x01) && (millis() - t0) > 2) delay(1);
   } while ((status & 0x01) && (millis() - t0 < 600));
   digitalWrite(W25Q_CS_PIN, HIGH);
   w25qSpi.endTransaction();
