@@ -183,6 +183,7 @@ input:focus, select:focus { outline: none; border-color: #78ad43; }
 <button type="button" id="tabLog" class="tab" onclick="showTab('log')">Log</button>
 <button type="button" id="tabSetup" class="tab" onclick="showTab('setup')">Setup</button>
 <button type="button" id="tabDev" class="tab" onclick="showTab('dev')">Dev</button>
+<button type="button" id="tabPlan" class="tab" onclick="showTab('plan')">Plan</button>
 </div>
 <div class="tab-section" data-tab="live">
 <div class="card">
@@ -662,6 +663,34 @@ Leer lassen + speichern = zurueck zur Werks-MAC. <b>Loest einen Neustart aus.</b
 </details>
 </div></details>
 </div><!-- /tab dev -->
+<div class="tab-section" data-tab="plan" hidden>
+<details class="setup" open><summary>Anschlussplan ESP32-S3 Hub</summary><div class="inside">
+<p class="hint">Verdrahtung des Motorraum-Hubs. CAN/UART-Pins sind Laufzeit-Konfiguration (Dev-Tab) und werden live angezeigt.</p>
+<table style="width:100%;border-collapse:collapse;font-size:.92rem">
+<tr style="color:#9ed85b;text-align:left"><th style="padding:6px 4px">Funktion</th><th>GPIO</th><th>Gegenstelle / Hinweis</th></tr>
+<tr><td style="padding:6px 4px">CAN TX</td><td><strong id="plan_can_tx">11</strong></td><td>CAN-Transceiver (SN65HVD230) CTX</td></tr>
+<tr><td style="padding:6px 4px">CAN RX</td><td><strong id="plan_can_rx">10</strong></td><td>Transceiver CRX &mdash; CANH/CANL zum Spartan, 120&Omega; Abschluss</td></tr>
+<tr><td style="padding:6px 4px">W25Q128 CS</td><td><strong>13</strong></td><td rowspan="4">16-MB-SPI-Flash: Log-Backup + Config-Spiegel (3V3!)</td></tr>
+<tr><td style="padding:6px 4px">W25Q128 CLK</td><td><strong>14</strong></td></tr>
+<tr><td style="padding:6px 4px">W25Q128 DI (MOSI)</td><td><strong>15</strong></td></tr>
+<tr><td style="padding:6px 4px">W25Q128 DO (MISO)</td><td><strong>18</strong></td></tr>
+<tr><td style="padding:6px 4px">DS3231 SDA</td><td><strong>4</strong></td><td rowspan="2">RTC-Modul, 3V3 + CR2032 (GPIO 8/9 dieses Boards defekt &mdash; nicht nutzen)</td></tr>
+<tr><td style="padding:6px 4px">DS3231 SCL</td><td><strong>5</strong></td></tr>
+<tr><td style="padding:6px 4px">Speed-Reed (MC-38)</td><td><strong>12</strong></td><td>direkt Reed &harr; GND, interner Pullup, 10 Magnete/Radumdrehung</td></tr>
+<tr><td style="padding:6px 4px">Status-LED</td><td><strong>2</strong></td><td>an = Lambda-Status OK</td></tr>
+<tr><td style="padding:6px 4px">UART-Bridge RX/TX</td><td><strong id="plan_uart">aus</strong></td><td>optionaler 123-Bridge-ESP (Dev-Tab, 0 = deaktiviert)</td></tr>
+<tr><td style="padding:6px 4px">Analog-Fallback</td><td><strong>34</strong></td><td>Spartan 0-5V-Ausgang &uuml;ber Teiler (nur ohne CAN)</td></tr>
+</table>
+</div></details>
+<details class="setup"><summary>Bus &amp; Versorgung</summary><div class="inside">
+<div class="row"><span>CAN-Bus</span><strong>500 kbit/s &middot; Spartan 0x400 &rarr; Hub &middot; Hub 0x510 &rarr; Displays</strong></div>
+<div class="row"><span>0x510 Byte 7 (Flags)</span><strong>Bit0 LambdaValid &middot; Bit1 TuneFresh &middot; Bit2-3 Status &middot; Bit4 RealCan</strong></div>
+<div class="hint" style="font-size:11px;margin:4px 0">Bit4=0 hei&szlig;t SIMULIERT (Demo/Test/ADC) &mdash; Displays m&uuml;ssen das sichtbar machen! Details: docs/lambda-status-logik.md im Repo.</div>
+<div class="row"><span>Versorgung</span><strong>5V Buck vom Bordnetz (Kl. 15)</strong></div>
+<div class="hint" style="font-size:11px;margin:4px 0">Achtung Unterspannung beim Anlassen: unter ~10,5V verstummt der Spartan auf CAN (rx_err bleibt niedrig &mdash; sieht aus wie Kabelfehler, ist aber Spannung).</div>
+<div class="row"><span>Netz</span><strong>Live-AP 192.168.4.1 &middot; Test-AP 192.168.5.1 &middot; Heimnetz .71/.87</strong></div>
+</div></details>
+</div><!-- /tab plan -->
 <script>
 async function wifiScan(){
   const info=document.getElementById('wifiScanInfo'), sel=document.getElementById('wifiScanSel');
@@ -719,12 +748,21 @@ function showTab(name) {
   document.getElementById('tabLog').classList.toggle('on', name === 'log');
   document.getElementById('tabSetup').classList.toggle('on', name === 'setup');
   document.getElementById('tabDev').classList.toggle('on', name === 'dev');
+  { const t=document.getElementById('tabPlan'); if(t) t.classList.toggle('on', name === 'plan'); }
   try { localStorage.setItem('spartanTab', name); } catch (e) {}
 }
 try {
   const saved = localStorage.getItem('spartanTab');
-  if (saved === 'setup' || saved === 'log' || saved === 'diag' || saved === 'dev' || saved === 'g123' || saved === 'curve') showTab(saved);
+  if (saved === 'setup' || saved === 'log' || saved === 'diag' || saved === 'dev' || saved === 'g123' || saved === 'curve' || saved === 'plan') showTab(saved);
 } catch (e) {}
+// [PLAN-TAB] Laufzeit-Pins (Dev-Tab-Konfiguration) einmalig in den Anschlussplan eintragen
+(async()=>{try{
+  const d=await(await fetch('/api/status',{cache:'no-store'})).json();
+  if(d.can_tx_pin!==undefined)document.getElementById('plan_can_tx').textContent=d.can_tx_pin;
+  if(d.can_rx_pin!==undefined)document.getElementById('plan_can_rx').textContent=d.can_rx_pin;
+  const ur=d.uart_rx_pin||0, ut=d.uart_tx_pin||0;
+  document.getElementById('plan_uart').textContent=(ur>0)?('RX='+ur+' / TX='+ut):'aus';
+}catch(e){}})();
 function credShow() {
   const v = (document.getElementById('credFor') || {}).value || '1';
   const f1 = document.getElementById('credForm1'), f2 = document.getElementById('credForm2');
