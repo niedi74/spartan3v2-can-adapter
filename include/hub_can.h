@@ -37,6 +37,13 @@ constexpr uint8_t kCockpitFlagRealCan     = 0x10;
 //   [4-5] speed_kmh_x10 (uint16)     [6] flags: Bit0=kCockpitExtFlagTuneFresh
 //   [7]   reserviert/0
 constexpr uint8_t kCockpitExtFlagTuneFresh = 0x01;
+
+// [COCKPIT-EXT2-FRAME] Drittes Frame (ID = cockpitCanIdCfg+2, z.B. 0x512) fuer
+// Kilometerstand/Trip/Motorstunden -- das Display ist das Fahrt-Frontend, diese
+// Werte sollen bei schwachem WLAN nicht fehlen (Uhrzeit + Live-Tuning-Schreib-
+// zugriff bleiben bewusst HTTP-only, siehe docs/lambda-status-logik.md).
+//   [0-3] odo_km_x10 (uint32, big-endian, Gesamtstrecke)
+//   [4-5] trip_km_x10 (uint16)         [6-7] engine_hours_x10 (uint16)
 static twai_timing_config_t canTimingFromKbps(uint16_t kbps)
 {
   switch (kbps) {
@@ -252,6 +259,34 @@ void updateCan()
     tx2.data[6] = tuneFresh ? kCockpitExtFlagTuneFresh : 0;
     tx2.data[7] = 0;
     if (twai_transmit(&tx2, pdMS_TO_TICKS(5)) == ESP_OK) {
+      if (cockpitCanTxCount < UINT32_MAX) cockpitCanTxCount++;
+    } else {
+      if (cockpitCanTxErrors < UINT32_MAX) cockpitCanTxErrors++;
+    }
+
+    // --- Ext2-Frame: Odo/Trip/Motorstunden, gleiche ID+2 ---
+    double odoKmScaled = static_cast<double>(odoMm) / 100000.0 + 0.5;    // mm -> km*10
+    double tripKmScaled = static_cast<double>(tripMm) / 100000.0 + 0.5;
+    double engHoursScaled = static_cast<double>(engineSeconds) / 360.0 + 0.5;  // s -> h*10
+    if (odoKmScaled > 4294967295.0) odoKmScaled = 4294967295.0;
+    if (tripKmScaled > 65535.0) tripKmScaled = 65535.0;
+    if (engHoursScaled > 65535.0) engHoursScaled = 65535.0;
+    const uint32_t odoKmX10 = static_cast<uint32_t>(odoKmScaled);
+    const uint16_t tripKmX10 = static_cast<uint16_t>(tripKmScaled);
+    const uint16_t engHoursX10 = static_cast<uint16_t>(engHoursScaled);
+
+    twai_message_t tx3 = {};
+    tx3.identifier       = static_cast<uint32_t>(cockpitCanIdCfg) + 2;
+    tx3.data_length_code = 8;
+    tx3.data[0] = static_cast<uint8_t>((odoKmX10 >> 24) & 0xFF);
+    tx3.data[1] = static_cast<uint8_t>((odoKmX10 >> 16) & 0xFF);
+    tx3.data[2] = static_cast<uint8_t>((odoKmX10 >> 8) & 0xFF);
+    tx3.data[3] = static_cast<uint8_t>(odoKmX10 & 0xFF);
+    tx3.data[4] = static_cast<uint8_t>(tripKmX10 >> 8);
+    tx3.data[5] = static_cast<uint8_t>(tripKmX10 & 0xFF);
+    tx3.data[6] = static_cast<uint8_t>(engHoursX10 >> 8);
+    tx3.data[7] = static_cast<uint8_t>(engHoursX10 & 0xFF);
+    if (twai_transmit(&tx3, pdMS_TO_TICKS(5)) == ESP_OK) {
       if (cockpitCanTxCount < UINT32_MAX) cockpitCanTxCount++;
     } else {
       if (cockpitCanTxErrors < UINT32_MAX) cockpitCanTxErrors++;
