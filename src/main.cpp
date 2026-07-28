@@ -323,6 +323,8 @@ bool canReady = false;
 twai_status_info_t canStatus = {};
 uint32_t lastCanStatusMs = 0;
 uint32_t canStatusErrors = 0;
+uint32_t canBusOffSinceMs = 0;   // [CAN-STUCK-RECOVERY-FIX] 0 = kein Bus-Off aktiv
+constexpr uint32_t kCanBusOffHardResetMs = 5000;
 uint32_t lastCockpitCanTxMs = 0;
 uint32_t cockpitCanTxCount  = 0;
 // [CAN-DEV] Laufzeit-Parameter (Dev-Tab): Pins/Bitrate/IDs aus NVS, Default aus den
@@ -373,6 +375,11 @@ float speedKmh = 0.0f;
 bool vehicleActive();
 uint16_t tireCircMm = TIRE_CIRC_MM_DEFAULT;  // konfigurierbar
 uint16_t speedTrimPermil = SPEED_TRIM_PERMIL_DEFAULT; // 1000 = 1.000
+// [SPEED-PPR-CFG] Magnete am Reed-Rad: bisher hart PULSES_PER_REV (Compile-Konstante),
+// nicht in der WebGUI aenderbar -- musste im Urlaub bei einem provisorischen Umbau auf
+// 6 Magnete umgestellt werden und ging nicht ohne Neuflash. Jetzt Laufzeit-Wert, NVS-
+// persistiert, Default = PULSES_PER_REV.
+uint8_t pulsesPerRevCfg = PULSES_PER_REV;    // konfigurierbar (1..40)
 // [ODOMETER] Gesamt-km + Teilstrecke aus den Reed-Pulsen (exakter als Speed-
 // Integration): mm = Pulse * Radumfang * Trim / (1000 * PULSES_PER_REV).
 // Persistiert in NVS (odo_mm/trip_mm), gespart geschrieben (60s, nur bei Aenderung).
@@ -2767,6 +2774,10 @@ void setupSpeedReed()
   if (networkPreferences.isKey("trim_pm")) {
     speedTrimPermil = networkPreferences.getUShort("trim_pm", SPEED_TRIM_PERMIL_DEFAULT);
   }
+  if (networkPreferences.isKey("ppr")) {
+    const uint8_t stored = networkPreferences.getUChar("ppr", PULSES_PER_REV);
+    pulsesPerRevCfg = (stored >= 1 && stored <= 40) ? stored : PULSES_PER_REV;
+  }
   odoMm = networkPreferences.getULong64("odo_mm", 0);    // [ODOMETER]
   tripMm = networkPreferences.getULong64("trip_mm", 0);
   odoLastSavedMm = odoMm;
@@ -2775,7 +2786,7 @@ void setupSpeedReed()
   attachInterrupt(digitalPinToInterrupt(SPEED_REED_PIN), speedReedIsr, FALLING);
   speedPrevSampleMs = millis();
   Serial.printf("Speed:       Reed GPIO%d, %u pulses/rev, tire=%u mm, trim=%u permil\n",
-                SPEED_REED_PIN, PULSES_PER_REV, tireCircMm, speedTrimPermil);
+                SPEED_REED_PIN, pulsesPerRevCfg, tireCircMm, speedTrimPermil);
 }
 
 void updateSpeedReed()
@@ -2793,16 +2804,16 @@ void updateSpeedReed()
 
   const float hz = (1000.0f * static_cast<float>(pulses)) / static_cast<float>(dtMs);
   speedHz = hz;
-  // km/h = Hz * (TIRE_CIRC_MM / PULSES_PER_REV) / 1000 * 3.6 * trim
-  //      = Hz * tireCircMm * 0.0036 / PULSES_PER_REV * (trim/1000)
+  // km/h = Hz * (TIRE_CIRC_MM / pulsesPerRevCfg) / 1000 * 3.6 * trim
+  //      = Hz * tireCircMm * 0.0036 / pulsesPerRevCfg * (trim/1000)
   speedKmh = hz * static_cast<float>(tireCircMm) * 0.0036f
-             / static_cast<float>(PULSES_PER_REV)
+             / static_cast<float>(pulsesPerRevCfg)
              * (static_cast<float>(speedTrimPermil) / 1000.0f);
 
   // [ODOMETER] Strecke direkt aus den Pulsen (exakt, kein Integrationsfehler).
   if (pulses > 0) {
     const uint64_t addMm = static_cast<uint64_t>(pulses) * tireCircMm * speedTrimPermil
-                           / (1000ULL * PULSES_PER_REV);
+                           / (1000ULL * pulsesPerRevCfg);
     odoMm += addMm;
     tripMm += addMm;
   }

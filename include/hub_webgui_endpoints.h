@@ -602,6 +602,9 @@ void setupWebGui()
   server.on("/speed", HTTP_POST, []() {
     long tire = server.arg("tire").toInt();
     long trim = server.arg("trim").toInt();
+    // [SPEED-PPR-CFG] ppr optional -- Formular ohne das Feld (alte Seite im Cache)
+    // soll den bisherigen Wert nicht auf 0/ungueltig zuruecksetzen.
+    long ppr = server.hasArg("ppr") ? server.arg("ppr").toInt() : pulsesPerRevCfg;
     if (tire < 500 || tire > 4000) {
       server.send(400, "text/plain", "Reifenumfang 500..4000 mm");
       return;
@@ -610,13 +613,19 @@ void setupWebGui()
       server.send(400, "text/plain", "Trim 500..1500 (1000 = 1.000)");
       return;
     }
+    if (ppr < 1 || ppr > 40) {
+      server.send(400, "text/plain", "Magnete 1..40");
+      return;
+    }
     tireCircMm = static_cast<uint16_t>(tire);
     speedTrimPermil = static_cast<uint16_t>(trim);
+    pulsesPerRevCfg = static_cast<uint8_t>(ppr);
     ensurePreferences();
     networkPreferences.putUShort("tire_mm", tireCircMm);
     networkPreferences.putUShort("trim_pm", speedTrimPermil);
-    Serial.printf("Speed:       saved tire=%u mm, trim=%u permil\n",
-                  tireCircMm, speedTrimPermil);
+    networkPreferences.putUChar("ppr", pulsesPerRevCfg);
+    Serial.printf("Speed:       saved tire=%u mm, trim=%u permil, ppr=%u\n",
+                  tireCircMm, speedTrimPermil, pulsesPerRevCfg);
     server.sendHeader("Location", "/", true);
     server.send(303, "text/plain", "");
   });

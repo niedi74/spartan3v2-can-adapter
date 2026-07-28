@@ -407,8 +407,8 @@ input:focus, select:focus { outline: none; border-color: #78ad43; }
 <input id="odoSet" name="total_km" type="number" min="0" max="2000000" step="0.1" value="0">
 <button type="submit">Setzen</button>
 </form>
-<div class="row"><span>Pulse pro Umdrehung</span><strong id="spdppr">10</strong></div>
 <form action="/speed" method="post" style="margin-top:12px">
+<label>Magnete am Reed-Rad (Pulse/Umdrehung) <input type="number" name="ppr" min="1" max="40" id="ctlPpr" value="10"></label>
 <label>Reifenumfang (mm) <input type="number" name="tire" min="500" max="4000" id="ctlTire" value="2147"></label>
 <label>Trim (x1000) <input type="number" name="trim" min="500" max="1500" id="ctlTrim" value="1000"></label>
 <p class="hint">Beispiel: Tacho zeigt 60.0 km/h, GPS sagt 58.4 km/h -> Trim = 1000 * 58.4 / 60.0 = 973.</p>
@@ -1527,11 +1527,12 @@ async function refresh() {
       document.getElementById('liveSpeedMeta').textContent = Number(d.speed_hz ?? 0).toFixed(2) + ' Hz / ' + (d.speed_pulses ?? 0);
       document.getElementById('spdpc').textContent = d.speed_pulses ?? 0;
       { const o=document.getElementById('odoKm'); if(o) o.textContent = Number(d.odo_km ?? 0).toFixed(1) + ' / ' + Number(d.trip_km ?? 0).toFixed(2) + ' km'; }
-      document.getElementById('spdppr').textContent = d.speed_pulses_per_rev ?? 10;
       var ctlTire = document.getElementById('ctlTire');
       var ctlTrim = document.getElementById('ctlTrim');
+      var ctlPpr = document.getElementById('ctlPpr');
       if (ctlTire && document.activeElement !== ctlTire) ctlTire.value = d.speed_tire_mm ?? 2147;
       if (ctlTrim && document.activeElement !== ctlTrim) ctlTrim.value = d.speed_trim_permil ?? 1000;
+      if (ctlPpr && document.activeElement !== ctlPpr) ctlPpr.value = d.speed_pulses_per_rev ?? 10;
     }
     document.getElementById('jsondump').textContent = JSON.stringify(d, null, 2);
   } catch (e) {
