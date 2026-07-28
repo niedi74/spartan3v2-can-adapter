@@ -193,6 +193,28 @@ tuneFresh = (data[6] & 0x01) != 0
 Wenn `tuneFresh == false`: Volt/Temp/Coil sind 0/veraltet — genauso behandeln wie
 `tune_link_state != "streaming"` über HTTP (nicht als aktuelle Werte anzeigen).
 
+## Ext2-Cockpit-Frame (ID = Cockpit-ID+2, z.B. 0x512) — Odo/Trip/Motorstunden
+
+**Neu (2026-07-19):** Das Display ist das Fahrt-Frontend — Kilometerstand,
+Trip und Motorstunden sollen bei schwachem WLAN nicht fehlen. Uhrzeit und
+Live-Tuning-Schreibzugriff bleiben bewusst HTTP-only (Uhrzeit unkritisch,
+Tuning-Schreiben braucht ohnehin einen Rückkanal, kein reines Sende-Frame).
+
+```
+Byte 0-3: odo_km_x10    (uint32, big-endian, Gesamtstrecke, Lebensdauer)
+Byte 4-5: trip_km_x10   (uint16, Teilstrecke)
+Byte 6-7: engine_hours_x10 (uint16, Motorstunden)
+```
+
+Display-seitig:
+```
+odo   = (data[0]<<24 | data[1]<<16 | data[2]<<8 | data[3]) / 10.0
+trip  = (data[4]<<8 | data[5]) / 10.0
+hours = (data[6]<<8 | data[7]) / 10.0
+```
+
+Geräte-/Sensorstunden (nur Wartungsinfo, nicht Fahrt-relevant) bleiben HTTP-only.
+
 ## Wichtig: nicht verwechseln mit `heater_status_code`
 
 Es gibt ein **zweites, unabhängiges** Statusfeld: `heater_status_code`
