@@ -105,9 +105,24 @@ void updateCan()
     lastCanStatusMs = now;
     if (twai_get_status_info(&canStatus) == ESP_OK) {
       if (canStatus.state == TWAI_STATE_BUS_OFF) {
-        // Initiate hardware recovery (waits for 128 recessive bits, non-blocking).
-        // State will transition to TWAI_STATE_STOPPED when complete.
-        if (twai_initiate_recovery() == ESP_OK) {
+        // [CAN-STUCK-RECOVERY-FIX] Bisher wurde twai_initiate_recovery() JEDE
+        // Sekunde neu aufgerufen, solange der Bus im Bus-Off haengt. Bleibt der
+        // Bus laenger gestoert (z.B. ein anderer Knoten sendet waehrend seines
+        // eigenen Reboots kurz Muell), kann die ESP-IDF-Recovery haengen bleiben
+        // -- bisher half dann NUR ein manueller Hub-Reboot (Beobachtung 2026-07-19:
+        // Display-Reboot -> Lambda ueber CAN weg, kam ohne Hub-Reboot/Spartan-
+        // Stromzyklus nicht zurueck). Jetzt: haengt der Bus laenger als
+        // kCanBusOffHardResetMs im Bus-Off/Stopped-Zustand, macht der Hub SELBST
+        // einen kompletten TWAI-Neustart (Uninstall+Reinstall) -- das erreicht
+        // exakt das, was vorher nur der manuelle Reboot geleistet hat.
+        if (canBusOffSinceMs == 0) canBusOffSinceMs = now;
+        if (now - canBusOffSinceMs > kCanBusOffHardResetMs) {
+          Serial.println("CAN:         Bus-Off haengt > 5s -> harter TWAI-Neustart");
+          logHubEvent("can_busoff", "hard_reset");
+          canBusOffSinceMs = 0;
+          stopCan();
+          setupCan();
+        } else if (twai_initiate_recovery() == ESP_OK) {
           Serial.println("CAN:         Bus-Off → recovery initiated");
         }
         if (canStatusErrors < UINT32_MAX) canStatusErrors++;
@@ -115,6 +130,7 @@ void updateCan()
         // Recovery completed — restart the driver.
         if (twai_start() == ESP_OK) {
           Serial.println("CAN:         recovered from Bus-Off, restarted");
+          canBusOffSinceMs = 0;
         } else {
           if (canStatusErrors < UINT32_MAX) canStatusErrors++;
         }
@@ -122,6 +138,8 @@ void updateCan()
                  canStatus.tx_error_counter > 127 ||
                  canStatus.rx_error_counter > 127) {
         if (canStatusErrors < UINT32_MAX) canStatusErrors++;
+      } else {
+        canBusOffSinceMs = 0;   // Bus laeuft wieder normal -> Watchdog scharf halten
       }
     }
   }
