@@ -163,6 +163,36 @@ verursacht.
 Komplettes Byte-Layout: siehe Kommentar am Kopf von
 [`include/hub_can.h`](../include/hub_can.h).
 
+## Ext-Cockpit-Frame (ID = Cockpit-ID+1, z.B. 0x511) — 123-Volt/Temp/Coil + Speed über CAN
+
+**Neu (2026-07-19):** Manche Einbauorte haben nur schwaches Hub-WLAN zum Display
+(Metallblech im Weg, Abstand). Bisher gingen 123-Spannung/-Temperatur/-Spulenstrom
+und Geschwindigkeit NUR per HTTP `/api/status` raus — bei schwachem WLAN fehlten
+diese Werte am Display, obwohl CAN robust lief. Jetzt gibt es dafür ein zweites
+CAN-Frame, gesendet mit derselben ~10-Hz-Rate wie 0x510, ID = Cockpit-ID + 1
+(Default also **0x511**):
+
+```
+Byte 0-1: tune_volt_x100  (uint16, big-endian, 0 = 123 nicht verbunden/nicht frisch)
+Byte 2:   tune_temp_c     (int8)
+Byte 3:   tune_coil_x10   (uint8)
+Byte 4-5: speed_kmh_x10   (uint16, big-endian)
+Byte 6:   flags: Bit0 = TuneFresh (123-Daten <3s alt)
+Byte 7:   reserviert/0
+```
+
+Display-seitig:
+```
+volt  = (data[0]<<8 | data[1]) / 100.0
+temp  = (int8_t)data[2]
+coil  = data[3] / 10.0
+speed = (data[4]<<8 | data[5]) / 10.0
+tuneFresh = (data[6] & 0x01) != 0
+```
+
+Wenn `tuneFresh == false`: Volt/Temp/Coil sind 0/veraltet — genauso behandeln wie
+`tune_link_state != "streaming"` über HTTP (nicht als aktuelle Werte anzeigen).
+
 ## Wichtig: nicht verwechseln mit `heater_status_code`
 
 Es gibt ein **zweites, unabhängiges** Statusfeld: `heater_status_code`

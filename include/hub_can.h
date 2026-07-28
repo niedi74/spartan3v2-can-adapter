@@ -26,6 +26,17 @@ constexpr uint8_t kCockpitStatusBitMask   = 0x03;  // << kCockpitStatusBitShift
 // das hat am 2026-07-14 dazu gefuehrt, dass der Vergaser anhand simulierter
 // Werte verstellt wurde, waehrend CAN zum Spartan zeitweise ausgefallen war.
 constexpr uint8_t kCockpitFlagRealCan     = 0x10;
+
+// [COCKPIT-EXT-FRAME] Zweites Frame (ID = cockpitCanIdCfg+1, z.B. 0x511) fuer
+// Daten, die bisher NUR per HTTP /api/status ans Display gingen (123-Spannung/
+// -Temperatur/-Spulenstrom, Geschwindigkeit). Grund: an manchen Einbauorten ist
+// das Hub-WLAN zum Display zu schwach/instabil, CAN ist dort die robustere
+// Verbindung. Byte-Layout, big-endian:
+//   [0-1] tune_volt_x100 (uint16, 0 wenn 123 nicht verbunden/frisch)
+//   [2]   tune_temp_c (int8)         [3] tune_coil_x10 (uint8)
+//   [4-5] speed_kmh_x10 (uint16)     [6] flags: Bit0=kCockpitExtFlagTuneFresh
+//   [7]   reserviert/0
+constexpr uint8_t kCockpitExtFlagTuneFresh = 0x01;
 static twai_timing_config_t canTimingFromKbps(uint16_t kbps)
 {
   switch (kbps) {
@@ -183,6 +194,46 @@ void updateCan()
     tx.data[6] = mapKpa;
     tx.data[7] = flags;
     if (twai_transmit(&tx, pdMS_TO_TICKS(5)) == ESP_OK) {
+      if (cockpitCanTxCount < UINT32_MAX) cockpitCanTxCount++;
+    } else {
+      if (cockpitCanTxErrors < UINT32_MAX) cockpitCanTxErrors++;
+    }
+
+    // --- Ext-Frame: 123-Volt/Temp/Coil + Geschwindigkeit, gleiche ID+1 ---
+    float voltScaled = 0.0f, tempRounded = 0.0f, coilScaled = 0.0f;
+    if (hubFeatBle123 && tuneFresh) {
+      const TuneSnapshot tune = tuneSnapshot();
+      voltScaled  = tune.voltage * 100.0f + 0.5f;
+      tempRounded = tune.temperature + (tune.temperature >= 0 ? 0.5f : -0.5f);
+      coilScaled  = tune.coilCurrent * 10.0f + 0.5f;
+    }
+    if (voltScaled < 0.0f) voltScaled = 0.0f;
+    if (voltScaled > 65535.0f) voltScaled = 65535.0f;
+    if (tempRounded < -128.0f) tempRounded = -128.0f;
+    if (tempRounded > 127.0f) tempRounded = 127.0f;
+    if (coilScaled < 0.0f) coilScaled = 0.0f;
+    if (coilScaled > 255.0f) coilScaled = 255.0f;
+    float speedScaled = speedKmh * 10.0f + 0.5f;
+    if (speedScaled < 0.0f) speedScaled = 0.0f;
+    if (speedScaled > 65535.0f) speedScaled = 65535.0f;
+
+    const uint16_t voltX100  = static_cast<uint16_t>(voltScaled);
+    const int8_t   tempC     = static_cast<int8_t>(tempRounded);
+    const uint8_t  coilX10   = static_cast<uint8_t>(coilScaled);
+    const uint16_t speedX10  = static_cast<uint16_t>(speedScaled);
+
+    twai_message_t tx2 = {};
+    tx2.identifier       = static_cast<uint32_t>(cockpitCanIdCfg) + 1;
+    tx2.data_length_code = 8;
+    tx2.data[0] = static_cast<uint8_t>(voltX100 >> 8);
+    tx2.data[1] = static_cast<uint8_t>(voltX100 & 0xFF);
+    tx2.data[2] = static_cast<uint8_t>(tempC);
+    tx2.data[3] = coilX10;
+    tx2.data[4] = static_cast<uint8_t>(speedX10 >> 8);
+    tx2.data[5] = static_cast<uint8_t>(speedX10 & 0xFF);
+    tx2.data[6] = tuneFresh ? kCockpitExtFlagTuneFresh : 0;
+    tx2.data[7] = 0;
+    if (twai_transmit(&tx2, pdMS_TO_TICKS(5)) == ESP_OK) {
       if (cockpitCanTxCount < UINT32_MAX) cockpitCanTxCount++;
     } else {
       if (cockpitCanTxErrors < UINT32_MAX) cockpitCanTxErrors++;

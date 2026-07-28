@@ -685,6 +685,7 @@ Leer lassen + speichern = zurueck zur Werks-MAC. <b>Loest einen Neustart aus.</b
 <details class="setup"><summary>Bus &amp; Versorgung</summary><div class="inside">
 <div class="row"><span>CAN-Bus</span><strong>500 kbit/s &middot; Spartan 0x400 &rarr; Hub &middot; Hub 0x510 &rarr; Displays</strong></div>
 <div class="row"><span>0x510 Byte 7 (Flags)</span><strong>Bit0 LambdaValid &middot; Bit1 TuneFresh &middot; Bit2-3 Status &middot; Bit4 RealCan</strong></div>
+<div class="row"><span>0x511 (Cockpit-ID+1)</span><strong>123-Volt/Temp/Coil + Speed &mdash; f&uuml;r Displays mit schwachem WLAN</strong></div>
 <div class="hint" style="font-size:11px;margin:4px 0">Bit4=0 hei&szlig;t SIMULIERT (Demo/Test/ADC) &mdash; Displays m&uuml;ssen das sichtbar machen! Details: docs/lambda-status-logik.md im Repo.</div>
 <div class="row"><span>Versorgung</span><strong>5V Buck vom Bordnetz (Kl. 15)</strong></div>
 <div class="hint" style="font-size:11px;margin:4px 0">Achtung Unterspannung beim Anlassen: unter ~10,5V verstummt der Spartan auf CAN (rx_err bleibt niedrig &mdash; sieht aus wie Kabelfehler, ist aber Spannung).</div>
