@@ -271,15 +271,14 @@ void setupWebGui()
     server.send(200, "application/json", otaProgressJson());
   });
   // [TUNE-LIVE] Live-Zuendwinkel: mode (T an/aus), step (A/R), reset (auf 0),
-  // ping (Dead-Man-Keepalive der GUI). Sicherheitskritisch -> nur bei streaming,
-  // GUI-Lock ist nur Optik: [TUNE-SAFE] serverseitig gilt der OTA-Token (wenn
-  // gesetzt), sonst kann jedes Geraet im Funknetz die Zuendung verstellen.
+  // ping (Dead-Man-Keepalive der GUI). Bewusst OHNE OTA-Token-Pflicht (Stand
+  // 2026-07-29, expliziter Wunsch): die eingebauten Sicherungen reichen --
+  // nur bei aktiv streamender 123 wirksam (tuneStreaming()), Dead-Man haut
+  // die Zuendung nach 60s ohne GUI-Ping automatisch ab, Schritte sind einzeln
+  // begrenzt inkrementell (kein Sprung auf beliebigen Wert). Token-Pflicht war
+  // hier inkonsistent mit dem Test-Hub (dort nie gesetzt -> ohnehin offen) und
+  // blockierte die normale Nutzung auf dem Live-Hub unnoetig.
   server.on("/api/tune/live", HTTP_POST, []() {
-    if (otaToken.length() > 0 &&
-        (!server.hasHeader("X-OTA-Token") || server.header("X-OTA-Token") != otaToken)) {
-      server.send(403, "application/json", "{\"ok\":false,\"error\":\"token\"}");
-      return;
-    }
     tuneLastLiveApiMs = millis();   // [TUNE-SAFE] Dead-Man fuettern
     const String act = server.arg("act");
     bool ok = false;

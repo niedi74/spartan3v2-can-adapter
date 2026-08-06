@@ -379,7 +379,8 @@ input:focus, select:focus { outline: none; border-color: #78ad43; }
 <p class="hint">Firmware-BIN aus PlatformIO hochladen. Nach erfolgreichem Upload startet der Hub neu. Waehrend OTA sind Live-Polls kurz blockiert.</p>
 <p class="hint" id="otaLockHint">OTA-Status: -</p>
 <div class="row" style="gap:6px"><input id="otaTok" type="password" placeholder="OTA-Token" autocomplete="off" style="flex:1;min-width:0"><button type="button" id="otaTokSave">Token speichern</button></div>
-<p class="hint">Ohne gesetzten Token ist OTA <b>gesperrt</b> (Schutz vor versehentlichem Fremd-Flash, z.B. Display-FW ueber den mDNS-Namen). Token einmal setzen; zum Hochladen im Feld lassen.</p>
+<div class="row" style="gap:6px"><button type="button" id="otaTokClear" class="secondary">OTA entsperren (Token löschen)</button></div>
+<p class="hint">Ohne gesetzten Token ist OTA <b>gesperrt</b> (Schutz vor versehentlichem Fremd-Flash, z.B. Display-FW ueber den mDNS-Namen). Token einmal setzen; zum Hochladen im Feld lassen. <b>Zum Ändern/Löschen eines bereits gesetzten Tokens muss der AKTUELLE Token im Feld stehen</b> (dient als Autorisierung) — „Token löschen" nutzt genau diesen Wert, um den Schutz aufzuheben.</p>
 <form id="otaForm" method="POST" action="/update" enctype="multipart/form-data">
 <input class="file" type="file" name="update" accept=".bin,application/octet-stream" required>
 <button type="submit" id="otaBtn">Firmware hochladen</button>
@@ -924,20 +925,44 @@ if (otaForm) {
     tokEl.value = localStorage.getItem('otaTok') || '';
     tokEl.addEventListener('input', () => localStorage.setItem('otaTok', tokEl.value));
   } }
+async function otaTokenRequest(newValue, authValue) {
+  // [OTA-TOKEN-FIX] Server verlangt beim AENDERN/LOESCHEN eines bereits
+  // gesetzten Tokens den ALTEN Token im X-OTA-Token-Header (siehe
+  // /api/ota/token in hub_webgui_endpoints.h) -- vorher fehlte dieser Header
+  // komplett, jede Aenderung/Loeschung scheiterte lautlos mit 403, aber die
+  // UI zeigte trotzdem faelschlich "erfolgreich" an (kein Status-Check).
+  const r = await fetch('/api/ota/token', { method:'POST',
+    headers:{'Content-Type':'application/x-www-form-urlencoded', 'X-OTA-Token': authValue},
+    body:'token=' + encodeURIComponent(newValue) });
+  let d = {};
+  try { d = await r.json(); } catch (e) {}
+  if (!r.ok) {
+    otaShow(0, 'Fehler: ' + (d.error || ('HTTP ' + r.status)));
+    return false;
+  }
+  otaShow(0, d.ota_locked ? 'OTA-Token geloescht -> gesperrt' : 'OTA-Token gesetzt -> entsperrt');
+  return true;
+}
 const otaTokSave = document.getElementById('otaTokSave');
 if (otaTokSave) {
   otaTokSave.addEventListener('click', async () => {
     const t = (document.getElementById('otaTok')||{}).value || '';
-    localStorage.setItem('otaTok', t);
     otaTokSave.disabled = true;
-    try {
-      const r = await fetch('/api/ota/token', { method:'POST',
-        headers:{'Content-Type':'application/x-www-form-urlencoded'},
-        body:'token=' + encodeURIComponent(t) });
-      const d = await r.json();
-      otaShow(0, d.ota_locked ? 'OTA-Token geloescht -> gesperrt' : 'OTA-Token gesetzt -> entsperrt');
-    } catch (e) { otaShow(0, 'Token-Fehler'); }
+    if (await otaTokenRequest(t, t)) localStorage.setItem('otaTok', t);
     otaTokSave.disabled = false;
+  });
+}
+const otaTokClear = document.getElementById('otaTokClear');
+if (otaTokClear) {
+  otaTokClear.addEventListener('click', async () => {
+    const cur = (document.getElementById('otaTok')||{}).value || '';
+    if (!cur) { otaShow(0, 'Aktuellen Token erst ins Feld eintragen (Autorisierung)'); return; }
+    otaTokClear.disabled = true;
+    if (await otaTokenRequest('', cur)) {
+      localStorage.removeItem('otaTok');
+      document.getElementById('otaTok').value = '';
+    }
+    otaTokClear.disabled = false;
   });
 }
 // [WIFI-MAC-OVR]
