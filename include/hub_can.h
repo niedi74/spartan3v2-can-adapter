@@ -153,7 +153,28 @@ void updateCan()
 
   twai_message_t message;
   while (twai_receive(&message, 0) == ESP_OK) {
-    if (message.extd || message.identifier != spartanCanIdCfg || message.data_length_code < 4) {
+    if (message.extd) continue;
+
+    // [CAN-TUNE-CMD] Display -> Hub: Live-Zuendwinkel per CAN bedienen, ID =
+    // Cockpit-ID+3 (Default 0x513). Nutzt exakt denselben, bereits abgesicherten
+    // Pfad wie /api/tune/live (Dead-Man 60s, Einzelschritte, nur bei streamender
+    // 123 wirksam) -- keine neue Sicherheitslogik, nur ein zweiter Eingang.
+    // Byte 0 = Kommando: 0=ping 1=up 2=down 3=reset 4=mode-toggle.
+    if (message.identifier == static_cast<uint32_t>(cockpitCanIdCfg) + 3) {
+      if (message.data_length_code >= 1) {
+        tuneLastLiveApiMs = millis();
+        switch (message.data[0]) {
+          case 1: tuneAdvStep(+1); break;
+          case 2: tuneAdvStep(-1); break;
+          case 3: tuneAdvReset(); break;
+          case 4: tuneModeToggle(); break;
+          default: break;   // 0 = reines Ping (Dead-Man fuettern, sonst nichts)
+        }
+      }
+      continue;
+    }
+
+    if (message.identifier != spartanCanIdCfg || message.data_length_code < 4) {
       continue;
     }
 

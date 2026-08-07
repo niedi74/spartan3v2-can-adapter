@@ -119,6 +119,26 @@ status_code = (flags >> 2) & 0x03;   // 0=ERR 1=WAIT 2=HEAT 3=OK
 bereit      = status_code == 3;      // entspricht dem HTTP-Feld status=="OK"
 ```
 
+## CAN-Empfangs-Frame 0x513 — Live-Zündwinkel per CAN bedienen (Display → Hub)
+
+**Neu (2026-07-29):** Damit das Display die 123-Live-Zündwinkel-Steuerung auch
+ohne WLAN bedienen kann, nimmt der Hub jetzt zusätzlich zum bestehenden
+`/api/tune/live` (HTTP) auch ein CAN-Frame entgegen — **derselbe, bereits
+abgesicherte Codepfad**, keine neue Sicherheitslogik: Dead-Man-Timeout 60s
+ohne Kommando, nur Einzelschritte (kein Sprung auf beliebigen Wert), nur
+wirksam bei aktiv streamender 123.
+
+```
+ID: Cockpit-ID + 3 (Default 0x513)
+Byte 0: Kommando -- 0=Ping(Dead-Man), 1=Schritt hoch, 2=Schritt runter,
+        3=Reset auf 0, 4=Modus umschalten (Live-Tuning an/aus)
+```
+
+Display-seitig: einfach das passende Byte senden, kein Antwort-Frame nötig
+(Rückmeldung über `tune_adv_steps`/`tune_mode` in 0x510 bzw. `/api/status`).
+Ohne Kommando >60s fällt der Live-Modus automatisch ab (Dead-Man), genau wie
+beim HTTP-Weg.
+
 ## ⚠️ Sicherheitsbug gefunden + gefixt (2026-07-14): Demo/Test-Daten nicht von echten unterscheidbar
 
 **Vorfall:** Am 2026-07-14 fiel während der Fahrt CAN zum Spartan zeitweise
