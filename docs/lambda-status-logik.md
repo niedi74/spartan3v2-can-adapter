@@ -134,10 +134,30 @@ Byte 0: Kommando -- 0=Ping(Dead-Man), 1=Schritt hoch, 2=Schritt runter,
         3=Reset auf 0, 4=Modus umschalten (Live-Tuning an/aus)
 ```
 
-Display-seitig: einfach das passende Byte senden, kein Antwort-Frame nötig
-(Rückmeldung über `tune_adv_steps`/`tune_mode` in 0x510 bzw. `/api/status`).
+Display-seitig: einfach das passende Byte senden, kein Antwort-Frame nötig.
 Ohne Kommando >60s fällt der Live-Modus automatisch ab (Dead-Man), genau wie
 beim HTTP-Weg.
+
+**Ping-Intervall:** Dead-Man-Timeout ist exakt 60.000 ms ohne jedes Kommando
+(Ping zählt genauso wie ein echter Schritt). Empfehlung: alle 10–15s ein
+Ping (Byte0=0) senden, solange der Live-Modus aktiv bleiben soll.
+
+**Bestätigung (seit 2026-07-29, Bits neu belegt):**
+- **0x510 Byte 7, Bit 5** (`kCockpitFlagTuneModeActive`): 1 = Live-Tuning-Modus
+  ist gerade aktiv. Direkte Antwort auf Kommando 4 (Modus umschalten).
+- **0x511 Byte 7** (`tune_adv_steps`, int8, vorher reserviert/0): aktuell
+  kommandierte Zündwinkel-Schritte relativ zum Basiswert (0 = kein Offset).
+  Direkte Antwort auf Kommando 1/2/3 (hoch/runter/reset).
+
+```js
+const tuneModeActive = (flags0x510 & 0x20) !== 0;   // aus 0x510 Byte 7
+const tuneAdvSteps = int8FromByte(data0x511[7]);     // aus 0x511 Byte 7
+```
+
+Zusätzlich weiterhin indirekt: der echte `advance`-Wert in 0x510 (Byte 4-5)
+spiegelt die tatsächlich von der 123 gemeldete Zündeinstellung wider, mit
+BLE-Rundlaufzeit (~100-300ms) — die expliziten Bits oben sind aber die
+verlässlichere, sofortige Bestätigung "Kommando angekommen".
 
 ## ⚠️ Sicherheitsbug gefunden + gefixt (2026-07-14): Demo/Test-Daten nicht von echten unterscheidbar
 

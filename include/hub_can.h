@@ -13,7 +13,9 @@
 //   [7]   flags: Bit0=kCockpitFlagLambdaValid, Bit1=kCockpitFlagTuneFresh,
 //                Bits2-3=status_code (0=ERR/1=WAIT/2=HEAT/3=OK, siehe
 //                docs/lambda-status-logik.md), Bit4=kCockpitFlagRealCan,
-//                Bits5-7 reserviert/0.
+//                Bit5=kCockpitFlagTuneModeActive (Live-Tuning-Bestaetigung fuer
+//                CAN-Kommando 0x513, siehe docs/lambda-status-logik.md),
+//                Bits6-7 reserviert/0.
 constexpr uint8_t kCockpitFlagLambdaValid = 0x01;
 constexpr uint8_t kCockpitFlagTuneFresh   = 0x02;
 constexpr uint8_t kCockpitStatusBitShift  = 2;
@@ -26,6 +28,11 @@ constexpr uint8_t kCockpitStatusBitMask   = 0x03;  // << kCockpitStatusBitShift
 // das hat am 2026-07-14 dazu gefuehrt, dass der Vergaser anhand simulierter
 // Werte verstellt wurde, waehrend CAN zum Spartan zeitweise ausgefallen war.
 constexpr uint8_t kCockpitFlagRealCan     = 0x10;
+// [CAN-TUNE-ACK] Rueckmeldung fuer das 0x513-Kommando: 1 = Live-Tuning-Modus
+// gerade aktiv. Ohne dieses Bit hatte ein reines CAN-Display keine explizite
+// Bestaetigung, ob mode-toggle/Schritte tatsaechlich angekommen sind (nur der
+// indirekte Weg ueber den echten advance-Wert, mit BLE-Rundlaufzeit).
+constexpr uint8_t kCockpitFlagTuneModeActive = 0x20;
 
 // [COCKPIT-EXT-FRAME] Zweites Frame (ID = cockpitCanIdCfg+1, z.B. 0x511) fuer
 // Daten, die bisher NUR per HTTP /api/status ans Display gingen (123-Spannung/
@@ -35,13 +42,15 @@ constexpr uint8_t kCockpitFlagRealCan     = 0x10;
 //   [0-1] tune_volt_x100 (uint16, 0 wenn 123 nicht verbunden/frisch)
 //   [2]   tune_temp_c (int8)         [3] tune_coil_x10 (uint8)
 //   [4-5] speed_kmh_x10 (uint16)     [6] flags: Bit0=kCockpitExtFlagTuneFresh
-//   [7]   reserviert/0
+//   [7]   tune_adv_steps (int8, Bestaetigung fuer CAN-Kommando 0x513 --
+//         kommandierte Zuendwinkel-Schritte relativ zum Basiswert, 0=kein Offset)
 constexpr uint8_t kCockpitExtFlagTuneFresh = 0x01;
 
 // [COCKPIT-EXT2-FRAME] Drittes Frame (ID = cockpitCanIdCfg+2, z.B. 0x512) fuer
 // Kilometerstand/Trip/Motorstunden -- das Display ist das Fahrt-Frontend, diese
-// Werte sollen bei schwachem WLAN nicht fehlen (Uhrzeit + Live-Tuning-Schreib-
-// zugriff bleiben bewusst HTTP-only, siehe docs/lambda-status-logik.md).
+// Werte sollen bei schwachem WLAN nicht fehlen (Uhrzeit bleibt bewusst HTTP-only,
+// Live-Tuning-Schreibzugriff geht seit 2026-07-29 zusaetzlich per CAN 0x513,
+// siehe docs/lambda-status-logik.md).
 //   [0-3] odo_km_x10 (uint32, big-endian, Gesamtstrecke)
 //   [4-5] trip_km_x10 (uint16)         [6-7] engine_hours_x10 (uint16)
 static twai_timing_config_t canTimingFromKbps(uint16_t kbps)
@@ -227,6 +236,8 @@ void updateCan()
     // 0 = Demo/Test/ADC ODER veralteter CAN-Wert -- in beiden Faellen NICHT als
     // echte aktuelle Messung vertrauen.
     if (snap.fromCan && lambdaFreshNow) flags |= kCockpitFlagRealCan;
+    // [CAN-TUNE-ACK] Bestaetigung fuer 0x513-Kommandos: Live-Modus gerade an/aus.
+    if (hubFeatBle123 && tuneModeActive) flags |= kCockpitFlagTuneModeActive;
 
     twai_message_t tx = {};
     tx.identifier        = cockpitCanIdCfg;
@@ -278,7 +289,9 @@ void updateCan()
     tx2.data[4] = static_cast<uint8_t>(speedX10 >> 8);
     tx2.data[5] = static_cast<uint8_t>(speedX10 & 0xFF);
     tx2.data[6] = tuneFresh ? kCockpitExtFlagTuneFresh : 0;
-    tx2.data[7] = 0;
+    // [CAN-TUNE-ACK] tuneAdvSteps ist durch TUNE_ADV_MAX_STEPS begrenzt, passt
+    // sicher in int8. 0 solange kein Live-Offset (auch wenn hubFeatBle123 aus ist).
+    tx2.data[7] = static_cast<uint8_t>(hubFeatBle123 ? static_cast<int8_t>(tuneAdvSteps) : 0);
     if (twai_transmit(&tx2, pdMS_TO_TICKS(5)) == ESP_OK) {
       if (cockpitCanTxCount < UINT32_MAX) cockpitCanTxCount++;
     } else {
