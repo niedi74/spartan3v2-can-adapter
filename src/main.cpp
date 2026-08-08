@@ -3535,9 +3535,17 @@ void startEmu123() {
         if (emu123Tx && emu123Subscribed) {
           // Kompletten Zyklus senden: RPM, ADV, MAP, Temp, Volt, 0x42(end)
           // Genau wie echte 123TUNE+ nach $\r — App erwartet vollen Zyklus
+          // [EMU-TUNE-FIX] Ping-Antwort-Task berechnete adv/mapv bisher NEU statt
+          // die bereits im Sweep-Loop berechneten Werte wiederzuverwenden -- die
+          // Kopie kannte den Tune-Offset (emu123TuneOffset) nicht. Ergebnis: der
+          // $-Ping (kommt vom Hub ~1x/s) ueberschrieb den korrekten Zuendwinkel
+          // staendig mit einem Wert OHNE Offset, bevor der naechste Sweep-Tick
+          // ihn wieder richtig setzte -- Live-Tuning wirkte dadurch fuer den
+          // Hub/Display praktisch nie sichtbar. Jetzt: dieselben Werte wie der
+          // Sweep-Loop, keine zweite Formel mehr.
           const int rpm = (int)emu123CurRpm;
-          const float adv = 10.0f + (rpm - 700) * 0.004f;
-          const int mapv = 40 + (rpm - 700) / 50;
+          const float adv = emu123CurAdv;
+          const int mapv = emu123CurMap;
           const int tempRaw = (int)(75 + 30); // 75°C
           const int voltRaw = (int)(13.8f * 4.54f);
 
@@ -4360,6 +4368,36 @@ void setupWebGui()
            "<label>AP-IP</label><input name=ip value='" + hubApIp + "'>"
            "<label>Netzmaske</label><input name=mask value='" + hubApMask + "'>"
            "<button>AP speichern</button></form></div>";
+      // [OTA-UI-FIX] Schlanke Seite hatte bisher KEIN OTA-Menue -- die Endpoints
+      // (/update, /api/ota/token) existierten zwar, waren aber nur per direktem
+      // API-Call erreichbar, nicht ueber die WebGUI. Kompakte Karte ergaenzt,
+      // gleiches Verhalten wie die volle Hub-Seite (Token noetig zum Aendern/
+      // Loeschen eines bereits gesetzten Tokens).
+      h += "<h2>OTA Firmware Update</h2><div class=card>"
+           "Status: <b>" + String(otaToken.length() ? "entsperrt" : "gesperrt") + "</b>"
+           "<div style='display:flex;gap:6px;margin:8px 0'>"
+           "<input id=otaTok type=password placeholder='OTA-Token' autocomplete=off style='flex:1;min-width:0'>"
+           "<button type=button id=otaTokSave>Token speichern</button></div>"
+           "<form id=otaForm method=POST action=/update enctype=multipart/form-data>"
+           "<input type=file name=update accept='.bin' required>"
+           "<button type=submit>Firmware hochladen</button></form>"
+           "<p class=mut id=otaMsg></p></div>";
+      h += "<script>"
+           "const ot=document.getElementById('otaTok');"
+           "document.getElementById('otaTokSave').addEventListener('click',async()=>{"
+           "const t=ot.value||'';"
+           "try{const r=await fetch('/api/ota/token',{method:'POST',"
+           "headers:{'Content-Type':'application/x-www-form-urlencoded','X-OTA-Token':t},"
+           "body:'token='+encodeURIComponent(t)});"
+           "const d=await r.json();"
+           "document.getElementById('otaMsg').textContent=r.ok?(d.ota_locked?'Token geloescht -> gesperrt':'Token gesetzt -> entsperrt'):'Fehler: alter Token noetig';"
+           "}catch(e){document.getElementById('otaMsg').textContent='Fehler';}});"
+           "document.getElementById('otaForm').addEventListener('submit',(e)=>{"
+           "const x=new XMLHttpRequest();x.open('POST','/update',true);"
+           "x.setRequestHeader('X-OTA-Token',ot.value||'');"
+           "x.onload=()=>{document.getElementById('otaMsg').textContent=x.status===200?'OK, startet neu...':'Fehler: '+x.responseText;};"
+           "x.send(new FormData(e.target));e.preventDefault();});"
+           "</script>";
       h += F("<p class=mut>Reiner 123-BLE-Emulator &middot; kein CAN/ESP-NOW.</p></main></body></html>");
       server.send(200, "text/html", h);
       return;
