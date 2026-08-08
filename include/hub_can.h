@@ -53,6 +53,17 @@ constexpr uint8_t kCockpitExtFlagTuneFresh = 0x01;
 // siehe docs/lambda-status-logik.md).
 //   [0-3] odo_km_x10 (uint32, big-endian, Gesamtstrecke)
 //   [4-5] trip_km_x10 (uint16)         [6-7] engine_hours_x10 (uint16)
+
+// [COCKPIT-EXT3-FRAME] Viertes Frame (ID = cockpitCanIdCfg+4, z.B. 0x514) fuer
+// die Abgastemperatur der Spartan-Lambdasonde -- steckte bisher nur im HTTP-
+// Feld "temperature" (roh aus CAN-Byte 2 des Spartan-Frames, x10), fehlte in
+// allen drei bestehenden Cockpit-Frames (0x510/0x511/0x512 sind alle voll,
+// 8/8 Byte belegt). ID bewusst +4, nicht +3, weil +3 (0x513) schon das
+// Tune-Kommando-Frame (Display->Hub, siehe oben) belegt.
+//   [0-1] exhaust_temp_c_x10 (int16, big-endian)   [2] flags: Bit0=Fresh
+//   [3-7] reserviert/0 (Platz fuer spaeter, z.B. Heater-Status)
+constexpr uint8_t kCockpitExt3FlagFresh = 0x01;
+
 static twai_timing_config_t canTimingFromKbps(uint16_t kbps)
 {
   switch (kbps) {
@@ -321,6 +332,25 @@ void updateCan()
     tx3.data[6] = static_cast<uint8_t>(engHoursX10 >> 8);
     tx3.data[7] = static_cast<uint8_t>(engHoursX10 & 0xFF);
     if (twai_transmit(&tx3, pdMS_TO_TICKS(5)) == ESP_OK) {
+      if (cockpitCanTxCount < UINT32_MAX) cockpitCanTxCount++;
+    } else {
+      if (cockpitCanTxErrors < UINT32_MAX) cockpitCanTxErrors++;
+    }
+
+    // --- Ext3-Frame: Abgastemperatur der Spartan-Lambdasonde, ID+4 ---
+    // Gleiche Frische-Bedingung wie Lambda selbst (lambdaFreshNow) -- kommt
+    // aus demselben Spartan-CAN-Frame (Byte 2), veraltet also zusammen.
+    const int16_t exhaustTempX10 = lambdaFreshNow
+        ? static_cast<int16_t>(snap.temperatureC * 10)
+        : 0;
+    twai_message_t tx4 = {};
+    tx4.identifier       = static_cast<uint32_t>(cockpitCanIdCfg) + 4;
+    tx4.data_length_code = 8;
+    tx4.data[0] = static_cast<uint8_t>((exhaustTempX10 >> 8) & 0xFF);
+    tx4.data[1] = static_cast<uint8_t>(exhaustTempX10 & 0xFF);
+    tx4.data[2] = lambdaFreshNow ? kCockpitExt3FlagFresh : 0;
+    tx4.data[3] = 0; tx4.data[4] = 0; tx4.data[5] = 0; tx4.data[6] = 0; tx4.data[7] = 0;
+    if (twai_transmit(&tx4, pdMS_TO_TICKS(5)) == ESP_OK) {
       if (cockpitCanTxCount < UINT32_MAX) cockpitCanTxCount++;
     } else {
       if (cockpitCanTxErrors < UINT32_MAX) cockpitCanTxErrors++;
