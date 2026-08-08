@@ -253,6 +253,30 @@ trip  = (data[4]<<8 | data[5]) / 10.0
 hours = (data[6]<<8 | data[7]) / 10.0
 ```
 
+## Ext3-Cockpit-Frame (ID = Cockpit-ID+4, z.B. 0x514) — Abgastemperatur
+
+**Neu (2026-08-07):** Die Abgastemperatur der Spartan-Lambdasonde (bisher nur
+`temperature` in `/api/status`) fehlte in allen drei bestehenden Cockpit-
+Frames — die sind komplett voll (8/8 Byte belegt). Deshalb ein viertes Frame,
+ID bewusst **+4** (nicht +3, das ist schon das Tune-Kommando-Frame 0x513,
+siehe oben):
+
+```
+Byte 0-1: exhaust_temp_c_x10 (int16, big-endian)
+Byte 2:   flags: Bit0=Fresh (gleiche Frische-Bedingung wie Lambda selbst,
+                 kommt aus demselben Spartan-CAN-Frame)
+Byte 3-7: reserviert/0 (Platz für später, z. B. Heater-Status)
+```
+
+Display-seitig:
+```
+exhaustTemp = (int16_t)(data[0]<<8 | data[1]) / 10.0
+fresh       = (data[2] & 0x01) !== 0
+```
+
+Wenn `fresh == false`: Wert ist 0/veraltet — nicht anzeigen bzw. genauso wie
+fehlende Lambda-Frische behandeln.
+
 Geräte-/Sensorstunden (nur Wartungsinfo, nicht Fahrt-relevant) bleiben HTTP-only.
 
 ## Wichtig: nicht verwechseln mit `heater_status_code`
