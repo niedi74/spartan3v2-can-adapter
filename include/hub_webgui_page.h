@@ -688,6 +688,8 @@ Leer lassen + speichern = zurueck zur Werks-MAC. <b>Loest einen Neustart aus.</b
 <div class="row"><span>0x510 Byte 7 (Flags)</span><strong>Bit0 LambdaValid &middot; Bit1 TuneFresh &middot; Bit2-3 Status &middot; Bit4 RealCan</strong></div>
 <div class="row"><span>0x511 (Cockpit-ID+1)</span><strong>123-Volt/Temp/Coil + Speed &mdash; f&uuml;r Displays mit schwachem WLAN</strong></div>
 <div class="row"><span>0x512 (Cockpit-ID+2)</span><strong>Odo/Trip/Motorstunden</strong></div>
+<div class="row"><span>0x513 (Cockpit-ID+3, RX)</span><strong>Display&rarr;Hub Live-Tune-Kommando &mdash; 0=Ping 1=Up 2=Down 3=Reset 4=Mode-Toggle, Dead-Man 60s</strong></div>
+<div class="row"><span>0x514 (Cockpit-ID+4)</span><strong>Abgastemperatur &mdash; Byte0-1 int16 x10, Byte2 Bit0=Fresh</strong></div>
 <div class="hint" style="font-size:11px;margin:4px 0">Bit4=0 hei&szlig;t SIMULIERT (Demo/Test/ADC) &mdash; Displays m&uuml;ssen das sichtbar machen! Details: docs/lambda-status-logik.md im Repo.</div>
 <div class="row"><span>Versorgung</span><strong>5V Buck vom Bordnetz (Kl. 15)</strong></div>
 <div class="hint" style="font-size:11px;margin:4px 0">Achtung Unterspannung beim Anlassen: unter ~10,5V verstummt der Spartan auf CAN (rx_err bleibt niedrig &mdash; sieht aus wie Kabelfehler, ist aber Spannung).</div>
