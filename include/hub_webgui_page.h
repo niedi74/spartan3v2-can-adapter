@@ -679,7 +679,9 @@ Leer lassen + speichern = zurueck zur Werks-MAC. <b>Loest einen Neustart aus.</b
 <tr><td style="padding:6px 4px">DS3231 SCL</td><td><strong>5</strong></td></tr>
 <tr><td style="padding:6px 4px">Speed-Reed (MC-38)</td><td><strong>12</strong></td><td>direkt Reed &harr; GND, interner Pullup, 10 Magnete/Radumdrehung</td></tr>
 <tr><td style="padding:6px 4px">Status-LED</td><td><strong>2</strong></td><td>an = Lambda-Status OK</td></tr>
-<tr><td style="padding:6px 4px">UART-Bridge RX/TX</td><td><strong id="plan_uart">aus</strong></td><td>optionaler 123-Bridge-ESP (Dev-Tab, 0 = deaktiviert)</td></tr>
+<tr><td style="padding:6px 4px">Spartan-UART RX</td><td><strong>26</strong></td><td rowspan="2">9600 8N1 &mdash; Spartan3-V2-Controller (GETFW/GETCANID etc.), &uuml;ber Pegelwandler/Spannungsteiler (Spartan-Seite &gt;3V3!)</td></tr>
+<tr><td style="padding:6px 4px">Spartan-UART TX</td><td><strong>27</strong></td></tr>
+<tr><td style="padding:6px 4px">UART-Bridge RX/TX</td><td><strong id="plan_uart">aus</strong></td><td>optionaler 123-Bridge-ESP (Dev-Tab, 0 = deaktiviert) &mdash; nicht zu verwechseln mit der Spartan-UART oben</td></tr>
 <tr><td style="padding:6px 4px">Analog-Fallback</td><td><strong>34</strong></td><td>Spartan 0-5V-Ausgang &uuml;ber Teiler (nur ohne CAN)</td></tr>
 </table>
 </div></details>
