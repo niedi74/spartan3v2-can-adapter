@@ -241,13 +241,6 @@ bool lcdReady = false;
 constexpr uint32_t kDisplayIntervalMs = 200;
 constexpr uint32_t kBleNotifyIntervalMs = 250;
 constexpr uint32_t kCanStaleMs = 500;
-// [STALE-LAMBDA-FIX] SpartanReading.valid wird beim Schreiben gesetzt, aber nie
-// wieder geloescht -- stirbt die Quelle (z.B. CAN faellt aus und Demo/ADC-Fallback
-// ist deaktiviert), meldeten /api/status und der 0x510-Cockpit-Frame den letzten
-// Wert fuer immer als "valid". Konsumenten pruefen deshalb zusaetzlich das Alter
-// (receivedMs); alle simulierten Quellen (Demo/Test/ADC) schreiben ohnehin im
-// Sub-Sekunden-Takt und bleiben damit immer frisch.
-constexpr uint32_t kLambdaFreshMs = 3000;
 // BLE-Bridge UART: optionaler zweiter ESP32 liefert 123-Daten per UART.
 // Pin-Belegung wird zur Laufzeit per Dev-Tab gesetzt und in NVS gespeichert.
 // RX-Pin 0 = UART-Bridge deaktiviert (Default nach Erase).
@@ -303,7 +296,6 @@ enum class LambdaTestMode : uint8_t {
 
 LambdaTestMode lambdaTestMode = LambdaTestMode::Off;
 uint32_t lastLambdaTestMs = 0;
-uint32_t lambdaTestStartMs = 0;   // [LAMBDA-TEST-WARMUP] Aktivierungszeitpunkt fuer WAIT/HEAT/OK-Simulation
 
 struct TuneSnapshot {
   float rpm = 0.0f;
@@ -323,8 +315,6 @@ bool canReady = false;
 twai_status_info_t canStatus = {};
 uint32_t lastCanStatusMs = 0;
 uint32_t canStatusErrors = 0;
-uint32_t canBusOffSinceMs = 0;   // [CAN-STUCK-RECOVERY-FIX] 0 = kein Bus-Off aktiv
-constexpr uint32_t kCanBusOffHardResetMs = 5000;
 uint32_t lastCockpitCanTxMs = 0;
 uint32_t cockpitCanTxCount  = 0;
 // [CAN-DEV] Laufzeit-Parameter (Dev-Tab): Pins/Bitrate/IDs aus NVS, Default aus den
@@ -375,11 +365,6 @@ float speedKmh = 0.0f;
 bool vehicleActive();
 uint16_t tireCircMm = TIRE_CIRC_MM_DEFAULT;  // konfigurierbar
 uint16_t speedTrimPermil = SPEED_TRIM_PERMIL_DEFAULT; // 1000 = 1.000
-// [SPEED-PPR-CFG] Magnete am Reed-Rad: bisher hart PULSES_PER_REV (Compile-Konstante),
-// nicht in der WebGUI aenderbar -- musste im Urlaub bei einem provisorischen Umbau auf
-// 6 Magnete umgestellt werden und ging nicht ohne Neuflash. Jetzt Laufzeit-Wert, NVS-
-// persistiert, Default = PULSES_PER_REV.
-uint8_t pulsesPerRevCfg = PULSES_PER_REV;    // konfigurierbar (1..40)
 // [ODOMETER] Gesamt-km + Teilstrecke aus den Reed-Pulsen (exakter als Speed-
 // Integration): mm = Pulse * Radumfang * Trim / (1000 * PULSES_PER_REV).
 // Persistiert in NVS (odo_mm/trip_mm), gespart geschrieben (60s, nur bei Aenderung).
@@ -454,40 +439,17 @@ uint32_t curveReadStartMs = 0;
 uint8_t  curveReadPhase = 0;   // 1..4 = naechster zu sendender Block, 0 = idle
 uint32_t tuneScanSeen = 0;
 uint32_t tuneScanCandidates = 0;
-// [BLE-STRING-RACE-FIX] tuneSavedAddress und bleScanDevices[] werden vom NimBLE-
-// Host-Task (Scan-Callbacks) beschrieben und vom loop()-Task (statusJson, WebGUI)
-// gelesen. Arduino-Strings reallozieren beim Zuweisen ihren Heap-Puffer -- ein
-// gleichzeitiger Leser dereferenziert dann freigegebenen Speicher (Use-after-free,
-// korruptes JSON oder Absturz waehrend der Fahrt). Deshalb feste char-Puffer, alle
-// Zugriffe unter stateMux (memcpy/strcmp sind critical-section-tauglich, String-
-// Heap-Operationen nicht).
-char tuneSavedAddress[18] = "";           // MAC-Text, Zugriff nur ueber Helfer unten
-volatile bool tuneSavedAddressDirty = false;  // NVS-Write im loop()-Task nachziehen
-void setTuneSavedAddressLocked(const char *mac)
-{
-  char buf[18];
-  strlcpy(buf, mac, sizeof(buf));
-  for (char *p = buf; *p; ++p) *p = static_cast<char>(tolower(*p));
-  portENTER_CRITICAL(&stateMux);
-  memcpy(tuneSavedAddress, buf, sizeof(tuneSavedAddress));
-  portEXIT_CRITICAL(&stateMux);
-}
-void copyTuneSavedAddress(char out[18])
-{
-  portENTER_CRITICAL(&stateMux);
-  memcpy(out, tuneSavedAddress, 18);
-  portEXIT_CRITICAL(&stateMux);
-}
+String tuneSavedAddress = "";
 uint32_t tuneConnStartMs = 0;  // Start der aktuellen 123-Verbindung (für Stale-Bezug)
 struct BleScanDevice {
-  char address[18] = "";
-  char name[25] = "";   // BLE-Kurzname, laengere werden abgeschnitten
+  String address;
+  String name;
   int rssi = 0;
   bool tuneLike = false;
   uint32_t seenMs = 0;
 };
 constexpr uint8_t kBleScanDeviceMax = 12;
-BleScanDevice bleScanDevices[kBleScanDeviceMax];  // Zugriff nur unter stateMux
+BleScanDevice bleScanDevices[kBleScanDeviceMax];
 uint8_t bleScanDeviceCount = 0;
 #endif
 #if ENABLE_WEB_GUI
@@ -523,25 +485,19 @@ static HubWifiProfile g_hubWifiProfiles[3] = {
   { "", "", "Handy",   0, "", "", "" },   // Slot 2: NVS p2_ssid/p2_pass
 };
 // [WIFI-STATIC] WiFi.config() muss VOR WiFi.begin() laufen. true = statisch angewendet.
-// Setzt bei DHCP/ungueltiger Static-Config explizit auf DHCP zurueck -- sonst haengt eine
-// vorherige statische IP (von einem frueheren Profilwechsel in derselben Boot-Session) am
-// WiFi-Treiber weiter, auch wenn das neue Zielprofil eigentlich DHCP will.
 bool applyStaticIpIfNeeded(uint8_t profileIdx)
 {
-  if (profileIdx >= 1 && profileIdx <= 2) {
-    const HubWifiProfile &p = g_hubWifiProfiles[profileIdx];
-    if (p.ipMode == 1) {
-      IPAddress ip, gw, mask;
-      if (ip.fromString(p.ip) && gw.fromString(p.gw) && mask.fromString(p.mask)) {
-        WiFi.config(ip, gw, mask);
-        Serial.printf("WiFi Static: Profil %d -> %s (GW %s, Mask %s)\n", profileIdx, p.ip, p.gw, p.mask);
-        return true;
-      }
-      Serial.printf("WiFi Static: Profil %d ungueltige IP/GW/Mask - falle auf DHCP zurueck\n", profileIdx);
-    }
+  if (profileIdx < 1 || profileIdx > 2) return false;
+  const HubWifiProfile &p = g_hubWifiProfiles[profileIdx];
+  if (p.ipMode != 1) return false;
+  IPAddress ip, gw, mask;
+  if (!ip.fromString(p.ip) || !gw.fromString(p.gw) || !mask.fromString(p.mask)) {
+    Serial.printf("WiFi Static: Profil %d ungueltige IP/GW/Mask - falle auf DHCP zurueck\n", profileIdx);
+    return false;
   }
-  WiFi.config(INADDR_NONE, INADDR_NONE, INADDR_NONE);   // DHCP-Reset
-  return false;
+  WiFi.config(ip, gw, mask);
+  Serial.printf("WiFi Static: Profil %d -> %s (GW %s, Mask %s)\n", profileIdx, p.ip, p.gw, p.mask);
+  return true;
 }
 
 // [WIFI-MAC-OVR] Manuelle STA-MAC statt Werks-eFuse. Hintergrund: billige ESP32-Klone
@@ -611,13 +567,11 @@ const char *kNtpServerPrimary = "pool.ntp.org";
 const char *kNtpServerSecondary = "time.nist.gov";
 const char *kNtpServerTertiary = "de.pool.ntp.org";
 constexpr uint32_t kNtpResyncIntervalMs = 15UL * 60UL * 1000UL;
-constexpr uint32_t kNtpResyncTimeoutMs = 30UL * 1000UL;  // Sperre gegen sntp_restart()-Spam
 uint8_t timezoneIdx = kTimezoneDefault;
 bool ntpStarted = false;
 bool ntpSynced = false;
 bool ntpResyncRequested = false;
 uint32_t lastNtpSyncMs = 0;
-uint32_t ntpResyncFiredMs = 0;
 const char *kLogFile = "/drive.csv";
 const char *kOldLogFile = "/drive_old.csv";
 // [KURVE] bis zu 3 hinterlegte 123-Zuendkurven (.123-XML) als Slots.
@@ -988,35 +942,27 @@ void recordBleScanDevice(const NimBLEAdvertisedDevice *device, bool tuneLike)
                 address.c_str(), rssi, name.length() ? name.c_str() : "---",
                 mfg.c_str(), tuneLike ? 1 : 0);
 
-  // [BLE-STRING-RACE-FIX] Suche+Schreiben atomar unter stateMux (nur strcmp/strlcpy,
-  // keine Heap-Operationen); Count erst NACH dem Befuellen erhoehen, damit der
-  // JSON-Leser nie einen halb geschriebenen Slot sieht.
-  portENTER_CRITICAL(&stateMux);
   uint8_t slot = bleScanDeviceCount;
   for (uint8_t i = 0; i < bleScanDeviceCount; i++) {
-    if (strcmp(bleScanDevices[i].address, address.c_str()) == 0) {
+    if (bleScanDevices[i].address == address) {
       slot = i;
       break;
     }
   }
-  bool isNew = false;
   if (slot >= kBleScanDeviceMax) {
     slot = 0;
     for (uint8_t i = 1; i < bleScanDeviceCount; i++) {
       if (bleScanDevices[i].seenMs < bleScanDevices[slot].seenMs) slot = i;
     }
-    bleScanDevices[slot].tuneLike = false;  // LRU-Slot recycelt: altes Flag verwerfen
   } else if (slot == bleScanDeviceCount) {
-    isNew = true;
+    bleScanDeviceCount++;
   }
 
-  strlcpy(bleScanDevices[slot].address, address.c_str(), sizeof(bleScanDevices[slot].address));
-  strlcpy(bleScanDevices[slot].name, name.c_str(), sizeof(bleScanDevices[slot].name));
+  bleScanDevices[slot].address = address;
+  bleScanDevices[slot].name = name;
   bleScanDevices[slot].rssi = rssi;
   bleScanDevices[slot].tuneLike = bleScanDevices[slot].tuneLike || tuneLike;
   bleScanDevices[slot].seenMs = now;
-  if (isNew) bleScanDeviceCount++;
-  portEXIT_CRITICAL(&stateMux);
 }
 #endif
 
@@ -1081,17 +1027,9 @@ void displayLine(uint8_t row, const String &text)
 static constexpr uint8_t kRtcSdaPin = 4;
 static constexpr uint8_t kRtcSclPin = 5;
 static constexpr uint8_t kRtcAddr   = 0x68;
-// [ZEIT-PLAUSI] Eine gemeinsame Untergrenze fuer "ist das eine echte Zeit" ueberall
-// (systemTimeValid, /api/time_sync, /api/rtc/set, rtcReadEpoch-Jahr) -- vorher hatte
-// rtcReadEpoch() mit "Jahr < 2024" eine striktere Schwelle als der Rest (>1700000000,
-// 2023-11-14), sodass ein via Endpoint akzeptierter 2023er-Epoch in den DS3231
-// geschrieben wurde, aber beim naechsten Boot als "ungueltig" verworfen wurde.
-static constexpr time_t kMinValidEpoch = 1735689600L;  // 2025-01-01 00:00:00 UTC
 bool rtcPresent = false;               // DS3231 auf dem Bus gefunden
 bool rtcTimeValid = false;             // RTC hielt/haelt gueltige Zeit (OSF=0)
 volatile bool rtcWritePending = false; // aus Callback-Kontext angefordert (NTP)
-uint32_t rtcWriteRetryMs = 0;
-constexpr uint32_t kRtcWriteRetryIntervalMs = 10000;  // Backoff bei I2C-Fehlschlag
 
 static uint8_t rtcBcd2Dec(uint8_t v) { return (uint8_t)((v >> 4) * 10 + (v & 0x0F)); }
 static uint8_t rtcDec2Bcd(uint8_t v) { return (uint8_t)(((v / 10) << 4) | (v % 10)); }
@@ -1113,14 +1051,14 @@ bool rtcReadEpoch(time_t *out, bool *osfOut)
   Wire.beginTransmission(kRtcAddr);
   if (Wire.endTransmission() != 0) return false;
   Wire.beginTransmission(kRtcAddr); Wire.write((uint8_t)0x0F); Wire.endTransmission(false);
-  if (Wire.requestFrom(kRtcAddr, (uint8_t)1) != 1) return false;  // I2C-Glitch statt 0 annehmen
-  const uint8_t st = Wire.read();
+  Wire.requestFrom(kRtcAddr, (uint8_t)1);
+  const uint8_t st = Wire.available() ? Wire.read() : 0x80;
   const bool osf = (st & 0x80) != 0;
   if (osfOut) *osfOut = osf;
   Wire.beginTransmission(kRtcAddr); Wire.write((uint8_t)0x00); Wire.endTransmission(false);
-  if (Wire.requestFrom(kRtcAddr, (uint8_t)7) != 7) return false;
+  Wire.requestFrom(kRtcAddr, (uint8_t)7);
   uint8_t r[7];
-  for (uint8_t i = 0; i < 7; i++) r[i] = Wire.read();
+  for (uint8_t i = 0; i < 7; i++) r[i] = Wire.available() ? Wire.read() : 0;
   if (osf) return false;
   const int sec  = rtcBcd2Dec(r[0] & 0x7F);
   const int minu = rtcBcd2Dec(r[1] & 0x7F);
@@ -1128,13 +1066,9 @@ bool rtcReadEpoch(time_t *out, bool *osfOut)
   const int mday = rtcBcd2Dec(r[4] & 0x3F);
   const int mon  = rtcBcd2Dec(r[5] & 0x1F);
   const int year = 2000 + rtcBcd2Dec(r[6]);
-  // Datum UND Uhrzeit plausibilisieren -- ein einzelner I2C-Glitch (Unterspannung,
-  // Zuendung startet) soll nicht unbemerkt eine falsche Zeit setzen.
-  if (sec > 59 || minu > 59 || hour > 23) return false;
-  if (mon < 1 || mon > 12 || mday < 1 || mday > 31) return false;  // Jahr: s.u. via epoch/kMinValidEpoch
+  if (year < 2024 || mon < 1 || mon > 12 || mday < 1 || mday > 31) return false;
   const long days = rtcDaysFromCivil(year, (unsigned)mon, (unsigned)mday);
   const time_t epoch = (time_t)days * 86400 + hour * 3600 + minu * 60 + sec;
-  if (epoch < kMinValidEpoch) return false;
   if (out) *out = epoch;
   return true;
 }
@@ -1155,28 +1089,23 @@ bool rtcWriteEpoch(time_t epoch)
   Wire.write(rtcDec2Bcd((uint8_t)((tmv.tm_year + 1900) % 100)));
   if (Wire.endTransmission() != 0) return false;
   Wire.beginTransmission(kRtcAddr); Wire.write((uint8_t)0x0F); Wire.endTransmission(false);
-  if (Wire.requestFrom(kRtcAddr, (uint8_t)1) != 1) return false;  // Kurz-Read nicht als "st=0" annehmen (loescht sonst blind Alarm/32kHz-Bits)
-  uint8_t st = Wire.read();
+  Wire.requestFrom(kRtcAddr, (uint8_t)1);
+  uint8_t st = Wire.available() ? Wire.read() : 0;
   st &= ~0x80;
   Wire.beginTransmission(kRtcAddr); Wire.write((uint8_t)0x0F); Wire.write(st);
   return Wire.endTransmission() == 0;
 }
 
 // Systemzeit -> RTC zurueckschreiben (nach NTP/Display-Sync). Nur wenn Zeit gueltig.
-// Rueckgabewert: Aufrufer (updateNtp) nutzt ihn, um bei I2C-Fehlschlag (Anlasser,
-// Unterspannung) NICHT rtcWritePending zu loeschen, sondern spaeter erneut zu versuchen.
-bool rtcSyncFromSystem()
+void rtcSyncFromSystem()
 {
-  if (!rtcPresent) return false;
+  if (!rtcPresent) return;
   const time_t now = time(nullptr);
-  if (now < kMinValidEpoch) return false;
+  if (now < 1700000000L) return;
   if (rtcWriteEpoch(now)) {
     rtcTimeValid = true;
     Serial.println("RTC:         DS3231 aus Systemzeit aktualisiert");
-    return true;
   }
-  Serial.println("RTC:         Schreiben fehlgeschlagen (I2C) -- naechster Versuch folgt");
-  return false;
 }
 
 // Boot: dedizierten I2C-Bus starten, RTC lesen, Systemzeit setzen wenn gueltig.
@@ -1297,9 +1226,6 @@ bool setLambdaTestMode(const String &requested)
 
   lambdaTestMode = next;
   lastLambdaTestMs = 0;
-  if (next != LambdaTestMode::Off) {
-    lambdaTestStartMs = millis();   // [LAMBDA-TEST-WARMUP] jede (Neu-)Aktivierung startet WAIT/HEAT/OK von vorn
-  }
 #if ENABLE_WEB_GUI
   ensurePreferences();
   networkPreferences.putUChar("lambda_test", static_cast<uint8_t>(lambdaTestMode));
@@ -1374,15 +1300,8 @@ const char *tuneLinkStateText(TuneLinkState state)
 
 void setTuneLinkState(TuneLinkState state, const char *detail)
 {
-  // [TUNE-STATE-RACE-FIX] Wird aus loop()-Task UND NimBLE-Host-Task aufgerufen;
-  // Check-then-Set ohne Lock konnte eine Transition verlieren (z.B. Idle nach
-  // resetTuneClient ueberschrieben von spaetem Streaming) und damit Advertising/
-  // Scan-Gates dauerhaft blockieren.
-  portENTER_CRITICAL(&stateMux);
-  const bool changed = (tuneLinkState != state);
-  if (changed) tuneLinkState = state;
-  portEXIT_CRITICAL(&stateMux);
-  if (!changed) return;
+  if (tuneLinkState == state) return;
+  tuneLinkState = state;
   char buf[96];
   if (detail != nullptr && detail[0] != '\0') {
     snprintf(buf, sizeof(buf), "%s|%s", tuneLinkStateText(state), detail);
@@ -1539,15 +1458,9 @@ String apStationIpFromMac(const uint8_t mac[6])
 
 void refreshWifiApStations()
 {
-  // [POLL-PERF] Wird pro /api/status-Poll doppelt erreicht (recordWifiHttpPoller +
-  // statusJson) und von mehreren Clients mit 5-10 Hz -- der WiFi-Treiber-Call plus
-  // String-Formatierung pro Station braucht nicht oefter als 2x/s zu laufen.
-  static uint32_t lastRefreshMs = 0;
-  const uint32_t now = millis();
-  if (lastRefreshMs != 0 && now - lastRefreshMs < 500) return;
-  lastRefreshMs = now;
   wifi_sta_list_t list = {};
   if (esp_wifi_ap_get_sta_list(&list) != ESP_OK) return;
+  const uint32_t now = millis();
   bool seen[kWifiApStationMax] = {};
 
   for (int i = 0; i < list.num && i < kWifiApStationMax; i++) {
@@ -1597,7 +1510,6 @@ void recordWifiHttpPoller()
     deviceId = server.arg("client");
   }
   deviceId.trim();
-  if (deviceId.length() > 96) deviceId = deviceId.substring(0, 96);
 
   String userAgent;
   if (server.hasHeader("User-Agent")) userAgent = server.header("User-Agent");
@@ -1849,7 +1761,6 @@ void onNtpSyncNotification(struct timeval *tv)
   lastNtpSyncMs = millis();
   ntpSynced = true;
   ntpResyncRequested = false;
-  ntpResyncFiredMs = 0;
   rtcWritePending = true;  // frische NTP-Zeit in den DS3231 zurueckschreiben (im Loop)
   Serial.println("Time:        NTP synchronized");
 }
@@ -1908,13 +1819,9 @@ void saveTimezone(uint8_t idx)
 
 void updateNtp(uint32_t now)
 {
-  if (rtcWritePending && systemTimeValid() &&
-      (rtcWriteRetryMs == 0 || (now - rtcWriteRetryMs) >= kRtcWriteRetryIntervalMs)) {
-    // I2C nur aus Loop-Kontext, nicht aus dem SNTP-Callback. Pending bleibt bei
-    // Fehlschlag stehen (Backoff-Retry statt Busy-Spam) statt den fehlgeschlagenen
-    // Schreibversuch stillschweigend fallenzulassen.
-    if (rtcSyncFromSystem()) { rtcWritePending = false; rtcWriteRetryMs = 0; }
-    else { rtcWriteRetryMs = now; }
+  if (rtcWritePending && systemTimeValid()) {
+    rtcWritePending = false;
+    rtcSyncFromSystem();  // I2C nur aus Loop-Kontext, nicht aus dem SNTP-Callback
   }
   if (WiFi.status() != WL_CONNECTED) return;
   startNtpIfNeeded();
@@ -1923,24 +1830,18 @@ void updateNtp(uint32_t now)
   if (systemTimeValid()) {
     if (!ntpSynced) ntpSynced = true;
     if (lastNtpSyncMs == 0) lastNtpSyncMs = now;
-  }
-  // Edge-getriggert: sntp_restart() reisst laufende Requests ab, darf also
-  // nicht bei jedem Loop-Tick erneut feuern (sonst kommt nie eine Antwort
-  // durch). Der periodische Resync laeuft ohnehin intern via
-  // esp_sntp_set_sync_interval(); hier nur der explizite /ntp_sync-Wunsch,
-  // einmalig, mit Nachlauf-Sperre bis eine Antwort kam oder Timeout.
-  if (ntpResyncRequested && esp_sntp_enabled() &&
-      (ntpResyncFiredMs == 0 || (now - ntpResyncFiredMs) >= kNtpResyncTimeoutMs)) {
-    sntp_restart();
-    ntpResyncFiredMs = now;
-    Serial.println("Time:        NTP resync in progress");
+    const bool resyncDue = lastNtpSyncMs != 0 && (now - lastNtpSyncMs) >= kNtpResyncIntervalMs;
+    if ((ntpResyncRequested || resyncDue) && esp_sntp_enabled()) {
+      sntp_restart();
+      if (ntpResyncRequested) Serial.println("Time:        NTP resync in progress");
+    }
   }
 }
 
 bool systemTimeValid()
 {
   time_t now = time(nullptr);
-  return now > kMinValidEpoch;
+  return now > 1700000000;
 }
 
 void logHubEvent(const char *type, const char *detail)
@@ -2078,15 +1979,9 @@ bool initializeLogFilesystem(bool forceFormat = false)
   return true;
 }
 
-// [LOG-PERF] Header nur einmal pro Boot/Rotation pruefen statt bei jedem 500ms-
-// Append die Datei zu oeffnen und die erste Zeile zu vergleichen (3 SPIFFS-Opens
-// pro CSV-Zeile summieren sich bei wochenlangem Betrieb zu spuerbarer loop()-Latenz).
-bool logHeaderVerified = false;
-
 void ensureLogHeader()
 {
   if (!logFsReady) return;
-  if (logHeaderVerified && logCurrentBytes > 0) return;
   const String expectedHeader = logHeader();
   bool needsHeader = logCurrentBytes == 0;
   if (!needsHeader) {
@@ -2104,10 +1999,7 @@ void ensureLogHeader()
     }
     if (existing) existing.close();
   }
-  if (!needsHeader) {
-    logHeaderVerified = true;
-    return;
-  }
+  if (!needsHeader) return;
   File f = SPIFFS.open(kLogFile, FILE_WRITE);
   if (!f) {
     // Do NOT call SPIFFS.format() here — this is called from appendLiveCsv()
@@ -2123,54 +2015,38 @@ void ensureLogHeader()
   f.println(expectedHeader);
   logCurrentBytes = f.size();
   f.close();
-  logHeaderVerified = true;
 }
 
 void rotateLogIfNeeded()
 {
   if (!logFsReady || logCurrentBytes == 0) return;
-  // [LOG-PERF] Groesse aus dem gepflegten Zaehler statt extra SPIFFS-Open pro Append
-  // (logCurrentBytes wird nach jedem Write und in ensureLogHeader aktualisiert).
-  if (logCurrentBytes < kMaxLogBytes) return;
+  File f = SPIFFS.open(kLogFile, FILE_READ);
+  const size_t size = f ? f.size() : 0;
+  if (f) f.close();
+  if (size < kMaxLogBytes) return;
   SPIFFS.remove(kOldLogFile);
   SPIFFS.rename(kLogFile, kOldLogFile);
-  logOldBytes = logCurrentBytes;
+  logOldBytes = size;
   logCurrentBytes = 0;
-  logHeaderVerified = false;
   ensureLogHeader();
-}
-
-// [STALE-RPM-FIX] tuneRpm wird nach einem BLE-Disconnect NIE auf 0 zurueckgesetzt --
-// ohne Frische-Check haelt ein einzelner alter RPM-Wert (Minuten/Stunden her)
-// vehicleActive()/shouldLogCsv() faelschlich auf "Motor laeuft" fest, obwohl 123TUNE+
-// laengst weg ist. tuneFresh nutzt dasselbe 3000ms-Fenster wie der CAN-Cockpit-Frame
-// (siehe hub_can.h, tuneFresh-Berechnung dort).
-bool tuneRpmFresh(const TuneSnapshot &tune, uint16_t *rpmOut)
-{
-  const bool fresh = tune.lastRxMs != 0 && (millis() - tune.lastRxMs) <= 3000;
-  if (rpmOut) *rpmOut = fresh ? static_cast<uint16_t>(tune.rpm) : 0;
-  return fresh;
 }
 
 bool shouldLogCsv(const SpartanReading &spartan, const TuneSnapshot &tune)
 {
-  uint16_t rpm = 0;
-  if (tuneRpmFresh(tune, &rpm) && rpm > ENGINE_RUNNING_RPM_THRESHOLD) return true;
+  if (tune.rpm > ENGINE_RUNNING_RPM_THRESHOLD) return true;
 #if SPEED_REED_PIN >= 0
   if (speedKmh > 0.5f) return true;
 #endif
   return spartan.valid;
 }
 
-// [VARIANTE-A] Fahrzeug aktiv = Motor laeuft (RPM ueber Schwelle, NUR wenn frisch) ODER
-// faehrt (Reed). Waehrenddessen blockiert der Hub jede Heim-/S24-STA-Aktivitaet (kein
-// Connect, kein Auto-Reconnect, kein Scan/Kanalwechsel) -> der Hub-AP bleibt fuer die
-// Displays stabil.
+// [VARIANTE-A] Fahrzeug aktiv = Motor laeuft (RPM ueber Schwelle) ODER faehrt (Reed).
+// Waehrenddessen blockiert der Hub jede Heim-/S24-STA-Aktivitaet (kein Connect, kein
+// Auto-Reconnect, kein Scan/Kanalwechsel) -> der Hub-AP bleibt fuer die Displays stabil.
 bool vehicleActive()
 {
 #if ENABLE_BLE_HUB
-  uint16_t rpm = 0;
-  if (tuneRpmFresh(tuneSnapshot(), &rpm) && rpm > ENGINE_RUNNING_RPM_THRESHOLD) return true;
+  if (tuneSnapshot().rpm > ENGINE_RUNNING_RPM_THRESHOLD) return true;
 #endif
 #if SPEED_REED_PIN >= 0
   if (speedKmh > 0.5f) return true;
@@ -2327,8 +2203,8 @@ void updateHourmeters()
 
   const SpartanReading snapshot = readingSnapshot();
 #if ENABLE_BLE_HUB
-  uint16_t tuneRpmNow = 0;
-  const bool rpmRunning = tuneRpmFresh(tuneSnapshot(), &tuneRpmNow) && tuneRpmNow > ENGINE_RUNNING_RPM_THRESHOLD;
+  const TuneSnapshot tune = tuneSnapshot();
+  const bool rpmRunning = tune.rpm > ENGINE_RUNNING_RPM_THRESHOLD;
 #else
   const bool rpmRunning = false;
 #endif
@@ -2666,13 +2542,6 @@ void updateDemo()
 #endif
 }
 
-// [LAMBDA-TEST-WARMUP] Simuliert die reale Sonden-Aufwaermsequenz (WAIT -> HEAT ->
-// OK, siehe docs/lambda-status-logik.md), damit sich status/status_code auch am
-// Schreibtisch ohne echten Spartan am CAN-Bus beobachten lassen -- vorher sprang
-// der Testmodus sofort auf OK, testete also nie die WAIT/HEAT-Uebergaenge.
-constexpr uint32_t kLambdaTestWaitMs = 3000;   // 0-3s:  WAIT (Sonde noch kalt)
-constexpr uint32_t kLambdaTestHeatMs = 10000;  // 3-10s: HEAT (Sonde heizt auf)
-
 void updateLambdaTest()
 {
   if (lambdaTestMode == LambdaTestMode::Off) return;
@@ -2680,29 +2549,18 @@ void updateLambdaTest()
   if (now - lastLambdaTestMs < 100) return;
   lastLambdaTestMs = now;
 
-  const uint32_t warmupMs = now - lambdaTestStartMs;
-
   SpartanReading fresh;
   fresh.lambda = 1.000f;
-  if (warmupMs < kLambdaTestWaitMs) {
-    fresh.status = 1;                                 // WAIT
-    fresh.temperatureC = static_cast<uint16_t>(warmupMs / 15);   // kalt, langsam steigend
-  } else if (warmupMs < kLambdaTestHeatMs) {
-    fresh.status = 2;                                 // HEAT
-    const uint32_t heatMs = warmupMs - kLambdaTestWaitMs;
-    fresh.temperatureC = static_cast<uint16_t>(200 + heatMs / 12);  // Richtung Betriebstemperatur
-  } else {
-    fresh.status = 3;                                 // OK
-    fresh.temperatureC = 780;
-    if (lambdaTestMode == LambdaTestMode::Sweep) {
-      const uint32_t halfCycleMs = 10000;
-      const uint32_t phaseMs = now % (halfCycleMs * 2UL);
-      const float phase = static_cast<float>(phaseMs <= halfCycleMs
-          ? phaseMs
-          : (halfCycleMs * 2UL - phaseMs)) / static_cast<float>(halfCycleMs);
-      fresh.lambda = 0.85f + phase * 0.30f;
-    }
+  if (lambdaTestMode == LambdaTestMode::Sweep) {
+    const uint32_t halfCycleMs = 10000;
+    const uint32_t phaseMs = now % (halfCycleMs * 2UL);
+    const float phase = static_cast<float>(phaseMs <= halfCycleMs
+        ? phaseMs
+        : (halfCycleMs * 2UL - phaseMs)) / static_cast<float>(halfCycleMs);
+    fresh.lambda = 0.85f + phase * 0.30f;
   }
+  fresh.temperatureC = 780;
+  fresh.status = 3;
   fresh.receivedMs = now;
   fresh.valid = true;
   fresh.fromCan = false;
@@ -2774,10 +2632,6 @@ void setupSpeedReed()
   if (networkPreferences.isKey("trim_pm")) {
     speedTrimPermil = networkPreferences.getUShort("trim_pm", SPEED_TRIM_PERMIL_DEFAULT);
   }
-  if (networkPreferences.isKey("ppr")) {
-    const uint8_t stored = networkPreferences.getUChar("ppr", PULSES_PER_REV);
-    pulsesPerRevCfg = (stored >= 1 && stored <= 40) ? stored : PULSES_PER_REV;
-  }
   odoMm = networkPreferences.getULong64("odo_mm", 0);    // [ODOMETER]
   tripMm = networkPreferences.getULong64("trip_mm", 0);
   odoLastSavedMm = odoMm;
@@ -2786,7 +2640,7 @@ void setupSpeedReed()
   attachInterrupt(digitalPinToInterrupt(SPEED_REED_PIN), speedReedIsr, FALLING);
   speedPrevSampleMs = millis();
   Serial.printf("Speed:       Reed GPIO%d, %u pulses/rev, tire=%u mm, trim=%u permil\n",
-                SPEED_REED_PIN, pulsesPerRevCfg, tireCircMm, speedTrimPermil);
+                SPEED_REED_PIN, PULSES_PER_REV, tireCircMm, speedTrimPermil);
 }
 
 void updateSpeedReed()
@@ -2804,16 +2658,16 @@ void updateSpeedReed()
 
   const float hz = (1000.0f * static_cast<float>(pulses)) / static_cast<float>(dtMs);
   speedHz = hz;
-  // km/h = Hz * (TIRE_CIRC_MM / pulsesPerRevCfg) / 1000 * 3.6 * trim
-  //      = Hz * tireCircMm * 0.0036 / pulsesPerRevCfg * (trim/1000)
+  // km/h = Hz * (TIRE_CIRC_MM / PULSES_PER_REV) / 1000 * 3.6 * trim
+  //      = Hz * tireCircMm * 0.0036 / PULSES_PER_REV * (trim/1000)
   speedKmh = hz * static_cast<float>(tireCircMm) * 0.0036f
-             / static_cast<float>(pulsesPerRevCfg)
+             / static_cast<float>(PULSES_PER_REV)
              * (static_cast<float>(speedTrimPermil) / 1000.0f);
 
   // [ODOMETER] Strecke direkt aus den Pulsen (exakt, kein Integrationsfehler).
   if (pulses > 0) {
     const uint64_t addMm = static_cast<uint64_t>(pulses) * tireCircMm * speedTrimPermil
-                           / (1000ULL * pulsesPerRevCfg);
+                           / (1000ULL * PULSES_PER_REV);
     odoMm += addMm;
     tripMm += addMm;
   }
@@ -3116,21 +2970,22 @@ void setup()
   // MAC aus NVS laden (vom letzten Setup-Scan), sonst Compile-Default
   ensurePreferences();
   if (networkPreferences.isKey("tune_mac")) {
-    setTuneSavedAddressLocked(networkPreferences.getString("tune_mac", kTuneTargetAddress).c_str());
+    tuneSavedAddress = networkPreferences.getString("tune_mac", kTuneTargetAddress);
   } else {
-    setTuneSavedAddressLocked(kTuneTargetAddress);  // ef:a8:b2:de:e0:9e (Default-Emu/echte 123)
+    tuneSavedAddress = kTuneTargetAddress;  // ef:a8:b2:de:e0:9e (Default-Emu/echte 123)
     Serial.printf("Bridge:      kein MAC gespeichert, nutze Default %s\n", kTuneTargetAddress);
   }
-  Serial.printf("Bridge:      Ziel-MAC = %s\n", tuneSavedAddress);
+  tuneSavedAddress.toLowerCase();
+  Serial.printf("Bridge:      Ziel-MAC = %s\n", tuneSavedAddress.c_str());
   // UART zum S3: TX=GPIO4, RX=GPIO5 (C6: freie Pins, kein Strapping/DAC)
   Serial1.begin(115200, SERIAL_8N1, 5, 4);  // RX=GPIO5, TX=GPIO4
   // MAC als Zieladresse setzen — direkt verbinden ohne Scan.
   // scheduleTuneScan(true) plant einen schnellen Connect-Versuch (500ms), der über
   // connectTune() direkt auf tuneTargetAddress geht (kein Scan da addrMatch=1).
-  tuneTargetAddress = NimBLEAddress(std::string(tuneSavedAddress), BLE_ADDR_RANDOM);
+  tuneTargetAddress = NimBLEAddress(std::string(tuneSavedAddress.c_str()), BLE_ADDR_RANDOM);
   scheduleTuneScan(true);  // startet schnellen Connect (500ms Delay)
   Serial.printf("Bridge:      Verbinde direkt auf %s (kein Hintergrund-Scan)\n",
-                tuneSavedAddress);
+                tuneSavedAddress.c_str());
   return;
 #endif
 

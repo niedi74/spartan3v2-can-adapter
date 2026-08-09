@@ -183,7 +183,6 @@ input:focus, select:focus { outline: none; border-color: #78ad43; }
 <button type="button" id="tabLog" class="tab" onclick="showTab('log')">Log</button>
 <button type="button" id="tabSetup" class="tab" onclick="showTab('setup')">Setup</button>
 <button type="button" id="tabDev" class="tab" onclick="showTab('dev')">Dev</button>
-<button type="button" id="tabPlan" class="tab" onclick="showTab('plan')">Plan</button>
 </div>
 <div class="tab-section" data-tab="live">
 <div class="card">
@@ -379,8 +378,7 @@ input:focus, select:focus { outline: none; border-color: #78ad43; }
 <p class="hint">Firmware-BIN aus PlatformIO hochladen. Nach erfolgreichem Upload startet der Hub neu. Waehrend OTA sind Live-Polls kurz blockiert.</p>
 <p class="hint" id="otaLockHint">OTA-Status: -</p>
 <div class="row" style="gap:6px"><input id="otaTok" type="password" placeholder="OTA-Token" autocomplete="off" style="flex:1;min-width:0"><button type="button" id="otaTokSave">Token speichern</button></div>
-<div class="row" style="gap:6px"><button type="button" id="otaTokClear" class="secondary">OTA entsperren (Token löschen)</button></div>
-<p class="hint">Ohne gesetzten Token ist OTA <b>gesperrt</b> (Schutz vor versehentlichem Fremd-Flash, z.B. Display-FW ueber den mDNS-Namen). Token einmal setzen; zum Hochladen im Feld lassen. <b>Zum Ändern/Löschen eines bereits gesetzten Tokens muss der AKTUELLE Token im Feld stehen</b> (dient als Autorisierung) — „Token löschen" nutzt genau diesen Wert, um den Schutz aufzuheben.</p>
+<p class="hint">Ohne gesetzten Token ist OTA <b>gesperrt</b> (Schutz vor versehentlichem Fremd-Flash, z.B. Display-FW ueber den mDNS-Namen). Token einmal setzen; zum Hochladen im Feld lassen.</p>
 <form id="otaForm" method="POST" action="/update" enctype="multipart/form-data">
 <input class="file" type="file" name="update" accept=".bin,application/octet-stream" required>
 <button type="submit" id="otaBtn">Firmware hochladen</button>
@@ -408,8 +406,8 @@ input:focus, select:focus { outline: none; border-color: #78ad43; }
 <input id="odoSet" name="total_km" type="number" min="0" max="2000000" step="0.1" value="0">
 <button type="submit">Setzen</button>
 </form>
+<div class="row"><span>Pulse pro Umdrehung</span><strong id="spdppr">10</strong></div>
 <form action="/speed" method="post" style="margin-top:12px">
-<label>Magnete am Reed-Rad (Pulse/Umdrehung) <input type="number" name="ppr" min="1" max="40" id="ctlPpr" value="10"></label>
 <label>Reifenumfang (mm) <input type="number" name="tire" min="500" max="4000" id="ctlTire" value="2147"></label>
 <label>Trim (x1000) <input type="number" name="trim" min="500" max="1500" id="ctlTrim" value="1000"></label>
 <p class="hint">Beispiel: Tacho zeigt 60.0 km/h, GPS sagt 58.4 km/h -> Trim = 1000 * 58.4 / 60.0 = 973.</p>
@@ -664,36 +662,6 @@ Leer lassen + speichern = zurueck zur Werks-MAC. <b>Loest einen Neustart aus.</b
 </details>
 </div></details>
 </div><!-- /tab dev -->
-<div class="tab-section" data-tab="plan" hidden>
-<details class="setup" open><summary>Anschlussplan ESP32-S3 Hub</summary><div class="inside">
-<p class="hint">Verdrahtung des Motorraum-Hubs. CAN/UART-Pins sind Laufzeit-Konfiguration (Dev-Tab) und werden live angezeigt.</p>
-<table style="width:100%;border-collapse:collapse;font-size:.92rem">
-<tr style="color:#9ed85b;text-align:left"><th style="padding:6px 4px">Funktion</th><th>GPIO</th><th>Gegenstelle / Hinweis</th></tr>
-<tr><td style="padding:6px 4px">CAN TX</td><td><strong id="plan_can_tx">11</strong></td><td>CAN-Transceiver (SN65HVD230) CTX</td></tr>
-<tr><td style="padding:6px 4px">CAN RX</td><td><strong id="plan_can_rx">10</strong></td><td>Transceiver CRX &mdash; CANH/CANL zum Spartan, 120&Omega; Abschluss</td></tr>
-<tr><td style="padding:6px 4px">W25Q128 CS</td><td><strong>13</strong></td><td rowspan="4">16-MB-SPI-Flash: Log-Backup + Config-Spiegel (3V3!)</td></tr>
-<tr><td style="padding:6px 4px">W25Q128 CLK</td><td><strong>14</strong></td></tr>
-<tr><td style="padding:6px 4px">W25Q128 DI (MOSI)</td><td><strong>15</strong></td></tr>
-<tr><td style="padding:6px 4px">W25Q128 DO (MISO)</td><td><strong>18</strong></td></tr>
-<tr><td style="padding:6px 4px">DS3231 SDA</td><td><strong>4</strong></td><td rowspan="2">RTC-Modul, 3V3 + CR2032 (GPIO 8/9 dieses Boards defekt &mdash; nicht nutzen)</td></tr>
-<tr><td style="padding:6px 4px">DS3231 SCL</td><td><strong>5</strong></td></tr>
-<tr><td style="padding:6px 4px">Speed-Reed (MC-38)</td><td><strong>12</strong></td><td>direkt Reed &harr; GND, interner Pullup, 10 Magnete/Radumdrehung</td></tr>
-<tr><td style="padding:6px 4px">Status-LED</td><td><strong>2</strong></td><td>an = Lambda-Status OK</td></tr>
-<tr><td style="padding:6px 4px">UART-Bridge RX/TX</td><td><strong id="plan_uart">aus</strong></td><td>optionaler 123-Bridge-ESP (Dev-Tab, 0 = deaktiviert)</td></tr>
-<tr><td style="padding:6px 4px">Analog-Fallback</td><td><strong>34</strong></td><td>Spartan 0-5V-Ausgang &uuml;ber Teiler (nur ohne CAN)</td></tr>
-</table>
-</div></details>
-<details class="setup"><summary>Bus &amp; Versorgung</summary><div class="inside">
-<div class="row"><span>CAN-Bus</span><strong>500 kbit/s &middot; Spartan 0x400 &rarr; Hub &middot; Hub 0x510 &rarr; Displays</strong></div>
-<div class="row"><span>0x510 Byte 7 (Flags)</span><strong>Bit0 LambdaValid &middot; Bit1 TuneFresh &middot; Bit2-3 Status &middot; Bit4 RealCan</strong></div>
-<div class="row"><span>0x511 (Cockpit-ID+1)</span><strong>123-Volt/Temp/Coil + Speed &mdash; f&uuml;r Displays mit schwachem WLAN</strong></div>
-<div class="row"><span>0x512 (Cockpit-ID+2)</span><strong>Odo/Trip/Motorstunden</strong></div>
-<div class="hint" style="font-size:11px;margin:4px 0">Bit4=0 hei&szlig;t SIMULIERT (Demo/Test/ADC) &mdash; Displays m&uuml;ssen das sichtbar machen! Details: docs/lambda-status-logik.md im Repo.</div>
-<div class="row"><span>Versorgung</span><strong>5V Buck vom Bordnetz (Kl. 15)</strong></div>
-<div class="hint" style="font-size:11px;margin:4px 0">Achtung Unterspannung beim Anlassen: unter ~10,5V verstummt der Spartan auf CAN (rx_err bleibt niedrig &mdash; sieht aus wie Kabelfehler, ist aber Spannung).</div>
-<div class="row"><span>Netz</span><strong>Live-AP 192.168.4.1 &middot; Test-AP 192.168.5.1 &middot; Heimnetz .71/.87</strong></div>
-</div></details>
-</div><!-- /tab plan -->
 <script>
 async function wifiScan(){
   const info=document.getElementById('wifiScanInfo'), sel=document.getElementById('wifiScanSel');
@@ -751,21 +719,12 @@ function showTab(name) {
   document.getElementById('tabLog').classList.toggle('on', name === 'log');
   document.getElementById('tabSetup').classList.toggle('on', name === 'setup');
   document.getElementById('tabDev').classList.toggle('on', name === 'dev');
-  { const t=document.getElementById('tabPlan'); if(t) t.classList.toggle('on', name === 'plan'); }
   try { localStorage.setItem('spartanTab', name); } catch (e) {}
 }
 try {
   const saved = localStorage.getItem('spartanTab');
-  if (saved === 'setup' || saved === 'log' || saved === 'diag' || saved === 'dev' || saved === 'g123' || saved === 'curve' || saved === 'plan') showTab(saved);
+  if (saved === 'setup' || saved === 'log' || saved === 'diag' || saved === 'dev' || saved === 'g123' || saved === 'curve') showTab(saved);
 } catch (e) {}
-// [PLAN-TAB] Laufzeit-Pins (Dev-Tab-Konfiguration) einmalig in den Anschlussplan eintragen
-(async()=>{try{
-  const d=await(await fetch('/api/status',{cache:'no-store'})).json();
-  if(d.can_tx_pin!==undefined)document.getElementById('plan_can_tx').textContent=d.can_tx_pin;
-  if(d.can_rx_pin!==undefined)document.getElementById('plan_can_rx').textContent=d.can_rx_pin;
-  const ur=d.uart_rx_pin||0, ut=d.uart_tx_pin||0;
-  document.getElementById('plan_uart').textContent=(ur>0)?('RX='+ur+' / TX='+ut):'aus';
-}catch(e){}})();
 function credShow() {
   const v = (document.getElementById('credFor') || {}).value || '1';
   const f1 = document.getElementById('credForm1'), f2 = document.getElementById('credForm2');
@@ -925,44 +884,20 @@ if (otaForm) {
     tokEl.value = localStorage.getItem('otaTok') || '';
     tokEl.addEventListener('input', () => localStorage.setItem('otaTok', tokEl.value));
   } }
-async function otaTokenRequest(newValue, authValue) {
-  // [OTA-TOKEN-FIX] Server verlangt beim AENDERN/LOESCHEN eines bereits
-  // gesetzten Tokens den ALTEN Token im X-OTA-Token-Header (siehe
-  // /api/ota/token in hub_webgui_endpoints.h) -- vorher fehlte dieser Header
-  // komplett, jede Aenderung/Loeschung scheiterte lautlos mit 403, aber die
-  // UI zeigte trotzdem faelschlich "erfolgreich" an (kein Status-Check).
-  const r = await fetch('/api/ota/token', { method:'POST',
-    headers:{'Content-Type':'application/x-www-form-urlencoded', 'X-OTA-Token': authValue},
-    body:'token=' + encodeURIComponent(newValue) });
-  let d = {};
-  try { d = await r.json(); } catch (e) {}
-  if (!r.ok) {
-    otaShow(0, 'Fehler: ' + (d.error || ('HTTP ' + r.status)));
-    return false;
-  }
-  otaShow(0, d.ota_locked ? 'OTA-Token geloescht -> gesperrt' : 'OTA-Token gesetzt -> entsperrt');
-  return true;
-}
 const otaTokSave = document.getElementById('otaTokSave');
 if (otaTokSave) {
   otaTokSave.addEventListener('click', async () => {
     const t = (document.getElementById('otaTok')||{}).value || '';
+    localStorage.setItem('otaTok', t);
     otaTokSave.disabled = true;
-    if (await otaTokenRequest(t, t)) localStorage.setItem('otaTok', t);
+    try {
+      const r = await fetch('/api/ota/token', { method:'POST',
+        headers:{'Content-Type':'application/x-www-form-urlencoded'},
+        body:'token=' + encodeURIComponent(t) });
+      const d = await r.json();
+      otaShow(0, d.ota_locked ? 'OTA-Token geloescht -> gesperrt' : 'OTA-Token gesetzt -> entsperrt');
+    } catch (e) { otaShow(0, 'Token-Fehler'); }
     otaTokSave.disabled = false;
-  });
-}
-const otaTokClear = document.getElementById('otaTokClear');
-if (otaTokClear) {
-  otaTokClear.addEventListener('click', async () => {
-    const cur = (document.getElementById('otaTok')||{}).value || '';
-    if (!cur) { otaShow(0, 'Aktuellen Token erst ins Feld eintragen (Autorisierung)'); return; }
-    otaTokClear.disabled = true;
-    if (await otaTokenRequest('', cur)) {
-      localStorage.removeItem('otaTok');
-      document.getElementById('otaTok').value = '';
-    }
-    otaTokClear.disabled = false;
   });
 }
 // [WIFI-MAC-OVR]
@@ -1553,12 +1488,11 @@ async function refresh() {
       document.getElementById('liveSpeedMeta').textContent = Number(d.speed_hz ?? 0).toFixed(2) + ' Hz / ' + (d.speed_pulses ?? 0);
       document.getElementById('spdpc').textContent = d.speed_pulses ?? 0;
       { const o=document.getElementById('odoKm'); if(o) o.textContent = Number(d.odo_km ?? 0).toFixed(1) + ' / ' + Number(d.trip_km ?? 0).toFixed(2) + ' km'; }
+      document.getElementById('spdppr').textContent = d.speed_pulses_per_rev ?? 10;
       var ctlTire = document.getElementById('ctlTire');
       var ctlTrim = document.getElementById('ctlTrim');
-      var ctlPpr = document.getElementById('ctlPpr');
       if (ctlTire && document.activeElement !== ctlTire) ctlTire.value = d.speed_tire_mm ?? 2147;
       if (ctlTrim && document.activeElement !== ctlTrim) ctlTrim.value = d.speed_trim_permil ?? 1000;
-      if (ctlPpr && document.activeElement !== ctlPpr) ctlPpr.value = d.speed_pulses_per_rev ?? 10;
     }
     document.getElementById('jsondump').textContent = JSON.stringify(d, null, 2);
   } catch (e) {

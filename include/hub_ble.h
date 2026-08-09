@@ -150,12 +150,7 @@ void scheduleTuneScan(bool fastRetry = false)
     delayMs = kTuneReconnectDelayMs * min((uint32_t)tuneFailStreak, 2UL); // max 2× = 10s
     if (delayMs > 5000UL) delayMs = 5000UL;  // niemals länger als 5s
   }
-  // [TUNE-SCAN-RACE-FIX] tuneNextScanMs wird von loop()- UND NimBLE-Host-Task
-  // beschrieben; Schreiben unter stateMux, damit ein Reschedule nicht vom
-  // gleichzeitigen Check-then-Clear in updateTuneBle() verschluckt wird.
-  portENTER_CRITICAL(&stateMux);
   tuneNextScanMs = millis() + delayMs;
-  portEXIT_CRITICAL(&stateMux);
   setTuneLinkState(TuneLinkState::Idle, fastRetry ? "retry_fast" : "retry_scheduled");
 }
 
@@ -173,17 +168,6 @@ void abortCurveRead(const char *why)
   portEXIT_CRITICAL(&stateMux);
   Serial.printf("Kurve-Read:  Abbruch (%s), Teilpuffer verworfen\n", why);
   logHubEvent("curve_read", "abort");
-}
-
-// [BLE-RACE] Atomarer Schnappschuss statt Check-dann-Benutz auf dem rohen
-// Zeiger: onDisconnect() (NimBLE-Host-Task) nullt tuneNusRx unter demselben
-// stateMux, siehe dort.
-NimBLERemoteCharacteristic *tuneNusRxSnapshot()
-{
-  portENTER_CRITICAL(&stateMux);
-  NimBLERemoteCharacteristic *p = tuneNusRx;
-  portEXIT_CRITICAL(&stateMux);
-  return p;
 }
 
 void resetTuneClient()
@@ -206,15 +190,9 @@ class TuneClientCallbacks : public NimBLEClientCallbacks {
  public:
   void onDisconnect(NimBLEClient *, int reason) override
   {
-    // [BLE-RACE] Laeuft im NimBLE-Host-Task, potenziell auf dem anderen Core
-    // parallel zu sendTuneRaw/-Ping/-Command im loop()-Task. tuneNusRx unter
-    // stateMux nullen, damit ein zeitgleicher Check-dann-Schreib-Zugriff dort
-    // (siehe tuneNusRxSnapshot()) nie einen halb-ungueltigen Zeiger sieht.
-    portENTER_CRITICAL(&stateMux);
     tuneConnected = false;
     tuneNusRx = nullptr;
     tuneModeActive = false; tuneAdvSteps = 0;  // [TUNE-LIVE] Offset verfaellt bei Trennung
-    portEXIT_CRITICAL(&stateMux);
     abortCurveRead("disconnect");              // [KURVE-READ] sonst blockiert das Lesefenster den Reconnect
     char detail[24];
     snprintf(detail, sizeof(detail), "disconnect|r%d", reason);
@@ -223,10 +201,8 @@ class TuneClientCallbacks : public NimBLEClientCallbacks {
     tuneFailStreak = 0;
 #if BLE_BRIDGE
     // Bridge: kein Scan nach Disconnect — direkt auf bekannte MAC reconnecten.
-    char savedMac[18];
-    copyTuneSavedAddress(savedMac);
-    if (strlen(savedMac) == 17) {
-      tuneTargetAddress = NimBLEAddress(std::string(savedMac), BLE_ADDR_RANDOM);
+    if (tuneSavedAddress.length() == 17) {
+      tuneTargetAddress = NimBLEAddress(std::string(tuneSavedAddress.c_str()), BLE_ADDR_RANDOM);
       tuneDoConnect = true;
       Serial.println("123TUNE BLE: Bridge -> direkt reconnect (kein Scan)");
     } else {
@@ -286,9 +262,7 @@ class TuneScanCallbacks : public NimBLEScanCallbacks {
     String name = device->getName().c_str();
     name.toLowerCase();
     const bool addressMatches = address == kTuneTargetAddress;
-    char savedMac[18];
-    copyTuneSavedAddress(savedMac);
-    const bool savedAddressMatches = savedMac[0] != '\0' && address == savedMac;
+    const bool savedAddressMatches = tuneSavedAddress.length() > 0 && address == tuneSavedAddress;
     const bool advertisesNus = device->isAdvertisingService(NimBLEUUID(kTuneNusServiceUuid));
     const bool nameLooksLikeTune = name.indexOf("123") >= 0 || name.indexOf("tune") >= 0 || name.indexOf("raytac") >= 0;
     recordBleScanDevice(device, advertisesNus || nameLooksLikeTune || addressMatches || savedAddressMatches);
@@ -297,17 +271,16 @@ class TuneScanCallbacks : public NimBLEScanCallbacks {
     }
 
     tuneTargetAddress = device->getAddress();
-    if (address != savedMac) {
-      setTuneSavedAddressLocked(address.c_str());
-      // [BLE-STRING-RACE-FIX] NVS-Write (blockierender Flash-Commit) NICHT im
-      // NimBLE-Host-Task -- Flag setzen, updateTuneBle() im loop() persistiert.
-      tuneSavedAddressDirty = true;
-      Serial.printf("123TUNE BLE: saved address %s\n", address.c_str());
+    if (tuneSavedAddress != address) {
+      tuneSavedAddress = address;
+#if ENABLE_WEB_GUI
+      ensurePreferences();
+      networkPreferences.putString("tune_mac", tuneSavedAddress);
+#endif
+      Serial.printf("123TUNE BLE: saved address %s\n", tuneSavedAddress.c_str());
     }
     tuneDoConnect = true;
-    portENTER_CRITICAL(&stateMux);
     tuneNextScanMs = 0;
-    portEXIT_CRITICAL(&stateMux);
     tuneScanCandidates++;
     NimBLEDevice::getScan()->stop();
     markBleCentralScanEnded();
@@ -464,9 +437,7 @@ void connectTune()
 
 void sendTunePing()
 {
-  if (!tuneConnected || tuneClient == nullptr || !tuneClient->isConnected()) return;
-  NimBLERemoteCharacteristic *nusRx = tuneNusRxSnapshot();
-  if (nusRx == nullptr) return;
+  if (!tuneConnected || tuneClient == nullptr || !tuneClient->isConnected() || tuneNusRx == nullptr) return;
   const uint32_t now = millis();
   if (now - tuneLastPingMs < kTunePingIntervalMs) return;
   tuneLastPingMs = now;
@@ -475,25 +446,20 @@ void sendTunePing()
   // Write OHNE Response (false): unter Notify-Flut (Motor laeuft) kollidiert ein
   // Write-MIT-Response mit dem Notify-Strom -> GATT-Prozedurfehler -> lokale
   // Terminierung (reason 534). Die 123-RX unterstuetzt WRITE_NO_RESPONSE.
-  const bool ok = nusRx->writeValue(&ping, 1, false);
+  const bool ok = tuneNusRx->writeValue(&ping, 1, false);
   Serial.printf("123TUNE BLE: ping -> %s\n", ok ? "OK" : "FAIL");
 }
 
 bool sendTuneCommand(const char *command)
 {
-  if (!tuneConnected || tuneClient == nullptr || !tuneClient->isConnected()) {
-    Serial.println("123TUNE BLE: command blocked, not connected");
-    return false;
-  }
-  NimBLERemoteCharacteristic *nusRx = tuneNusRxSnapshot();
-  if (nusRx == nullptr) {
+  if (!tuneConnected || tuneClient == nullptr || !tuneClient->isConnected() || tuneNusRx == nullptr) {
     Serial.println("123TUNE BLE: command blocked, not connected");
     return false;
   }
 
   char buffer[24];
   snprintf(buffer, sizeof(buffer), "%s\r$", command);
-  const bool ok = nusRx->writeValue(reinterpret_cast<uint8_t *>(buffer), strlen(buffer), true);
+  const bool ok = tuneNusRx->writeValue(reinterpret_cast<uint8_t *>(buffer), strlen(buffer), true);
   Serial.printf("123TUNE BLE: cmd '%s\\r$' -> %s\n", command, ok ? "OK" : "FAIL");
   tuneLastPingMs = millis();
   return ok;
@@ -506,7 +472,7 @@ bool sendTuneCommand(const char *command)
 bool tuneStreaming()
 {
   return tuneConnected && tuneClient != nullptr && tuneClient->isConnected() &&
-         tuneNusRxSnapshot() != nullptr && tuneLinkState == TuneLinkState::Streaming;
+         tuneNusRx != nullptr && tuneLinkState == TuneLinkState::Streaming;
 }
 
 bool sendTuneRaw(char c)
@@ -515,13 +481,8 @@ bool sendTuneRaw(char c)
     Serial.printf("123TUNE BLE: tune-cmd '%c' blockiert (kein streaming)\n", c);
     return false;
   }
-  NimBLERemoteCharacteristic *nusRx = tuneNusRxSnapshot();
-  if (nusRx == nullptr) {
-    Serial.printf("123TUNE BLE: tune-cmd '%c' blockiert (disconnect)\n", c);
-    return false;
-  }
   const uint8_t b = static_cast<uint8_t>(c);
-  const bool ok = nusRx->writeValue(&b, 1, false);
+  const bool ok = tuneNusRx->writeValue(&b, 1, false);
   Serial.printf("123TUNE BLE: tune-cmd '%c' -> %s\n", c, ok ? "OK" : "FAIL");
   return ok;
 }
@@ -638,18 +599,6 @@ void runTuneReadDump()
 void updateTuneBle()
 {
   const uint32_t now = millis();
-  // [BLE-STRING-RACE-FIX] Vom Scan-Callback (NimBLE-Host-Task) gemerkte neue
-  // Ziel-MAC hier im loop()-Task nach NVS schreiben (blockierender Flash-Commit
-  // gehoert nicht in den BLE-Callback).
-  if (tuneSavedAddressDirty) {
-    tuneSavedAddressDirty = false;
-    char savedMac[18];
-    copyTuneSavedAddress(savedMac);
-#if ENABLE_WEB_GUI
-    ensurePreferences();
-    networkPreferences.putString("tune_mac", savedMac);
-#endif
-  }
   // [TUNE-SAFE] Dead-Man: verliert die GUI den Hub (Handy-WLAN weg), darf der
   // Zuend-Offset nicht am laufenden Motor stehen bleiben. Ohne Tune-API-Aktivitaet
   // (Steps/Ping der GUI) fuer 60 s -> Modus verlassen; die 123 verwirft den Offset
@@ -703,25 +652,15 @@ void updateTuneBle()
     }
     return;
   }
-  // [TUNE-SCAN-RACE-FIX] Deadline unter stateMux lesen und nur loeschen, wenn sie
-  // unveraendert ist -- ein gleichzeitiges Reschedule vom NimBLE-Host-Task
-  // (onScanEnd/onDisconnect) darf nicht verschluckt werden.
-  portENTER_CRITICAL(&stateMux);
-  const uint32_t scanDue = tuneNextScanMs;
-  portEXIT_CRITICAL(&stateMux);
-  if (scanDue != 0 && static_cast<int32_t>(now - scanDue) >= 0) {
+  if (tuneNextScanMs != 0 && static_cast<int32_t>(now - tuneNextScanMs) >= 0) {
     if (!bleCentralScanActive && !tuneDoConnect) {
-      portENTER_CRITICAL(&stateMux);
-      if (tuneNextScanMs == scanDue) tuneNextScanMs = 0;
-      portEXIT_CRITICAL(&stateMux);
+      tuneNextScanMs = 0;
       startTuneScan();
     } else {
       // Funk gerade anderweitig belegt (nur EIN zentraler Scanner). Timer NICHT
       // löschen, sonst bleibt die 123 dauerhaft ohne Rescan hängen. Kurz erneut
       // versuchen — 123 hat Vorrang und greift sich den Scanner, sobald frei.
-      portENTER_CRITICAL(&stateMux);
-      if (tuneNextScanMs == scanDue) tuneNextScanMs = now + 300;
-      portEXIT_CRITICAL(&stateMux);
+      tuneNextScanMs = now + 300;
     }
   }
 }
@@ -786,11 +725,12 @@ void setupBleHub()
 #endif
 #if ENABLE_WEB_GUI
   ensurePreferences();
-  setTuneSavedAddressLocked(networkPreferences.isKey("tune_mac")
-      ? networkPreferences.getString("tune_mac", kTuneTargetAddress).c_str()
-      : kTuneTargetAddress);
+  tuneSavedAddress = networkPreferences.isKey("tune_mac")
+      ? networkPreferences.getString("tune_mac", kTuneTargetAddress)
+      : String(kTuneTargetAddress);
+  tuneSavedAddress.toLowerCase();
 #else
-  setTuneSavedAddressLocked(kTuneTargetAddress);
+  tuneSavedAddress = kTuneTargetAddress;
 #endif
 
 #if ENABLE_BLE_DISPLAY
@@ -820,7 +760,7 @@ void setupBleHub()
   Serial.printf("BLE hub:     service=%s\n", kBleServiceUuid);
   Serial.println("BLE hub:     advertising waits for 123TUNE or 30s fallback");
 #endif
-  Serial.printf("123TUNE BLE: target %s\n", tuneSavedAddress);
+  Serial.printf("123TUNE BLE: target %s\n", tuneSavedAddress.c_str());
   logHubEvent("tune_state", "boot|target_saved");
   if (hubFeatBle123) {
     startTuneScan();

@@ -13,13 +13,8 @@ String statusJson()
   const uint32_t now = millis();
   String json;
   json.reserve(3600);  // verhindert wiederholte Heap-Reallokationen
-  // [STALE-LAMBDA-FIX] valid nur melden, wenn der Wert auch FRISCH ist -- sonst
-  // liefert ein toter CAN-Link (ohne Demo/ADC-Fallback) den letzten Lambda-Wert
-  // fuer immer als "valid" und Anzeigen halten Alt-Daten fuer aktuelle Messwerte.
-  const bool snapshotFresh =
-      snapshot.valid && (now - snapshot.receivedMs) <= kLambdaFreshMs;
   json += "{\"valid\":";
-  json += snapshotFresh ? "true" : "false";
+  json += snapshot.valid ? "true" : "false";
   json += ",\"lambda\":";
   json += String(snapshot.lambda, 3);
   json += ",\"temperature\":";
@@ -150,26 +145,18 @@ String statusJson()
     json += "}";
   }
   json += "],\"ble_scan\":[";
-  // [BLE-STRING-RACE-FIX] Scan-Liste unter stateMux in lokale Kopie ziehen --
-  // der NimBLE-Host-Task schreibt sie gleichzeitig (recordBleScanDevice).
-  BleScanDevice scanCopy[kBleScanDeviceMax];
-  uint8_t scanCount;
-  portENTER_CRITICAL(&stateMux);
-  scanCount = bleScanDeviceCount;
-  for (uint8_t i = 0; i < scanCount; i++) scanCopy[i] = bleScanDevices[i];
-  portEXIT_CRITICAL(&stateMux);
-  for (uint8_t i = 0; i < scanCount; i++) {
+  for (uint8_t i = 0; i < bleScanDeviceCount; i++) {
     if (i > 0) json += ",";
     json += "{\"addr\":\"";
-    json += scanCopy[i].address;
+    json += bleScanDevices[i].address;
     json += "\",\"name\":\"";
-    json += jsonEscape(scanCopy[i].name);
+    json += jsonEscape(bleScanDevices[i].name);
     json += "\",\"rssi\":";
-    json += String(scanCopy[i].rssi);
+    json += String(bleScanDevices[i].rssi);
     json += ",\"age_ms\":";
-    json += String(now - scanCopy[i].seenMs);
+    json += String(now - bleScanDevices[i].seenMs);
     json += ",\"tune\":";
-    json += scanCopy[i].tuneLike ? "true" : "false";
+    json += bleScanDevices[i].tuneLike ? "true" : "false";
     json += "}";
   }
   json += "]";
@@ -178,14 +165,14 @@ String statusJson()
   json += ",\"wifi_saved\":";
   json += haveSavedWifi ? "true" : "false";
   json += ",\"wifi_saved_ssid\":\"";
-  json += jsonEscape(savedWifiSsid);
+  json += savedWifiSsid;
   json += "\"";
   json += ",\"wifi_prof\":";
   json += String(hubWifiProfile);
   json += ",\"wifi_prof_labels\":[\"Hub-AP\",\"Zuhause\",\"S24\"]";
   json += ",\"wifi_prof_ssids\":[\"\"";
-  json += ",\"" + jsonEscape(String(g_hubWifiProfiles[1].ssid)) + "\"";
-  json += ",\"" + jsonEscape(String(g_hubWifiProfiles[2].ssid)) + "\"]";
+  json += ",\"" + String(g_hubWifiProfiles[1].ssid) + "\"";
+  json += ",\"" + String(g_hubWifiProfiles[2].ssid) + "\"]";
   json += ",\"wifi_connected\":";
   json += WiFi.status() == WL_CONNECTED ? "true" : "false";
   json += ",\"wifi_sta_reason\":";
@@ -195,7 +182,7 @@ String statusJson()
   json += ",\"wifi_status\":";
   json += String((int)WiFi.status());
   json += ",\"wifi_ssid\":\"";
-  json += WiFi.status() == WL_CONNECTED ? jsonEscape(WiFi.SSID()) : "";
+  json += WiFi.status() == WL_CONNECTED ? WiFi.SSID() : "";
   json += "\",\"wifi_ip\":\"";
   json += WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : "";
   json += "\",\"wifi_mac\":\"";       // [WIFI-MAC-OVR] effektive STA-MAC (Werk oder Override)
@@ -347,11 +334,7 @@ String statusJson()
   json += ",\"tune_unknown_opcode\":";
   json += String(tune.unknownOpcodeCount);
   json += ",\"tune_saved_address\":\"";
-  {
-    char savedMac[18];
-    copyTuneSavedAddress(savedMac);  // [BLE-STRING-RACE-FIX] Kopie unter stateMux
-    json += savedMac;
-  }
+  json += tuneSavedAddress;
   json += "\"";
   json += ",\"rpm\":";
   json += String(static_cast<int>(tune.rpm));
@@ -382,7 +365,7 @@ String statusJson()
   json += ",\"speed_trim_permil\":";
   json += String(speedTrimPermil);
   json += ",\"speed_pulses_per_rev\":";
-  json += String(pulsesPerRevCfg);
+  json += String(PULSES_PER_REV);
   json += ",\"odo_km\":";
   json += String(static_cast<double>(odoMm) / 1000000.0, 1);
   json += ",\"trip_km\":";
