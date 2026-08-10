@@ -369,6 +369,12 @@ uint32_t speedPrevPulseCount = 0;            // Sampling-Diff loop()
 uint32_t speedPrevSampleMs = 0;
 float speedHz = 0.0f;
 float speedKmh = 0.0f;
+// [SPEED-SIM] Dev-Tab-Schalter: Reed-Pulse simulieren statt echte GPIO-Flanken
+// zu zaehlen -- fuers Testen von Odo/Trip/Tacho-Anzeige am Schreibtisch ohne
+// Rad. An die aktuelle 123-Drehzahl angelehnt (grobe Faustformel, kein echtes
+// Gang-Modell), damit Motor-Sweep und Tacho gemeinsam plausibel wirken.
+bool speedSimActive = false;
+constexpr float kSpeedSimKmhPerRpm = 0.018f;   // ~54 km/h bei 3000 U/min
 
 // [VARIANTE-A] Vorwaerts-Deklaration: Motor laeuft/faehrt? -> dann KEINE neuen
 // Heim-/S24-STA-Versuche, damit der Hub-AP (Touch/Displays) bockstabil bleibt.
@@ -2795,12 +2801,27 @@ void updateSpeedReed()
   const uint32_t dtMs = now - speedPrevSampleMs;
   if (dtMs < 250) return;  // 4 Hz Sampling
 
-  noInterrupts();
-  const uint32_t curCount = speedPulseCount;
-  interrupts();
-  const uint32_t pulses = curCount - speedPrevPulseCount;
-  speedPrevPulseCount = curCount;
-  speedPrevSampleMs = now;
+  uint32_t pulses;
+  if (speedSimActive) {
+    // [SPEED-SIM] Keine echten ISR-Pulse -- Ziel-km/h aus der Drehzahl ableiten
+    // und die dafuer noetige Pulszahl fuer dieses Sample-Intervall zurueckrechnen
+    // (exakt dieselbe Formel wie unten, nur rueckwaerts), damit derselbe Odo-/
+    // Trip-Code unveraendert weiterlaeuft -- keine Sonderlogik fuer die Anzeige.
+    speedPrevPulseCount = speedPulseCount;  // haelt echten Zaehler synchron, falls Sim endet
+    speedPrevSampleMs = now;
+    const float simKmh = tuneRpm * kSpeedSimKmhPerRpm;
+    const float simHz = simKmh / 0.0036f / static_cast<float>(tireCircMm)
+                         * static_cast<float>(pulsesPerRevCfg)
+                         / (static_cast<float>(speedTrimPermil) / 1000.0f);
+    pulses = static_cast<uint32_t>(simHz * static_cast<float>(dtMs) / 1000.0f + 0.5f);
+  } else {
+    noInterrupts();
+    const uint32_t curCount = speedPulseCount;
+    interrupts();
+    pulses = curCount - speedPrevPulseCount;
+    speedPrevPulseCount = curCount;
+    speedPrevSampleMs = now;
+  }
 
   const float hz = (1000.0f * static_cast<float>(pulses)) / static_cast<float>(dtMs);
   speedHz = hz;
@@ -2811,6 +2832,7 @@ void updateSpeedReed()
              * (static_cast<float>(speedTrimPermil) / 1000.0f);
 
   // [ODOMETER] Strecke direkt aus den Pulsen (exakt, kein Integrationsfehler).
+  // Laeuft bewusst auch im Sim-Modus mit (identisches Verhalten wie real).
   if (pulses > 0) {
     const uint64_t addMm = static_cast<uint64_t>(pulses) * tireCircMm * speedTrimPermil
                            / (1000ULL * pulsesPerRevCfg);

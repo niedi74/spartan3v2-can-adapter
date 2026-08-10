@@ -387,6 +387,8 @@ String statusJson()
   json += String(static_cast<double>(odoMm) / 1000000.0, 1);
   json += ",\"trip_km\":";
   json += String(static_cast<double>(tripMm) / 1000000.0, 2);
+  json += ",\"speed_sim_active\":";
+  json += speedSimActive ? "true" : "false";
 #endif
   // [KURVE] gecachte Slot-Bitmaske (refreshCurveSlotCache bei Boot/Upload/Delete)
   // statt 3x SPIFFS.exists() pro Poll -- statusJson laeuft mit 5-10 Hz.

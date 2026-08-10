@@ -622,6 +622,14 @@ Leer lassen + speichern = zurueck zur Werks-MAC. <b>Loest einen Neustart aus.</b
 <button type="button" onclick="devLambda('sweep')">Sweep 0.85-1.15</button>
 </div>
 </div></details>
+<details class="setup"><summary>Geschwindigkeit-Demo (Tischtest)</summary><div class="inside">
+<div class="row"><span>Reed-Simulation</span><strong id="dev_speed_sim">-</strong></div>
+<div style="display:flex;gap:8px;margin-top:8px">
+<button type="button" onclick="devSpeedSim(false)">AUS (echter Reed)</button>
+<button type="button" onclick="devSpeedSim(true)">AN (aus Drehzahl)</button>
+</div>
+<p class="hint">Simuliert Reed-Pulse aus der aktuellen 123-Drehzahl (grobe Faustformel, kein Gang-Modell) &mdash; Tacho/Odo/Trip laufen dann ohne drehendes Rad mit. Zum Testen am Schreibtisch; im Bus AUS lassen.</p>
+</div></details>
 <details class="setup"><summary>Anzeigefrequenz</summary><div class="inside">
 <div class="row"><span>Aktuell</span><strong id="dev_poll_freq">5 Hz</strong></div>
 <div style="display:flex;gap:8px;margin-top:8px">
@@ -679,8 +687,8 @@ Leer lassen + speichern = zurueck zur Werks-MAC. <b>Loest einen Neustart aus.</b
 <tr><td style="padding:6px 4px">DS3231 SCL</td><td><strong>5</strong></td></tr>
 <tr><td style="padding:6px 4px">Speed-Reed (MC-38)</td><td><strong>12</strong></td><td>direkt Reed &harr; GND, interner Pullup, 10 Magnete/Radumdrehung</td></tr>
 <tr><td style="padding:6px 4px">Status-LED</td><td><strong>2</strong></td><td>an = Lambda-Status OK</td></tr>
-<tr><td style="padding:6px 4px">Spartan-UART RX</td><td><strong>26</strong></td><td rowspan="2">9600 8N1 &mdash; Spartan3-V2-Controller (GETFW/GETCANID etc.), &uuml;ber Pegelwandler/Spannungsteiler (Spartan-Seite &gt;3V3!)</td></tr>
-<tr><td style="padding:6px 4px">Spartan-UART TX</td><td><strong>27</strong></td></tr>
+<tr><td style="padding:6px 4px">Spartan-UART RX</td><td><strong>16</strong></td><td rowspan="2">9600 8N1 &mdash; Spartan3-V2-Controller (GETFW/GETCANID etc.), &uuml;ber Pegelwandler/Spannungsteiler (Spartan-Seite &gt;3V3!)</td></tr>
+<tr><td style="padding:6px 4px">Spartan-UART TX</td><td><strong>17</strong></td></tr>
 <tr><td style="padding:6px 4px">UART-Bridge RX/TX</td><td><strong id="plan_uart">aus</strong></td><td>optionaler 123-Bridge-ESP (Dev-Tab, 0 = deaktiviert) &mdash; nicht zu verwechseln mit der Spartan-UART oben</td></tr>
 <tr><td style="padding:6px 4px">Analog-Fallback</td><td><strong>34</strong></td><td>Spartan 0-5V-Ausgang &uuml;ber Teiler (nur ohne CAN)</td></tr>
 </table>
@@ -718,6 +726,7 @@ async function wifiConnect(){
 }
 async function devFeat(name,val){try{await fetch('/hub_feat?name='+name+'&val='+val);}catch(e){}}
 async function devLambda(mode){try{await fetch('/lambda_test',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'mode='+mode});}catch(e){}}
+async function devSpeedSim(on){try{await fetch('/speed_sim',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'on='+(on?'1':'0')});}catch(e){}}
 async function devBleScan(){
   const status=document.getElementById('dev_scan_status');
   const results=document.getElementById('dev_scan_results');
@@ -1563,6 +1572,7 @@ async function refresh() {
       if (ctlTire && document.activeElement !== ctlTire) ctlTire.value = d.speed_tire_mm ?? 2147;
       if (ctlTrim && document.activeElement !== ctlTrim) ctlTrim.value = d.speed_trim_permil ?? 1000;
       if (ctlPpr && document.activeElement !== ctlPpr) ctlPpr.value = d.speed_pulses_per_rev ?? 10;
+      { const s=document.getElementById('dev_speed_sim'); if(s) s.textContent = d.speed_sim_active ? 'AN (simuliert)' : 'AUS (echter Reed)'; }
     }
     document.getElementById('jsondump').textContent = JSON.stringify(d, null, 2);
   } catch (e) {

@@ -266,6 +266,16 @@ void setupWebGui()
         lambdaTestModeText() + "\"}";
     server.send(200, "application/json", body);
   });
+#if SPEED_REED_PIN >= 0
+  // [SPEED-SIM] Dev-Tab-Schalter: Reed-Pulse aus der aktuellen 123-Drehzahl
+  // simulieren statt echte GPIO-Flanken zu zaehlen -- s. updateSpeedReed().
+  server.on("/speed_sim", HTTP_POST, []() {
+    speedSimActive = server.arg("on") == "1";
+    logHubEvent("speed_sim", speedSimActive ? "on" : "off");
+    server.send(200, "application/json",
+                speedSimActive ? "{\"ok\":true,\"active\":true}" : "{\"ok\":true,\"active\":false}");
+  });
+#endif
   server.on("/api/ota/progress", HTTP_GET, []() {
     server.sendHeader("Connection", "close");
     server.send(200, "application/json", otaProgressJson());
