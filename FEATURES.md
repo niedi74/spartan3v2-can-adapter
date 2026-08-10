@@ -116,6 +116,28 @@ Ursprünglich fertig bestücktes Board (Referenz, aktuell discontinued, s.o.):
   JLCPCB-/PCBWay-SMT-Assembly-Service bestücken lassen (kein Handlöten, Kosten für
   Kleinserie überschaubar).
 
+### Bezugsquellen-Recherche (Chip/Board)
+
+- **Bare TPIC8101DW-Chip (SOP20):** problemlos auf eBay verfügbar, mehrere Anbieter
+  (überwiegend China-Versand), wenige Euro pro Stück je nach Stückzahl — Chip-Verfügbarkeit
+  ist also **kein Blocker** für den DIY-/PCBA-Weg, unabhängig vom Bylund-Board-Status.
+- **TI TPIC8101EVM** (offizielles Evaluierungsboard von Texas Instruments, inkl. USB-
+  Interface + Software): <https://www.ti.com/tool/de-de/TPIC8101EVM> — **~156,45 USD**.
+  Funktioniert, aber für den Hobby-Rahmen hier vergleichsweise teuer und eher auf
+  professionelle Entwicklung ausgelegt (eigenes Formfaktor/Interface, nicht 1:1 wie das
+  Arduino-Shield-Format). Als Fallback denkbar, aber nicht die erste Wahl.
+- **RS Online Teilenummer 2872558** — geprüft und **kein Treffer**: das ist das "Arduino
+  Sensor Kit-Base" (Grove-Anschluss-Basisplatine für diverse Sensormodule), hat nichts mit
+  Klopferkennung/TPIC8101 zu tun. Nicht weiterverfolgen.
+- **Spanischer eBay-Verkäufer/Weiterentwickler** (Hinweis aus dem Gespräch, dass jemand in
+  Spanien Bylund-Knock-Shield-Nachbauten verkauft/weiterentwickelt): über Websuche
+  **nicht auffindbar/nicht bestätigt** — falls der Nutzer den Listing-Link/Verkäufernamen
+  findet, gegenchecken (Preis, ob fertig bestückt, echte Weiterentwicklung vs. reiner
+  Nachbau).
+- **Kosten-Fazit:** DIY via PCBA-Assembly (Chip ~wenige Euro + Kleinserie-Bestückung bei
+  JLCPCB/PCBWay, grob 20-40 € Gesamt für z.B. 5 Boards) bleibt der günstigste verlässliche
+  Weg gegenüber TI-EVM (~156 USD) oder dem Warten auf ein gebrauchtes/NOS-Bylund-Board.
+
 ### Offene Punkte
 
 - Magneti-Marelli-Sensor-Kompatibilität ungeprüft.
