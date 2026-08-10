@@ -48,24 +48,38 @@ schreibend auf die 123 zugreift, aber ein zusätzliches Stück Arbeit, kein Selb
 
 ### Sensor
 
-- **Bosch KS4-Serie**, Hersteller-Empfehlung (siehe Auswerte-Hardware unten) konkret:
-  **Bosch KS4-P, 0 261 231 173**. Direkt im Bylund-Automotive-Shop kaufbar (Nutzer-Wahl,
-  Stand dieser Session): <https://www.bylund-automotive.com/store/#!/products/-knock-sensor-ks4-p>.
+- **Entscheidung (Stand dieser Session): Bosch 0 261 231 095/096** (breitbandiger
+  "Flat Response"-Universalsensor, in der DIY-ECU-Szene verbreitet) — statt des von Bylund
+  fürs Knock-Shield-Referenzdesign empfohlenen KS4-P (0 261 231 173).
+  **Zu beachten:** Das Bylund-Referenzdesign (s.u.) ist auf den KS4-P abgestimmt
+  (Eingangsverstärkung per R1-R4, Standard-Gain 1x bei 100k-Widerständen laut Technical
+  Manual). Bei abweichender Empfindlichkeit des 095/096 ggf. R1-R4 anpassen (Formel:
+  A_IN = R2/R1 bzw. R4/R3) oder per SPI-Programmable-Gain (0.111-2.000) ausgleichen — vor
+  dem Bau/Bestücken gegenchecken, nicht blind übernehmen.
 - 1 Sensor pro Zylinderbank (2 Stück für den Boxer), zentral zwischen den beiden Zylindern
   einer Bank direkt ins Kurbelgehäuse verschraubt (Metallkontakt, kein Dichtmittel
   drunter). Beim VW-T3-Spätmodell/Porsche-914-Motor (Typ 4, baugleiche Motorfamilie) ist
   dafür die Bohrung bekannt, an der sonst der Temperatursensor sitzt — ggf. Platzkonflikt
   mit dem CHT-Sensor-Projekt (`spartan3-headtemp`) prüfen, falls dieselbe Bohrung gemeint
   ist.
-- **Alternativ genannt, aber unklar/ungeprüft:** Bosch 0 261 231 095/096 (breitbandiger
-  "Flat Response"-Universalsensor, in der DIY-ECU-Szene verbreitet), Bosch 0 261 231 038
-  (resonant/frequenzfest auf ein bestimmtes OEM-Motor-Modell abgestimmt — für einen
-  Boxer-Umbau ohne bekannte Resonanzfrequenz eher ungeeignet), Magneti Marelli
-  064836009010 (Kompatibilität ungeprüft, keine belastbaren Daten gefunden).
+- Verworfen: Bosch 0 261 231 038 (resonant/frequenzfest auf ein bestimmtes OEM-Motor-
+  Modell abgestimmt — für einen Boxer-Umbau ohne bekannte Resonanzfrequenz eher
+  ungeeignet), Magneti Marelli 064836009010 (Kompatibilität ungeprüft, keine belastbaren
+  Daten gefunden), Bosch KS4-P (0 261 231 173, Bylund-Empfehlung — Board discontinued,
+  siehe unten, Sensor selbst aber weiterhin separat erhältlich).
 
 ### Auswerte-Hardware: "Knock Shield for Arduino" (Bylund Automotive)
 
-Fertig bestücktes Board, **kein eigenes SMD-Löten nötig** (war ein expliziter Blocker):
+**Status-Update (Bylund-Produkttabelle geprüft): BEIDE Knock-Shield-Versionen (6 000 000 011
+und die neuere 6 000 000 021) sind "Discontinued"** — beim Hersteller aktuell NICHT mehr
+kaufbar. Das "fertig bestückt kaufen, kein Löten nötig"-Vorhaben funktioniert also nicht
+mehr wie ursprünglich gedacht. Optionen:
+- Gebraucht/NOS (eBay, Kleinanzeigen, Restposten) suchen.
+- **DIY via PCBA-Assembly-Service** (JLCPCB/PCBWay bestücken nach dem offen dokumentierten
+  Schaltplan, s.u.) bleibt der verlässliche Weg — der TPIC8101-Chip selbst ist bei
+  Mouser/DigiKey weiterhin regulär lieferbar, nur Bylunds fertiges Board ist es nicht.
+
+Ursprünglich fertig bestücktes Board (Referenz, aktuell discontinued, s.o.):
 <https://www.bylund-automotive.com/educative/knock/>
 
 - **Chip:** TI **TPIC8101DW**, pinkompatibel zu Renesas HIP9011ABZ.
